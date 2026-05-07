@@ -31,7 +31,6 @@ const ctx = {
 	callerContext: {
 		baseUrl: 'https://heykody.dev',
 		user: { userId: 'user-123' },
-		homeConnectorId: null,
 		remoteConnectors: null,
 		storageContext: null,
 	},

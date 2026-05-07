@@ -2,17 +2,17 @@ import { type RemoteConnectorRef } from '@kody-internal/shared/remote-connectors
 import { defineCapability } from '#mcp/capabilities/define-capability.ts'
 import { defineDomain } from '#mcp/capabilities/define-domain.ts'
 import { type CapabilityDomain } from '#mcp/capabilities/domain-metadata.ts'
-import { createRemoteConnectorMcpClient } from '#worker/home/client.ts'
+import { createRemoteConnectorMcpClient } from '#worker/remote-connector/client.ts'
 import {
 	formatRemoteConnectorUnavailableMessage,
 	getRemoteConnectorStatus,
-} from '#worker/home/status.ts'
+} from '#worker/remote-connector/status.ts'
 import {
 	remoteConnectorCapabilityPrefix,
 	remoteConnectorDomainId,
 } from '#worker/remote-connector/remote-domain-id.ts'
 import { type Capability, type DomainSpec } from '#mcp/capabilities/types.ts'
-import { type HomeConnectorSnapshot } from '#worker/home/types.ts'
+import { type RemoteConnectorSnapshot } from '#worker/remote-connector/types.ts'
 
 type RemoteToolCapabilityBinding = {
 	capabilityName: string
@@ -35,8 +35,8 @@ function createCapabilityNameFromPrefix(prefix: string, toolName: string) {
 }
 
 function buildKeywords(
-	snapshot: HomeConnectorSnapshot,
-	tool: HomeConnectorSnapshot['tools'][number],
+	snapshot: RemoteConnectorSnapshot,
+	tool: RemoteConnectorSnapshot['tools'][number],
 	ref: RemoteConnectorRef,
 	extraRoots: ReadonlyArray<string>,
 ) {
@@ -64,8 +64,8 @@ function buildKeywords(
 }
 
 function createCapabilityFromTool(input: {
-	snapshot: HomeConnectorSnapshot
-	tool: HomeConnectorSnapshot['tools'][number]
+	snapshot: RemoteConnectorSnapshot
+	tool: RemoteConnectorSnapshot['tools'][number]
 	ref: RemoteConnectorRef
 	domainId: CapabilityDomain
 	capabilityPrefix: string
@@ -157,41 +157,19 @@ function createCapabilityFromTool(input: {
 export async function synthesizeRemoteToolDomain(
 	env: Env,
 	ref: RemoteConnectorRef,
-	allRefs: ReadonlyArray<RemoteConnectorRef>,
 ): Promise<SynthesizedRemoteConnectorDomain | null> {
 	const client = createRemoteConnectorMcpClient(env, ref.kind, ref.instanceId)
 	const snapshot = await client.getSnapshot()
 	if (!snapshot || snapshot.tools.length === 0) return null
 
 	const domainId = remoteConnectorDomainId(ref)
-	const capabilityPrefix = remoteConnectorCapabilityPrefix(ref, allRefs)
+	const capabilityPrefix = remoteConnectorCapabilityPrefix(ref)
 	const k = ref.kind.trim().toLowerCase()
-	const isOnlyBuiltinHomeDomain =
-		k === 'home' &&
-		allRefs.length === 1 &&
-		allRefs[0]?.kind === 'home' &&
-		allRefs[0]?.instanceId.trim() === 'default'
+	const domainIdForCapabilities: CapabilityDomain = domainId
 
-	const domainIdForCapabilities: CapabilityDomain = isOnlyBuiltinHomeDomain
-		? 'home'
-		: domainId
+	const domainKeywordRoots = [k, 'integration', 'connector']
 
-	const domainKeywordRoots =
-		k === 'home'
-			? ([
-					'home',
-					'roku',
-					'lutron',
-					'venstar',
-					'automation',
-					'devices',
-				] as const)
-			: [k, 'integration', 'connector']
-
-	const domainDescription =
-		k === 'home'
-			? 'Home automation capabilities discovered from the connected home connector.'
-			: `Capabilities discovered from the connected "${ref.kind}" remote connector ("${ref.instanceId}").`
+	const domainDescription = `Capabilities discovered from the connected "${ref.kind}" remote connector ("${ref.instanceId}").`
 
 	const capabilities: Array<Capability> = []
 	const bindings: Record<string, RemoteToolCapabilityBinding> = {}

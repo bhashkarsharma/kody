@@ -22,9 +22,9 @@ vi.mock('cloudflare:workers', () => ({
 	},
 }))
 
-const { HomeConnectorSession } = await import('./session.ts')
+const { RemoteConnectorSession } = await import('./session.ts')
 
-type StoredHomeConnectorSessionState = {
+type StoredRemoteConnectorSessionState = {
 	persisted: {
 		connectorId: string | null
 		connectorKind: string | null
@@ -47,7 +47,7 @@ async function waitForRestoreState(state: DurableObjectState) {
 
 function createState(
 	input: {
-		storedState?: StoredHomeConnectorSessionState | null
+		storedState?: StoredRemoteConnectorSessionState | null
 		webSockets?: Array<WebSocket>
 	} = {},
 ) {
@@ -91,7 +91,7 @@ test('constructor restores persisted state through blockConcurrencyWhile', async
 		webSockets: [{} as WebSocket],
 	})
 
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,
@@ -123,7 +123,7 @@ test('snapshot returns null when persisted connector has no live websocket', asy
 			tools: [{ name: 'bond_shade_set_position' }],
 		},
 	})
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,
@@ -153,7 +153,7 @@ test('websocket close clears connectedAt and tools from persisted state', async 
 		},
 		webSockets: [{} as WebSocket],
 	})
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,
@@ -168,7 +168,7 @@ test('websocket close clears connectedAt and tools from persisted state', async 
 	await session.webSocketClose({} as WebSocket, 1006, 'network', false)
 
 	expect(captureMessageMock).toHaveBeenCalledWith(
-		'Home connector session websocket closed code=1006 wasClean=false reason=network',
+		'Remote connector session websocket closed code=1006 wasClean=false reason=network',
 		expect.objectContaining({
 			level: 'warning',
 		}),
@@ -198,7 +198,7 @@ test('stale websocket close preserves active connection state', async () => {
 		},
 		webSockets: [activeSocket, staleSocket],
 	})
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,
@@ -235,7 +235,7 @@ test('websocket heartbeat work is returned so the runtime can wait for persisten
 		},
 		webSockets: [{} as WebSocket],
 	})
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,
@@ -255,7 +255,7 @@ test('websocket heartbeat work is returned so the runtime can wait for persisten
 
 	const persisted = persistedEntries.get(
 		'home-connector-session-state',
-	) as StoredHomeConnectorSessionState
+	) as StoredRemoteConnectorSessionState
 	expect(persisted).toMatchObject({
 		persisted: {
 			connectorId: 'default',
@@ -282,7 +282,7 @@ test('websocket error clears connected state when the socket is gone', async () 
 		},
 		webSockets: [{} as WebSocket],
 	})
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,
@@ -297,7 +297,7 @@ test('websocket error clears connected state when the socket is gone', async () 
 	await session.webSocketError({} as WebSocket, new Error('abnormal close'))
 
 	expect(captureMessageMock).toHaveBeenCalledWith(
-		'Home connector session websocket closed code=1011 wasClean=false reason=abnormal close',
+		'Remote connector session websocket closed code=1011 wasClean=false reason=abnormal close',
 		expect.objectContaining({
 			level: 'warning',
 		}),
@@ -326,7 +326,7 @@ test('websocket error and close only disconnect once for the same socket', async
 		},
 		webSockets: [socket],
 	})
-	const session = new HomeConnectorSession(
+	const session = new RemoteConnectorSession(
 		{
 			storage: state.storage,
 			getWebSockets: state.getWebSockets,

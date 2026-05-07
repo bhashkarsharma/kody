@@ -41,7 +41,6 @@ test('resolvePackageMountedSecret rejects calls without package appId context', 
 					email: 'user@example.com',
 					displayName: 'User',
 				},
-				homeConnectorId: null,
 				remoteConnectors: null,
 				repoContext: null,
 				storageContext: {
@@ -69,7 +68,6 @@ test('resolvePackageMountedSecret rejects mismatched package appId context', asy
 					email: 'user@example.com',
 					displayName: 'User',
 				},
-				homeConnectorId: null,
 				remoteConnectors: null,
 				repoContext: null,
 				storageContext: {
@@ -128,7 +126,6 @@ test('resolvePackageMountedSecret resolves mounted secret when package appId mat
 					email: 'user@example.com',
 					displayName: 'User',
 				},
-				homeConnectorId: null,
 				remoteConnectors: null,
 				repoContext: null,
 				storageContext: {

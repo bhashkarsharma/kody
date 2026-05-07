@@ -70,7 +70,6 @@ test('getPackageCapability returns ready-to-import package exports', async () =>
 					email: 'me@kentcdodds.com',
 					displayName: 'Kent',
 				},
-				homeConnectorId: null,
 				remoteConnectors: null,
 				storageContext: null,
 				repoContext: null,

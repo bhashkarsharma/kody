@@ -135,7 +135,6 @@ export async function registerOpenGeneratedUiTool(agent: McpRegistrationAgent) {
 							baseUrl: callerContext.baseUrl,
 							user: callerContext.user,
 							appId: null,
-							homeConnectorId: callerContext.homeConnectorId ?? null,
 						})
 					: null
 			const structuredContent = {

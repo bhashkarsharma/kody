@@ -37,7 +37,6 @@ function createCallerContext() {
 	return {
 		baseUrl: 'https://heykody.dev',
 		user: { userId: 'user-123' },
-		homeConnectorId: null,
 		remoteConnectors: null,
 		storageContext: null,
 	}

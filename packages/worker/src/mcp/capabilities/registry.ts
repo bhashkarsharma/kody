@@ -6,7 +6,7 @@ import { builtinDomains } from './builtin-domains.ts'
 import {
 	type SynthesizedRemoteConnectorDomain,
 	synthesizeRemoteToolDomain,
-} from './home/index.ts'
+} from './remote-connector/index.ts'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 import { normalizeRemoteConnectorRefs } from '@kody-internal/shared/remote-connectors.ts'
 
@@ -36,7 +36,7 @@ export async function getCapabilityRegistryForContext(input: {
 	const synthesizedDomains: Array<SynthesizedRemoteConnectorDomain['domain']> =
 		[]
 	const settled = await Promise.allSettled(
-		refs.map((ref) => synthesizeRemoteToolDomain(input.env, ref, refs)),
+		refs.map((ref) => synthesizeRemoteToolDomain(input.env, ref)),
 	)
 	for (const [index, outcome] of settled.entries()) {
 		if (outcome.status === 'fulfilled' && outcome.value) {

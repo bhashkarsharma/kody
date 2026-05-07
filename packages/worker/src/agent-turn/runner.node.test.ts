@@ -83,7 +83,6 @@ test('runAgentTurn emits deltas and a final structured result', async () => {
 		callerContext: {
 			baseUrl: 'https://heykody.dev',
 			user: { userId: 'user-123' },
-			homeConnectorId: null,
 			remoteConnectors: null,
 			storageContext: null,
 		},
@@ -170,7 +169,6 @@ test('runAgentTurn marks no_new_information for repeated tool calls', async () =
 		callerContext: {
 			baseUrl: 'https://heykody.dev',
 			user: { userId: 'user-123' },
-			homeConnectorId: null,
 			remoteConnectors: null,
 			storageContext: null,
 		},
@@ -215,7 +213,6 @@ test('runAgentTurn forwards cache-aware system and message hints to the AI runti
 		callerContext: {
 			baseUrl: 'https://heykody.dev',
 			user: { userId: 'user-123' },
-			homeConnectorId: null,
 			remoteConnectors: null,
 			storageContext: null,
 		},

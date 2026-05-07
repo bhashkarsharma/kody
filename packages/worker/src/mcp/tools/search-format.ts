@@ -79,13 +79,6 @@ export type SearchResultStructuredContent = {
 		retrieverResults?: Array<PackageRetrieverSurfaceResult>
 		retrieverWarnings?: Array<string>
 	}
-	homeConnectorStatus?: {
-		connectorKind: string
-		connectorId: string
-		state: string
-		connected: boolean
-		toolCount: number
-	}
 	remoteConnectorStatuses?: Array<{
 		connectorKind: string
 		connectorId: string

@@ -15,7 +15,6 @@ type GeneratedUiAppSessionPayload = {
 	session_id: string
 	app_id: string | null
 	params: Record<string, unknown>
-	home_connector_id: string | null
 	user: GeneratedUiSessionUser
 	iat: number
 	exp: number
@@ -41,7 +40,6 @@ export async function createGeneratedUiAppSession(input: {
 	user: { userId: string; email: string; displayName?: string }
 	appId?: string | null
 	params?: Record<string, unknown>
-	homeConnectorId?: string | null
 }) {
 	const now = Date.now()
 	const sessionId = crypto.randomUUID()
@@ -53,7 +51,6 @@ export async function createGeneratedUiAppSession(input: {
 			session_id: sessionId,
 			app_id: input.appId ?? null,
 			params: input.params ?? {},
-			home_connector_id: input.homeConnectorId ?? null,
 			user: { userId: input.user.userId, email: input.user.email },
 			iat: now,
 			exp: expiresAtMs,

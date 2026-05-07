@@ -47,7 +47,6 @@ async function getOpenGeneratedUiHandler() {
 				userId: 'user-123',
 				email: 'user@example.com',
 			},
-			homeConnectorId: null,
 		})),
 		requireDomain: vi.fn(() => 'https://example.com'),
 	} as never)

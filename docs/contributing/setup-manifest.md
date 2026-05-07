@@ -127,16 +127,12 @@ Configure these GitHub Actions secrets and variables for workflows:
   paste the DSN; syncs to the Worker as a secret when set in GitHub Actions)
 - `CAPABILITY_REINDEX_SECRET` (optional; triggers post-deploy Vectorize reindex
   when set; synced like other optional secrets)
+- `REMOTE_CONNECTOR_SECRETS` (optional GitHub **secret**; JSON object mapping
+  remote connector `"kind:instanceId"` keys to shared secret strings; synced to
+  the production Worker as a secret when set)
 - `SENTRY_AUTH_TOKEN` (optional GitHub **secret**; Sentry auth token with
   `project:releases` / source map upload permissions — used only by CI to run
   `npm run sentry:upload-sourcemaps` after deploy)
-- `DOCKERHUB_USERNAME` (required in the
-  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
-  repo to publish the Docker image)
-- `DOCKERHUB_TOKEN` (required Docker Hub access token/password for image
-  publish)
-- `HOME_CONNECTOR_DOCKER_IMAGE` (required GitHub **variable**; Docker Hub image
-  name such as `kentcdodds/kody-home-connector`)
 - **Repository variables** `SENTRY_ORG` and `SENTRY_PROJECT` (optional; Sentry
   organization and project **slugs** for source map upload — same values as in
   the Sentry wizard’s `--org` / `--project` flags)
@@ -192,43 +188,11 @@ How to get/set each value:
     `/__maintenance/reindex-capabilities` and `/__maintenance/reindex-skills`
     with `Authorization: Bearer …` to refresh capability and user-skill
     embeddings.
-- `DOCKERHUB_USERNAME`
-  - Use your Docker Hub username or organization service account name.
-  - Store it as the repository secret `DOCKERHUB_USERNAME`.
-- `DOCKERHUB_TOKEN`
-  - In Docker Hub, create an access token for image publish access.
-  - Store it as the repository secret `DOCKERHUB_TOKEN`.
-- `HOME_CONNECTOR_DOCKER_IMAGE`
-  - In GitHub: **Settings → Secrets and variables → Actions → Variables**, add
-    `HOME_CONNECTOR_DOCKER_IMAGE` with the target Docker Hub image name (for
-    example `kentcdodds/kody-home-connector`).
-  - The Home Connector publish workflow pushes both `latest` and
-    `sha-<shortsha>` tags to that image whenever `main` changes in
-    `kentcdodds/kody-home-connector`.
-- Home connector runtime Sentry env (set these on the deployed container or the
-  service that runs the published Docker image, not in the GitHub Actions
-  workflow itself):
-  - `HOME_CONNECTOR_SENTRY_DSN` (optional; enables Sentry error reporting and
-    tracing for the Node-based home connector service)
-  - `HOME_CONNECTOR_SENTRY_ENVIRONMENT` (optional; forwarded to the connector as
-    `SENTRY_ENVIRONMENT`, defaults to `production` in the published Docker
-    image)
-  - `HOME_CONNECTOR_SENTRY_TRACES_SAMPLE_RATE` (optional `0`–`1`; forwarded to
-    the connector as `SENTRY_TRACES_SAMPLE_RATE`, defaults to **`1.0`** in the
-    published Docker image)
-  - `APP_COMMIT_SHA` is also baked into the published Docker image and used by
-    the connector’s Sentry setup as the release identifier
-  - Island router SSH diagnostics (optional, typed allowlist):
-    - `HOME_CONNECTOR_ISLAND_ROUTER_HOST`
-    - `HOME_CONNECTOR_ISLAND_ROUTER_PORT`
-    - `HOME_CONNECTOR_ISLAND_ROUTER_USERNAME`
-    - `HOME_CONNECTOR_ISLAND_ROUTER_PRIVATE_KEY_PATH`
-    - `HOME_CONNECTOR_ISLAND_ROUTER_KNOWN_HOSTS_PATH` or
-      `HOME_CONNECTOR_ISLAND_ROUTER_HOST_FINGERPRINT`
-    - `HOME_CONNECTOR_ISLAND_ROUTER_COMMAND_TIMEOUT_MS`
-  - When enabling Island router diagnostics in Docker, mount the SSH private key
-    (and optionally the known-hosts file) read-only into the container and point
-    the env vars at those mounted paths.
+- `REMOTE_CONNECTOR_SECRETS` (optional)
+  - Store a JSON object as the repository secret `REMOTE_CONNECTOR_SECRETS`.
+    Each key must match the connector kind and instance id, such as
+    `{"home:default":"<shared-secret>"}`. The connector process must use the
+    matching shared secret when it opens its Worker websocket session.
 
 Preview deploys for pull requests create a separate Worker per PR named
 `<app-name>-pr-<number>` (for kody: `kody-pr-123`) plus one Worker per mock

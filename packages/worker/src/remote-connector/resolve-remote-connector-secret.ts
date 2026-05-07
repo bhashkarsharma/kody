@@ -1,8 +1,3 @@
-/**
- * Resolve the shared secret for a remote connector WebSocket hello.
- * Precedence: REMOTE_CONNECTOR_SECRETS map key "kind:instanceId", then
- * legacy HOME_CONNECTOR_SHARED_SECRET when kind is "home".
- */
 function parseSecretsMapFromEnv(value: unknown): Record<string, string> | null {
 	if (!value) return null
 	if (typeof value === 'object' && !Array.isArray(value)) {
@@ -39,9 +34,6 @@ export function resolveRemoteConnectorSharedSecret(
 		if (typeof fromMap === 'string' && fromMap.trim()) {
 			return fromMap.trim()
 		}
-	}
-	if (k === 'home') {
-		return env.HOME_CONNECTOR_SHARED_SECRET?.trim()
 	}
 	return undefined
 }

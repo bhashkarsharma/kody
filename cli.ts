@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { platform } from 'node:os'
-import { resolve } from 'node:path'
 import readline from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import getPort, { clearLockedPorts } from 'get-port'
@@ -14,7 +13,6 @@ import {
 	createProcessOutputController,
 	type ProcessOutputMode,
 } from './tools/dev-process-output.ts'
-import { getForwardedHomeConnectorEnv } from './tools/home-connector-env.ts'
 import { resolveNpmCommand } from './tools/node-runtime.ts'
 
 const defaultWorkerPort = 3742
@@ -71,7 +69,6 @@ const extraArgs = process.argv.slice(2)
 let shutdown: (() => void) | null = null
 let devChildren: Array<ChildProcess> = []
 let workerOrigin = ''
-let homeConnectorOrigin = ''
 let mockAiProcess: ChildProcess | null = null
 let mockCloudflareProcess: ChildProcess | null = null
 let mockEnvOverrides: Record<string, string> = {}
@@ -287,24 +284,6 @@ async function restartDev(
 	clearLockedPorts()
 	const workerPort = await getPort({ port: portRange })
 	workerOrigin = resolveWorkerOrigin(workerPort)
-	const homeConnectorId = process.env.HOME_CONNECTOR_ID?.trim() || 'default'
-	const homeConnectorSharedSecret =
-		process.env.HOME_CONNECTOR_SHARED_SECRET?.trim() ||
-		`local-home-connector-${randomUUID()}`
-	const desiredHomeConnectorPort = Number.parseInt(
-		process.env.HOME_CONNECTOR_PORT ?? '4040',
-		10,
-	)
-	const homeConnectorPortRange = Array.from(
-		{ length: 10 },
-		(_, index) => desiredHomeConnectorPort + index,
-	)
-	const homeConnectorPort = await getPort({ port: homeConnectorPortRange })
-	homeConnectorOrigin = `http://localhost:${homeConnectorPort}`
-	const forwardedHomeConnectorEnv = getForwardedHomeConnectorEnv(process.env)
-	const homeConnectorDir =
-		process.env.HOME_CONNECTOR_DIR?.trim() ||
-		resolve('..', 'kody-home-connector')
 	const client = runNpmScript(
 		'dev:client',
 		[],
@@ -317,7 +296,6 @@ async function restartDev(
 	)
 	const workerVarEnv = {
 		...mockEnv,
-		HOME_CONNECTOR_SHARED_SECRET: homeConnectorSharedSecret,
 	}
 	const workerVarArgs = Object.entries(workerVarEnv).flatMap(([key, value]) => [
 		'--var',
@@ -328,7 +306,6 @@ async function restartDev(
 		[...extraArgs, ...workerVarArgs],
 		{
 			PORT: String(workerPort),
-			HOME_CONNECTOR_SHARED_SECRET: homeConnectorSharedSecret,
 			...mockEnv,
 		},
 		{
@@ -343,30 +320,11 @@ async function restartDev(
 			`Main worker did not become ready within ${workerReadyTimeoutMs}ms.`,
 		)
 	}
-	const homeConnector = runNpmScript(
-		'dev',
-		[],
-		{
-			...forwardedHomeConnectorEnv,
-			PORT: String(homeConnectorPort),
-			HOME_CONNECTOR_ID: homeConnectorId,
-			HOME_CONNECTOR_SHARED_SECRET: homeConnectorSharedSecret,
-			WORKER_BASE_URL: workerOrigin,
-		},
-		{
-			label: 'dev:home-connector',
-			mode: 'live',
-			cwd: homeConnectorDir,
-		},
-	)
-	devChildren = [client, worker, homeConnector]
+	devChildren = [client, worker]
 
 	if (announce) {
 		console.log(dim('\nRestarted dev servers.'))
 		logAppRunning(() => workerOrigin)
-		console.log(
-			`${dim('Home connector running at')} ${bright(homeConnectorOrigin)}`,
-		)
 	}
 }
 

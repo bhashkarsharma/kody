@@ -95,7 +95,6 @@ export function createConnectSecretApiHandler(env: Env) {
 					baseUrl,
 					user: user.mcpUser,
 					appId,
-					homeConnectorId: null,
 				})
 				return jsonResponse({
 					ok: true,

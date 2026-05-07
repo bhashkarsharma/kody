@@ -127,21 +127,7 @@ Optional Worker secrets/vars (see `packages/worker/src/env-schema.ts` and
   local repo create/get/list/token/fork calls do not need the live Artifacts
   REST API.
 
-## Home connector bridge
-
-Optional Worker secret/var (see `packages/worker/src/env-schema.ts` and
-`packages/worker/src/home/session.ts`):
-
-- The home connector lives in
-  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
-  and executes directly on Node 24. Local and container runs therefore need Node
-  24 with `node:sqlite` support.
-- `HOME_CONNECTOR_SHARED_SECRET` — shared secret used by the locally running
-  home connector service when it opens the outbound WebSocket session to the
-  worker. When unset, the worker rejects home connector registration and the
-  internal home MCP bridge cannot route `home` capabilities.
-
-### Remote connector secrets (Worker)
+## Remote connector secrets
 
 See `packages/worker/src/env-schema.ts` and
 `packages/worker/src/remote-connector/resolve-remote-connector-secret.ts`.
@@ -149,114 +135,14 @@ See `packages/worker/src/env-schema.ts` and
 - `REMOTE_CONNECTOR_SECRETS` — optional Worker **secret** (JSON string) whose
   value is a JSON object mapping **`"kind:instanceId"`** keys (trimmed, kind
   lowercased) to **shared secret strings** for **`connector.hello`**. When a key
-  is present, it overrides per-connector lookup before any kind-specific
-  fallback. At Worker boot, invalid JSON or malformed keys fail env validation
-  with a clear error. At runtime, if the value is a plain string in a test
-  harness, malformed JSON is logged and ignored for map lookup only.
-- For **`kind: home`**, if a key is missing in the map, the worker falls back to
-  **`HOME_CONNECTOR_SHARED_SECRET`**. Non-`home` kinds have **no** legacy
-  fallback; they must appear in the map (or hello is rejected).
+  is present, it authorizes that connector instance. Production deploys sync the
+  value from the GitHub Actions secret with the same name. At Worker boot,
+  invalid JSON or malformed keys fail env validation with a clear error. At
+  runtime, if the value is a plain string in a test harness, malformed JSON is
+  logged and ignored for map lookup only.
 
 Authoring guide for outbound WebSocket services:
 [`architecture/remote-connectors.md`](./architecture/remote-connectors.md).
-
-- `HOME_CONNECTOR_*` — when you start the full local stack with `npm run dev`,
-  any `HOME_CONNECTOR_`-prefixed variable is forwarded to the child connector
-  process with the prefix removed. For example, `HOME_CONNECTOR_MOCKS=false`
-  sets `MOCKS=false` for the home connector, and
-  `HOME_CONNECTOR_ROKU_DISCOVERY_URL=...` sets `ROKU_DISCOVERY_URL=...`. Set
-  `HOME_CONNECTOR_DIR=...` to override the local checkout path used by the Kody
-  dev launcher. Prefix forwarding also applies to
-  `HOME_CONNECTOR_LUTRON_DISCOVERY_URL=...`, `HOME_CONNECTOR_SENTRY_DSN`,
-  `HOME_CONNECTOR_SENTRY_ENVIRONMENT`,
-  `HOME_CONNECTOR_SENTRY_TRACES_SAMPLE_RATE`,
-  `HOME_CONNECTOR_ISLAND_ROUTER_HOST=...`,
-  `HOME_CONNECTOR_ISLAND_ROUTER_PORT=...`,
-  `HOME_CONNECTOR_ISLAND_ROUTER_USERNAME=...`,
-  `HOME_CONNECTOR_ISLAND_ROUTER_PRIVATE_KEY_PATH=...`,
-  `HOME_CONNECTOR_ISLAND_ROUTER_KNOWN_HOSTS_PATH=...`,
-  `HOME_CONNECTOR_ISLAND_ROUTER_HOST_FINGERPRINT=...`, and
-  `HOME_CONNECTOR_ISLAND_ROUTER_COMMAND_TIMEOUT_MS=...`.
-- `ROKU_DISCOVERY_URL` — optional connector env var. Defaults to
-  `ssdp://239.255.255.250:1900`. Mocked connector runs should set an explicit
-  value such as `http://roku.mock.local/discovery`.
-- `SENTRY_DSN` — optional connector env var. When set for the home connector,
-  the service initializes `@sentry/node` and reports startup errors, websocket
-  failures, and handled operational exceptions. Use `HOME_CONNECTOR_SENTRY_DSN`
-  when launching through `npm run dev`.
-- `SENTRY_ENVIRONMENT` — optional connector env var. The published Docker image
-  defaults this to `production`; otherwise the home connector falls back to
-  `NODE_ENV` (or `development`) when unset.
-- `SENTRY_TRACES_SAMPLE_RATE` — optional connector env var with a `0`–`1` value;
-  the published Docker image defaults this to **`1.0`**, matching the Worker’s
-  low-traffic default.
-- `APP_COMMIT_SHA` — optional connector env var used as the Sentry release
-  identifier. The published Docker image bakes this in at build time from the
-  Git commit SHA and also exposes the same value via the image’s OCI revision
-  label.
-- `SAMSUNG_TV_DISCOVERY_URL` — optional connector env var. Defaults to
-  `mdns://_samsungmsf._tcp.local`. Mocked connector runs should set an explicit
-  value such as `http://samsung-tv.mock.local/discovery`. Live discovery uses a
-  single pure-JS mDNS path that works across macOS and Linux/container
-  environments.
-- `LUTRON_DISCOVERY_URL` — optional connector env var. Defaults to
-  `mdns://_lutron._tcp.local`. Mocked connector runs should set an explicit
-  value such as `http://lutron.mock.local/discovery`. Live discovery uses a
-  single pure-JS mDNS path that works across macOS and Linux/container
-  environments.
-- `ACCESS_NETWORKS_UNLEASHED_SCAN_CIDRS` — optional connector env var.
-  Comma-separated CIDR list for Access Networks / RUCKUS Unleashed subnet
-  scanning. Each entry must be `a.b.c.0/24` (scan `.1`–`.254`) or `a.b.c.d/32`
-  (single host). When unset, the connector derives private `/24` networks from
-  local IPv4 interfaces and probes common Unleashed HTTPS admin endpoints
-  directly. Example:
-  `ACCESS_NETWORKS_UNLEASHED_SCAN_CIDRS=192.168.1.0/24,10.0.0.50/32`. Broader
-  private interface CIDRs like `/23` are automatically split into multiple `/24`
-  scan blocks, but autoscan skips any derived interface range that would expand
-  past 16 `/24` blocks. On larger LANs, set
-  `ACCESS_NETWORKS_UNLEASHED_SCAN_CIDRS` explicitly to cover the desired ranges
-  and override that cap.
-- `ACCESS_NETWORKS_UNLEASHED_ALLOW_INSECURE_TLS` — optional connector env var.
-  Set to `true` when the controller uses a self-signed or otherwise untrusted
-  LAN certificate. When unset, the connector requires normal TLS verification.
-- `ACCESS_NETWORKS_UNLEASHED_REQUEST_TIMEOUT_MS` — optional connector env var.
-  Default timeout for Access Networks Unleashed HTTPS probes and AJAX requests
-  in milliseconds. Defaults to `8000`.
-- `VENSTAR_SCAN_CIDRS` — optional connector env var. Comma-separated CIDR list
-  for Venstar subnet scanning. Each entry must be `a.b.c.0/24` (scan
-  `.1`–`.254`) or `a.b.c.d/32` (single host). When unset, the connector derives
-  private `/24` networks from local IPv4 interfaces and probes
-  `http://{ip}/query/info` directly. Example:
-  `VENSTAR_SCAN_CIDRS=192.168.1.0/24,10.0.0.50/32`. Broader private interface
-  CIDRs like `/23` are automatically split into multiple `/24` scan blocks.
-- `HOME_CONNECTOR_DATA_PATH` — optional connector env var. Directory used for
-  connector-owned local data files. When `HOME_CONNECTOR_DB_PATH` is unset, the
-  home connector stores its local SQLite database at
-  `<HOME_CONNECTOR_DATA_PATH>/home-connector.sqlite`. Defaults to
-  `~/.kody/home-connector`.
-- `HOME_CONNECTOR_DB_PATH` — optional connector env var. Full path to the local
-  SQLite file used by the home connector to persist device integration state
-  such as Samsung TV metadata/tokens, Lutron processor credentials, Access
-  Networks Unleashed controller inventory/credentials, Bond bridge state, Sonos
-  players, and Venstar managed thermostats across restarts. Overrides the
-  derived `HOME_CONNECTOR_DATA_PATH` location.
-- `ISLAND_ROUTER_HOST` — optional connector env var. Hostname or IP address of
-  an Island router reachable from the home-connector host over SSH.
-- `ISLAND_ROUTER_PORT` — optional connector env var. SSH port for the Island
-  router. Defaults to `22`.
-- `ISLAND_ROUTER_USERNAME` — optional connector env var. SSH username for the
-  Island router CLI. Prefer Island's read-only `user` account when possible.
-- `ISLAND_ROUTER_PRIVATE_KEY_PATH` — optional connector env var. Absolute path
-  to a mounted private key file used for SSH public-key authentication. Mount
-  the key read-only into the connector container or host environment.
-- `ISLAND_ROUTER_KNOWN_HOSTS_PATH` — optional connector env var. Absolute path
-  to a read-only `known_hosts` file used for strict SSH host verification.
-- `ISLAND_ROUTER_HOST_FINGERPRINT` — optional connector env var. SSH host key
-  fingerprint (`SHA256:...` or `MD5:...`) used when you cannot mount a
-  `known_hosts` file. The connector verifies the fingerprint with `ssh-keyscan`
-  before opening the real session.
-- `ISLAND_ROUTER_COMMAND_TIMEOUT_MS` — optional connector env var. Default
-  timeout for Island router SSH commands in milliseconds. Defaults to `8000`.
 
 ## Why Zod?
 

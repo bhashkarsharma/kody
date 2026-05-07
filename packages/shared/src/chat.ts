@@ -68,7 +68,6 @@ const remoteConnectorRefSchema = object({
 export const mcpCallerContextSchema = object({
 	baseUrl: string(),
 	user: optional(nullable(mcpUserContextSchema)),
-	homeConnectorId: optional(nullable(string())),
 	remoteConnectors: optional(nullable(array(remoteConnectorRefSchema))),
 	storageContext: optional(nullable(mcpStorageContextSchema)),
 	repoContext: optional(nullable(mcpRepoContextSchema)),

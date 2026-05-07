@@ -220,7 +220,7 @@ test('runBundledModuleWithRegistry passes params as an explicit entrypoint argum
 test('buildCodemodeFns resolves annotated home capability secret placeholders', async () => {
 	let toolArguments: Record<string, unknown> | null = null
 	const env = {
-		HOME_CONNECTOR_SESSION: {
+		REMOTE_CONNECTOR_SESSION: {
 			idFromName(name: string) {
 				return name
 			},
@@ -273,7 +273,7 @@ test('buildCodemodeFns resolves annotated home capability secret placeholders', 
 		createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
 			user: { userId: 'user-123' },
-			homeConnectorId: 'default',
+			remoteConnectors: [{ kind: 'lighting', instanceId: 'default' }],
 		}),
 		{
 			resolveSecretValue: async (secret, capabilityName) =>
@@ -281,7 +281,7 @@ test('buildCodemodeFns resolves annotated home capability secret placeholders', 
 		},
 	)
 
-	await codemode.home_lutron_set_credentials({
+	await codemode.lighting_default_lutron_set_credentials({
 		processorId: 'lutron-192-168-0-41',
 		username: '{{secret:lutronUsername|scope=user}}',
 		password: '{{secret:lutronPassword|scope=user}}',
@@ -289,8 +289,8 @@ test('buildCodemodeFns resolves annotated home capability secret placeholders', 
 
 	expect(toolArguments).toEqual({
 		processorId: 'lutron-192-168-0-41',
-		username: 'lutronUsername-home_lutron_set_credentials-resolved',
-		password: 'lutronPassword-home_lutron_set_credentials-resolved',
+		username: 'lutronUsername-lighting_default_lutron_set_credentials-resolved',
+		password: 'lutronPassword-lighting_default_lutron_set_credentials-resolved',
 	})
 })
 
@@ -305,7 +305,7 @@ test('buildCodemodeFns denies capability secret placeholders for disallowed capa
 			allowedCapabilities: ['some_other_capability'],
 		})
 	const env = {
-		HOME_CONNECTOR_SESSION: {
+		REMOTE_CONNECTOR_SESSION: {
 			idFromName(name: string) {
 				return name
 			},
@@ -345,17 +345,17 @@ test('buildCodemodeFns denies capability secret placeholders for disallowed capa
 		createMcpCallerContext({
 			baseUrl: 'https://heykody.dev',
 			user: { userId: 'user-123' },
-			homeConnectorId: 'default',
+			remoteConnectors: [{ kind: 'lighting', instanceId: 'default' }],
 		}),
 	)
 
 	try {
 		await expect(
-			codemode.home_lutron_set_credentials({
+			codemode.lighting_default_lutron_set_credentials({
 				username: '{{secret:lutronUsername|scope=user}}',
 			}),
 		).rejects.toThrow(
-			'Secret "lutronUsername" is not allowed for capability "home_lutron_set_credentials". If this capability should be able to use the secret, ask the user whether to add "home_lutron_set_credentials" to the secret\'s allowed capabilities in the account secrets UI, then retry after they approve that policy change. Approval link: https://heykody.dev/account/secrets/user/lutronUsername?capability=home_lutron_set_credentials',
+			'Secret "lutronUsername" is not allowed for capability "lighting_default_lutron_set_credentials". If this capability should be able to use the secret, ask the user whether to add "lighting_default_lutron_set_credentials" to the secret\'s allowed capabilities in the account secrets UI, then retry after they approve that policy change. Approval link: https://heykody.dev/account/secrets/user/lutronUsername?capability=lighting_default_lutron_set_credentials',
 		)
 		expect(resolveSecretSpy).toHaveBeenCalledWith(
 			expect.objectContaining({

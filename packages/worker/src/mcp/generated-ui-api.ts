@@ -48,7 +48,6 @@ type GeneratedUiSessionContext = {
 	sessionId: string
 	appId: string | null
 	params: Record<string, unknown>
-	homeConnectorId: string | null
 	expiresAt: string
 	user: {
 		userId: string
@@ -115,7 +114,6 @@ function createGeneratedUiSourceHandler(env: Env) {
 				user: sourceContext.user,
 				appId: sourceContext.appId,
 				params: sourceContext.params,
-				homeConnectorId: sourceContext.homeConnectorId,
 			})
 			return jsonResponse({
 				ok: true,
@@ -160,7 +158,6 @@ function createGeneratedUiExecuteHandler(env: Env) {
 						email: context.user.email,
 						displayName: '',
 					},
-					homeConnectorId: context.homeConnectorId,
 					storageContext: {
 						sessionId: context.sessionId,
 						appId: context.appId,
@@ -443,7 +440,6 @@ async function resolveSessionContext(input: {
 				!Array.isArray(session.params)
 					? session.params
 					: {},
-			homeConnectorId: session.home_connector_id,
 			expiresAt:
 				typeof session.exp === 'number'
 					? new Date(session.exp).toISOString()

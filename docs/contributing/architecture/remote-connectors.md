@@ -2,23 +2,15 @@
 
 A **remote connector** is any service that opens an **outbound WebSocket** to
 the Kody Worker and exposes **MCP-style tools** (`tools/list`, `tools/call`)
-over that socket. The Worker’s `HomeConnectorSession` Durable Object (binding
-name `HOME_CONNECTOR_SESSION`) holds one live session per **session key** and
-proxies HTTP `fetch` from Worker code to JSON-RPC on the socket.
-
-The reference `home` connector implementation lives in
-[`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector).
-Additional kinds use the same protocol and routing pattern described below.
+over that socket. The Worker’s remote connector session Durable Object
+implementation holds one live session per **session key** and proxies Worker RPC
+calls to JSON-RPC on the socket.
 
 ## URLs and session keys
 
-- **Home:**  
-  `wss://<worker-origin>/connectors/home/<instanceId>`  
-  Session key = `home:<instanceId>`.
+`wss://<worker-origin>/connectors/<kind>/<instanceId>`
 
-- **Generic:**  
-  `wss://<worker-origin>/connectors/<kind>/<instanceId>`  
-  Session key = `<kind>:<instanceId>` (lowercase compared after trim).
+Session key = `<kind>:<instanceId>` (lowercase compared after trim).
 
 The Worker sets header **`X-Kody-Connector-Session-Key`** on requests forwarded
 into the Durable Object. The connector’s **`connector.hello`** must declare a
@@ -38,8 +30,7 @@ All messages are **JSON objects** with a **`type`** field.
      `living-room`).
    - **`sharedSecret`:** string — must match Worker configuration (see
      [Environment variables](../environment-variables.md#remote-connector-secrets)).
-   - **`connectorKind`:** non-empty string. Use `"home"` for the home connector.
-     Lowercase values are normalized.
+   - **`connectorKind`:** non-empty string. Lowercase values are normalized.
 
 2. **`connector.heartbeat`**
    - **`type`:** `"connector.heartbeat"`
@@ -69,16 +60,13 @@ The Worker sends MCP-style requests over the WebSocket wrapped in
   content, `isError`, etc.).
 
 If the Worker forwards **`notifications/tools/list_changed`**, the connector
-should re-list tools when it supports dynamic registration. Separately, the
-reference home connector implementation **proactively** sends
-`notifications/tools/list_changed` **to** the Worker right after
-**`server.ack`** so the session performs an initial tool snapshot refresh.
+should re-list tools when it supports dynamic registration.
 
 ## Internal access (DO RPC, not HTTP)
 
 Worker-internal code that needs snapshot or tool data from a connector session
-(such as `packages/worker/src/home/client.ts`) calls **Durable Object RPC
-methods** directly on the stub — `getSnapshot()`, `rpcListTools()`,
+(such as `packages/worker/src/remote-connector/client.ts`) calls **Durable
+Object RPC methods** directly on the stub — `getSnapshot()`, `rpcListTools()`,
 `rpcCallTool()`, `forwardJsonRpc()`. These are plain method calls that never
 pass through the DO's `fetch()` handler.
 
@@ -97,23 +85,17 @@ that connector:
 - **`remoteConnectors`:** optional array of `{ kind, instanceId }`. When present
   (including empty), it fully defines the set of remote connectors for that
   session.
-- **`homeConnectorId`:** when `remoteConnectors` is omitted, a non-null value
-  maps to `{ kind: "home", instanceId: homeConnectorId }`.
 
 Source: `packages/shared/src/chat.ts`,
 `packages/shared/src/remote-connectors.ts`.
 
 ## Capability naming (search / execute)
 
-- Single **`home`** connector with instance id **`default`:** synthesized
-  capabilities stay on the builtin **`home`** domain with names like
-  **`home_<tool>`** (legacy stability).
+- The Worker uses distinct **domain ids** (for example
+  `remote:<kind>:<instance>`) and **prefixed capability names** so nothing
+  collides in `search` / `execute`.
 
-- Any other combination (multiple home instances, non-`home` kinds): the Worker
-  uses distinct **domain ids** (for example `remote:<kind>:<instance>`) and
-  **prefixed capability names** so nothing collides in `search` / `execute`.
-
-## Compatibility checklist
+## Connector checklist
 
 1. **Outbound WebSocket** to the correct path for your **`kind`** and
    **`instanceId`**.
@@ -122,25 +104,19 @@ Source: `packages/shared/src/chat.ts`,
 3. Implement **`tools/list`** and **`tools/call`** on the socket via
    **`connector.jsonrpc`** envelopes.
 4. **Heartbeats** if the service stays connected for a long time.
-5. **Operator config:** Worker `REMOTE_CONNECTOR_SECRETS` and/or
-   `HOME_CONNECTOR_SHARED_SECRET` for `home`; MCP clients must pass
-   **`remoteConnectors`** / **`homeConnectorId`** so the registry merges your
-   domain.
+5. **Operator config:** Worker `REMOTE_CONNECTOR_SECRETS`; MCP clients must pass
+   **`remoteConnectors`** so the registry merges your domain.
 
 ## Reference implementation
 
-- Protocol types and parsing: `packages/worker/src/home/types.ts`,
-  `packages/worker/src/home/utils.ts`
-- Session Durable Object: `packages/worker/src/home/session.ts`
+- Protocol types and parsing: `packages/worker/src/remote-connector/types.ts`,
+  `packages/worker/src/remote-connector/utils.ts`
+- Session Durable Object: `packages/worker/src/remote-connector/session.ts`
 - Ingress and session key:
   `packages/worker/src/remote-connector/connector-session-key.ts`
-- Home connector WebSocket client:
-  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
 
 ## Related docs
 
-- [Home Connector](https://github.com/kentcdodds/kody-home-connector) — the
-  `home` reference implementation (Roku, Lutron, Samsung TV, Sonos).
 - [Request lifecycle](./request-lifecycle.md) — where connector routes sit in
   the Worker.
 - [Environment variables](../environment-variables.md#remote-connector-secrets)

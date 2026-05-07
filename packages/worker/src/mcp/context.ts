@@ -13,7 +13,6 @@ export type McpServerProps = McpCallerContext
 export function createMcpCallerContext(input: {
 	baseUrl: string
 	user?: McpUserContext | null
-	homeConnectorId?: string | null
 	remoteConnectors?: Array<RemoteConnectorRef> | null
 	storageContext?: McpStorageContext | null
 	repoContext?: McpRepoContext | null
@@ -21,7 +20,6 @@ export function createMcpCallerContext(input: {
 	return {
 		baseUrl: input.baseUrl,
 		user: input.user ?? null,
-		homeConnectorId: input.homeConnectorId ?? null,
 		remoteConnectors: input.remoteConnectors ?? null,
 		storageContext: input.storageContext ?? null,
 		repoContext: input.repoContext ?? null,

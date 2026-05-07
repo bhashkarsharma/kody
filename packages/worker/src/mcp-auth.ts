@@ -113,7 +113,6 @@ export async function handleMcpRequest({
 	const props: OAuthContextProps = createMcpCallerContext({
 		baseUrl: origin,
 		user: tokenSummary.grant.props ?? null,
-		homeConnectorId: 'default',
 	})
 	context.props = props
 

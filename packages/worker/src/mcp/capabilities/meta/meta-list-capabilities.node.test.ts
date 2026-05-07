@@ -2,7 +2,7 @@ import { expect, test } from 'vitest'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { metaListCapabilitiesCapability } from './meta-list-capabilities.ts'
 
-const runtimeHomeTools = [
+const runtimeRokuTools = [
 	{
 		name: 'roku_press_key',
 		title: 'Press Roku Key',
@@ -65,9 +65,9 @@ const runtimeHomeTools = [
 	},
 ] as const
 
-function buildHomeConnectorEnv() {
+function buildRemoteConnectorEnv() {
 	return {
-		HOME_CONNECTOR_SESSION: {
+		REMOTE_CONNECTOR_SESSION: {
 			idFromName(name: string) {
 				return name
 			},
@@ -78,7 +78,7 @@ function buildHomeConnectorEnv() {
 							connectorId: 'default',
 							connectedAt: '2026-03-25T00:00:00.000Z',
 							lastSeenAt: '2026-03-25T00:00:01.000Z',
-							tools: runtimeHomeTools,
+							tools: runtimeRokuTools,
 						})
 					},
 				}
@@ -87,8 +87,8 @@ function buildHomeConnectorEnv() {
 	} as unknown as Env
 }
 
-test('meta_list_capabilities includes runtime home capabilities with type definitions only', async () => {
-	const env = buildHomeConnectorEnv()
+test('meta_list_capabilities includes runtime remote connector capabilities with type definitions only', async () => {
+	const env = buildRemoteConnectorEnv()
 
 	const result = await metaListCapabilitiesCapability.handler(
 		{
@@ -98,7 +98,7 @@ test('meta_list_capabilities includes runtime home capabilities with type defini
 			env,
 			callerContext: createMcpCallerContext({
 				baseUrl: 'https://heykody.dev',
-				homeConnectorId: 'default',
+				remoteConnectors: [{ kind: 'roku', instanceId: 'default' }],
 			}),
 		},
 	)
@@ -109,26 +109,26 @@ test('meta_list_capabilities includes runtime home capabilities with type defini
 			(capability) => capability.name === 'meta_list_capabilities',
 		),
 	).toBe(true)
-	const homeCapability = result.capabilities.find(
-		(capability) => capability.name === 'home_roku_press_key',
+	const pressKeyCapability = result.capabilities.find(
+		(capability) => capability.name === 'roku_default_roku_press_key',
 	)
 	const listAppsCapability = result.capabilities.find(
-		(capability) => capability.name === 'home_roku_list_apps',
+		(capability) => capability.name === 'roku_default_roku_list_apps',
 	)
 	const activeAppCapability = result.capabilities.find(
-		(capability) => capability.name === 'home_roku_get_active_app',
+		(capability) => capability.name === 'roku_default_roku_get_active_app',
 	)
-	expect(homeCapability).not.toBeUndefined()
-	expect(homeCapability?.domain).toBe('home')
-	expect(homeCapability?.requiredInputFields).toEqual(['deviceId', 'key'])
-	expect(homeCapability?.inputTypeDefinition).toEqual(expect.any(String))
-	expect(homeCapability).not.toHaveProperty('inputSchema')
+	expect(pressKeyCapability).not.toBeUndefined()
+	expect(pressKeyCapability?.domain).toBe('remote:roku:default')
+	expect(pressKeyCapability?.requiredInputFields).toEqual(['deviceId', 'key'])
+	expect(pressKeyCapability?.inputTypeDefinition).toEqual(expect.any(String))
+	expect(pressKeyCapability).not.toHaveProperty('inputSchema')
 	expect(listAppsCapability).not.toBeUndefined()
-	expect(listAppsCapability?.domain).toBe('home')
+	expect(listAppsCapability?.domain).toBe('remote:roku:default')
 	expect(listAppsCapability?.outputTypeDefinition).toEqual(expect.any(String))
 	expect(listAppsCapability).not.toHaveProperty('outputSchema')
 	expect(activeAppCapability).not.toBeUndefined()
-	expect(activeAppCapability?.domain).toBe('home')
+	expect(activeAppCapability?.domain).toBe('remote:roku:default')
 })
 
 test('meta_list_capabilities filters by domain', async () => {

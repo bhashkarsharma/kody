@@ -37,12 +37,10 @@ Requests are handled in this order:
 5. MCP endpoint:
    - `/mcp` (requires OAuth bearer token)
 6. Remote connector session endpoints (internal-only Worker routes that proxy
-   WebSocket upgrades and JSON-RPC helper requests to the `HomeConnectorSession`
-   Durable Object):
-   - `/connectors/home/:connectorId...` — **`home`** connector URL (session key
-     `home:connectorId`)
-   - `/connectors/:kind/:instanceId...` — generic **`kind`** + instance (session
-     key `kind:instanceId`)
+   WebSocket upgrades and JSON-RPC helper requests to the remote connector
+   session Durable Object):
+   - `/connectors/:kind/:instanceId...` — **`kind`** + instance (session key
+     `kind:instanceId`)
 
    See [Remote connectors](./remote-connectors.md).
 
@@ -115,21 +113,16 @@ are each wrapped with `Sentry.instrumentDurableObjectWithSentry` (see
 `packages/worker/src/mcp/index.ts` and `packages/worker/src/chat-agent.ts`)
 because they run in separate isolates from the top-level Worker.
 
-The home automation flow adds two more Durable Objects:
+The remote connector flow adds one more Durable Object:
 
-- `HomeConnectorSession` / `HOME_CONNECTOR_SESSION` terminates the outbound
-  websocket connection from the local-network `home-connector` process and
-  proxies JSON-RPC/MCP requests over that socket.
-- `HomeMCP` / `HOME_MCP_OBJECT` is an internal-only MCP bridge that the chat
-  agent attaches to via `addMcpServer(...)` so the agent can inspect or call raw
-  home connector tools when needed.
+- The remote connector session Durable Object terminates outbound websocket
+  connections from connector processes and proxies JSON-RPC/MCP requests over
+  those sockets.
 
-The chat agent attaches to the main compact MCP server (`kody`). It also
-attaches to `home`, and the runtime capability registry **merges** synthesized
-domains from **remote connectors** listed in MCP caller context
-(`remoteConnectors` or legacy `homeConnectorId`). A single **`home`** +
-**`default`** instance keeps the builtin `home` domain name; other combinations
-use distinct domain ids. See [Remote connectors](./remote-connectors.md).
+The chat agent attaches to the main compact MCP server (`kody`). The runtime
+capability registry **merges** synthesized domains from **remote connectors**
+listed in MCP caller context (`remoteConnectors`). See
+[Remote connectors](./remote-connectors.md).
 
 Shared options are built in `packages/worker/src/sentry-options.ts`: **release**
 comes from `APP_COMMIT_SHA` when set (deploy workflows pass it as a var), and

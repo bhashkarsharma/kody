@@ -191,9 +191,9 @@ test('online search semantically ranks runtime-only capabilities missing from Ve
 			inputTypeDefinition:
 				'type GithubEnableIssueNotificationsInput = {\n\towner: string\n\trepo: string\n}',
 		},
-		home_roku_press_key: {
-			name: 'home_roku_press_key',
-			domain: 'home',
+		remote_display_press_key: {
+			name: 'remote_display_press_key',
+			domain: 'remote:display:default',
 			description:
 				'Wake a streaming display by sending a remote-control key command.',
 			keywords: ['home', 'roku', 'remote', 'display', 'wake'],
@@ -255,7 +255,7 @@ test('online search semantically ranks runtime-only capabilities missing from Ve
 	})
 
 	expect(offline).toBe(false)
-	expect(matches[0]?.name).toBe('home_roku_press_key')
+	expect(matches[0]?.name).toBe('remote_display_press_key')
 	expect(matches[0]?.vectorRank).toBe(1)
 	expect(matches[1]?.name).toBe('github_enable_issue_notifications')
 })

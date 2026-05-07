@@ -5,7 +5,7 @@ import type * as PackageRegistrySource from '#worker/package-registry/source.ts'
 import { parseAuthoredPackageJson } from '#worker/package-registry/manifest.ts'
 import {
 	buildSavedPackageSearchRows,
-	loadDownHomeConnectorStatus,
+	loadDownRemoteConnectorStatuses,
 	loadOptionalSearchRows,
 	resolveSearchMemoryContext,
 	searchUnified,
@@ -515,12 +515,12 @@ test('searchUnified ranks related packages and connectors for operate queries', 
 test('searchUnified prefers safer package wrappers over raw low-level capabilities', async () => {
 	const registry = buildCapabilityRegistry([
 		{
-			name: 'home_access_networks',
+			name: 'network_access',
 			description: 'Home access network operations',
 			capabilities: [
 				{
-					name: 'home_access_networks_unleashed_request',
-					domain: 'home_access_networks',
+					name: 'network_access_unleashed_request',
+					domain: 'network_access',
 					description:
 						'Raw Unleashed API request for WLAN client disable and block operations. Requires params and an operator reason.',
 					keywords: [
@@ -567,7 +567,7 @@ test('searchUnified prefers safer package wrappers over raw low-level capabiliti
 							'Safer package-first Wi-Fi workflows for Unleashed client controls.',
 						tags: ['wifi', 'unleashed', 'network'],
 						searchText:
-							'Safe wrapper around home_access_networks_unleashed_request for WLAN client disable block operations with confirmation and operator reason.',
+							'Safe wrapper around network_access_unleashed_request for WLAN client disable block operations with confirmation and operator reason.',
 						sourceId: 'source-unleashed-wifi',
 						hasApp: false,
 						createdAt: '2026-04-20T00:00:00.000Z',
@@ -580,7 +580,7 @@ test('searchUnified prefers safer package wrappers over raw low-level capabiliti
 							'Safer package-first Wi-Fi workflows for Unleashed client controls.',
 						tags: ['wifi', 'unleashed', 'network'],
 						searchText:
-							'Safe wrapper around home_access_networks_unleashed_request for WLAN client disable block operations with confirmation and operator reason.',
+							'Safe wrapper around network_access_unleashed_request for WLAN client disable block operations with confirmation and operator reason.',
 						hasApp: false,
 						appEntry: null,
 						exports: [
@@ -633,7 +633,7 @@ test('searchUnified prefers safer package wrappers over raw low-level capabiliti
 		expect.arrayContaining([
 			expect.objectContaining({
 				type: 'capability',
-				name: 'home_access_networks_unleashed_request',
+				name: 'network_access_unleashed_request',
 			}),
 		]),
 	)
@@ -972,10 +972,10 @@ test('optional search rows skip D1 access without a user', async () => {
 	})
 })
 
-test('down home connector status is returned when the connector is disconnected', async () => {
-	const status = await loadDownHomeConnectorStatus({
+test('down remote connector status is returned when the connector is disconnected', async () => {
+	const statuses = await loadDownRemoteConnectorStatuses({
 		env: {
-			HOME_CONNECTOR_SESSION: {
+			REMOTE_CONNECTOR_SESSION: {
 				idFromName(name: string) {
 					return name
 				},
@@ -988,10 +988,13 @@ test('down home connector status is returned when the connector is disconnected'
 				},
 			},
 		} as unknown as Env,
-		homeConnectorId: 'default',
+		callerContext: {
+			remoteConnectors: [{ kind: 'lights', instanceId: 'default' }],
+		},
 	})
 
-	expect(status).toMatchObject({
+	expect(statuses).toHaveLength(1)
+	expect(statuses[0]).toMatchObject({
 		state: 'disconnected',
 		connectorId: 'default',
 		connected: false,
@@ -999,10 +1002,10 @@ test('down home connector status is returned when the connector is disconnected'
 	})
 })
 
-test('down home connector status stays hidden when the connector is up', async () => {
-	const status = await loadDownHomeConnectorStatus({
+test('down remote connector status stays hidden when the connector is up', async () => {
+	const statuses = await loadDownRemoteConnectorStatuses({
 		env: {
-			HOME_CONNECTOR_SESSION: {
+			REMOTE_CONNECTOR_SESSION: {
 				idFromName(name: string) {
 					return name
 				},
@@ -1020,8 +1023,10 @@ test('down home connector status stays hidden when the connector is up', async (
 				},
 			},
 		} as unknown as Env,
-		homeConnectorId: 'default',
+		callerContext: {
+			remoteConnectors: [{ kind: 'lights', instanceId: 'default' }],
+		},
 	})
 
-	expect(status).toBeNull()
+	expect(statuses).toEqual([])
 })

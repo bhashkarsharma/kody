@@ -60,7 +60,7 @@ vi.mock('./memory-tool-context.ts', async () => {
 	}
 })
 
-vi.mock('#worker/home/status.ts', () => ({
+vi.mock('#worker/remote-connector/status.ts', () => ({
 	getRemoteConnectorStatus: (...args: Array<unknown>) =>
 		mockModule.getRemoteConnectorStatus(...args),
 }))
@@ -80,8 +80,7 @@ async function getSearchHandler() {
 		getCallerContext: vi.fn(() => ({
 			baseUrl: 'https://example.com',
 			user: null,
-			homeConnectorId: 'default',
-			remoteConnectors: null,
+			remoteConnectors: [{ kind: 'lights', instanceId: 'default' }],
 		})),
 	} as never)
 

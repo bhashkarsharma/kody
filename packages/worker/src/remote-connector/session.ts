@@ -3,34 +3,34 @@ import { DurableObject } from 'cloudflare:workers'
 import { type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import { buildSentryOptions } from '#worker/sentry-options.ts'
 import {
-	type HomeConnectorHelloMessage,
-	type HomeConnectorJsonRpcResponse,
-	type HomeConnectorPersistedState,
-	type HomeConnectorServerMessage,
-	type HomeConnectorSnapshot,
+	type RemoteConnectorHelloMessage,
+	type RemoteConnectorJsonRpcResponse,
+	type RemoteConnectorPersistedState,
+	type RemoteConnectorServerMessage,
+	type RemoteConnectorSnapshot,
 } from './types.ts'
 import {
 	createJsonRpcRequest,
-	parseHomeConnectorMessage,
+	parseRemoteConnectorMessage,
 	parseJsonRpcMessage,
-	stringifyHomeConnectorMessage,
+	stringifyRemoteConnectorMessage,
 } from './utils.ts'
-import { connectorSessionKey } from '#worker/remote-connector/connector-session-key.ts'
-import { resolveRemoteConnectorSharedSecret } from '#worker/remote-connector/resolve-remote-connector-secret.ts'
+import { connectorSessionKey } from './connector-session-key.ts'
+import { resolveRemoteConnectorSharedSecret } from './resolve-remote-connector-secret.ts'
 
 const connectorTag = 'connector'
 const stateStorageKey = 'home-connector-session-state'
 const rpcTimeoutMs = 15_000
 
 type PendingRpcRequest = {
-	resolve: (message: HomeConnectorJsonRpcResponse) => void
+	resolve: (message: RemoteConnectorJsonRpcResponse) => void
 	reject: (error: Error) => void
 	timeout: ReturnType<typeof setTimeout>
 }
 
-type HomeConnectorSessionState = {
-	persisted: HomeConnectorPersistedState
-	tools: Array<HomeConnectorSnapshot['tools'][number]>
+type RemoteConnectorSessionState = {
+	persisted: RemoteConnectorPersistedState
+	tools: Array<RemoteConnectorSnapshot['tools'][number]>
 }
 
 function summarizeSessionKey(value: string | null) {
@@ -43,8 +43,8 @@ function summarizeSessionKey(value: string | null) {
 	}
 }
 
-class HomeConnectorSessionBase extends DurableObject<Env> {
-	private stateSnapshot: HomeConnectorSessionState = {
+class RemoteConnectorSessionBase extends DurableObject<Env> {
+	private stateSnapshot: RemoteConnectorSessionState = {
 		persisted: {
 			connectorId: null,
 			connectorKind: null,
@@ -91,7 +91,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 			level: input.level ?? 'warning',
 			tags: {
 				service: 'worker',
-				worker_component: 'home-connector-session',
+				worker_component: 'remote-connector-session',
 			},
 			extra: input.extra ?? {},
 		})
@@ -150,10 +150,10 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		if (activeSockets.length === 0) {
 			this.clearConnectionState()
 			this.rejectPendingRequests(
-				`Home connector websocket closed code=${code} wasClean=${wasClean}${reason ? ` reason=${reason}` : ''} before RPC response.`,
+				`Remote connector websocket closed code=${code} wasClean=${wasClean}${reason ? ` reason=${reason}` : ''} before RPC response.`,
 			)
 		}
-		const closeMessage = `Home connector session websocket closed code=${code} wasClean=${wasClean}${reason ? ` reason=${reason}` : ''}`
+		const closeMessage = `Remote connector session websocket closed code=${code} wasClean=${wasClean}${reason ? ` reason=${reason}` : ''}`
 		console.warn(closeMessage)
 		this.captureSessionMessage(closeMessage, {
 			level: 'warning',
@@ -179,7 +179,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		return (
 			(
 				response.result as {
-					tools?: Array<HomeConnectorSnapshot['tools'][number]>
+					tools?: Array<RemoteConnectorSnapshot['tools'][number]>
 				}
 			).tools ?? []
 		)
@@ -206,7 +206,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		return null
 	}
 
-	async getSnapshot(): Promise<HomeConnectorSnapshot | null> {
+	async getSnapshot(): Promise<RemoteConnectorSnapshot | null> {
 		const { connectorId, connectorKind, connectedAt, lastSeenAt } =
 			this.stateSnapshot.persisted
 		if (!connectorId || !connectedAt || !lastSeenAt) return null
@@ -225,7 +225,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 
 	private async restoreState() {
 		const stored =
-			await this.ctx.storage.get<HomeConnectorSessionState>(stateStorageKey)
+			await this.ctx.storage.get<RemoteConnectorSessionState>(stateStorageKey)
 		if (!stored) return
 		if (stored.persisted.connectorKind === undefined) {
 			stored.persisted.connectorKind = null
@@ -248,7 +248,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		this.ctx.acceptWebSocket(server, [connectorTag])
 		this.stashIngressSessionKey(server, ingressSessionKey)
 		server.send(
-			stringifyHomeConnectorMessage({
+			stringifyRemoteConnectorMessage({
 				type: 'server.ping',
 			}),
 		)
@@ -262,12 +262,12 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		ws: WebSocket,
 		message: string | ArrayBuffer,
 	) {
-		let parsed: HomeConnectorServerMessage
+		let parsed: RemoteConnectorServerMessage
 		try {
-			parsed = parseHomeConnectorMessage(message)
+			parsed = parseRemoteConnectorMessage(message)
 		} catch (error) {
 			this.captureSessionMessage(
-				'Home connector session received invalid websocket payload.',
+				'Remote connector session received invalid websocket payload.',
 				{
 					level: 'error',
 					extra: {
@@ -277,7 +277,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 				},
 			)
 			ws.send(
-				stringifyHomeConnectorMessage({
+				stringifyRemoteConnectorMessage({
 					type: 'server.error',
 					message: error instanceof Error ? error.message : String(error),
 				}),
@@ -299,7 +299,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 			}
 		} catch (error) {
 			this.captureSessionMessage(
-				'Home connector session message handler threw.',
+				'Remote connector session message handler threw.',
 				{
 					level: 'error',
 					extra: {
@@ -311,7 +311,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 			)
 			try {
 				ws.send(
-					stringifyHomeConnectorMessage({
+					stringifyRemoteConnectorMessage({
 						type: 'server.error',
 						message: error instanceof Error ? error.message : String(error),
 					}),
@@ -323,7 +323,10 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		}
 	}
 
-	private async handleHello(ws: WebSocket, message: HomeConnectorHelloMessage) {
+	private async handleHello(
+		ws: WebSocket,
+		message: RemoteConnectorHelloMessage,
+	) {
 		const declaredKind = message.connectorKind.trim().toLowerCase()
 		const canonicalInstanceId = message.connectorId.trim()
 		const expectedSessionKey = connectorSessionKey(
@@ -346,7 +349,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 				},
 			)
 			ws.send(
-				stringifyHomeConnectorMessage({
+				stringifyRemoteConnectorMessage({
 					type: 'server.error',
 					message: 'Connector session key does not match this endpoint.',
 				}),
@@ -362,7 +365,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		)
 		if (!expectedSecret || message.sharedSecret !== expectedSecret) {
 			this.captureSessionMessage(
-				'Home connector session rejected websocket hello.',
+				'Remote connector session rejected websocket hello.',
 				{
 					level: 'error',
 					extra: {
@@ -373,7 +376,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 				},
 			)
 			ws.send(
-				stringifyHomeConnectorMessage({
+				stringifyRemoteConnectorMessage({
 					type: 'server.error',
 					message: 'Invalid connector shared secret.',
 				}),
@@ -391,7 +394,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		}
 		await this.persistState()
 		ws.send(
-			stringifyHomeConnectorMessage({
+			stringifyRemoteConnectorMessage({
 				type: 'server.ack',
 				connectorId: canonicalInstanceId,
 			}),
@@ -401,7 +404,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		} catch (error) {
 			this.stateSnapshot.tools = []
 			this.captureSessionMessage(
-				'Home connector tools snapshot refresh failed after websocket hello.',
+				'Remote connector tools snapshot refresh failed after websocket hello.',
 				{
 					level: 'error',
 					extra: {
@@ -438,7 +441,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 			} catch (error) {
 				this.stateSnapshot.tools = []
 				this.captureSessionMessage(
-					'Home connector tools snapshot refresh failed.',
+					'Remote connector tools snapshot refresh failed.',
 					{
 						level: 'error',
 						extra: {
@@ -459,7 +462,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 			throw new Error(response.error.message)
 		}
 		const result = response.result as {
-			tools?: Array<HomeConnectorSnapshot['tools'][number]>
+			tools?: Array<RemoteConnectorSnapshot['tools'][number]>
 		}
 		this.stateSnapshot.tools = result.tools ?? []
 		this.stateSnapshot.persisted.lastSeenAt = new Date().toISOString()
@@ -469,22 +472,22 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 	private async sendRpcRequest(
 		method: string,
 		params: Record<string, unknown>,
-	): Promise<HomeConnectorJsonRpcResponse> {
+	): Promise<RemoteConnectorJsonRpcResponse> {
 		const socket = this.ctx.getWebSockets(connectorTag)[0]
 		if (!socket) {
-			throw new Error('No home connector is currently connected.')
+			throw new Error('No remote connector is currently connected.')
 		}
 
 		const id = crypto.randomUUID()
 		const request = createJsonRpcRequest(id, method, params)
 
-		const response = await new Promise<HomeConnectorJsonRpcResponse>(
+		const response = await new Promise<RemoteConnectorJsonRpcResponse>(
 			(resolve, reject) => {
 				const timeout = setTimeout(() => {
 					this.pendingRequests.delete(id)
 					reject(
 						new Error(
-							`Timed out waiting for home connector response to ${method}.`,
+							`Timed out waiting for remote connector response to ${method}.`,
 						),
 					)
 				}, rpcTimeoutMs)
@@ -494,7 +497,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 					timeout,
 				})
 				socket.send(
-					stringifyHomeConnectorMessage({
+					stringifyRemoteConnectorMessage({
 						type: 'connector.jsonrpc',
 						message: request,
 					}),
@@ -535,9 +538,9 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 	}
 }
 
-export const HomeConnectorSession = Sentry.instrumentDurableObjectWithSentry(
+export const RemoteConnectorSession = Sentry.instrumentDurableObjectWithSentry(
 	(env: Env) => buildSentryOptions(env),
-	HomeConnectorSessionBase,
+	RemoteConnectorSessionBase,
 )
 
-export type HomeConnectorSession = InstanceType<typeof HomeConnectorSession>
+export type RemoteConnectorSession = InstanceType<typeof RemoteConnectorSession>

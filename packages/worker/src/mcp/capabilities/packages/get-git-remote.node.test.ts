@@ -40,7 +40,6 @@ function createContext(userId = 'user-1') {
 				email: `${userId}@example.com`,
 				displayName: userId,
 			},
-			homeConnectorId: null,
 			remoteConnectors: null,
 			storageContext: null,
 			repoContext: null,

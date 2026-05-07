@@ -1,7 +1,7 @@
 import {
-	type HomeConnectorClientMessage,
-	type HomeConnectorJsonRpcEnvelope,
-	type HomeConnectorServerMessage,
+	type RemoteConnectorClientMessage,
+	type RemoteConnectorJsonRpcEnvelope,
+	type RemoteConnectorServerMessage,
 } from './types.ts'
 import {
 	isConnectorJsonRpcEnvelope,
@@ -27,21 +27,21 @@ export function jsonResponse(data: unknown, init?: ResponseInit) {
 }
 
 export function isJsonRpcEnvelope(
-	value: HomeConnectorServerMessage,
-): value is HomeConnectorJsonRpcEnvelope {
+	value: RemoteConnectorServerMessage,
+): value is RemoteConnectorJsonRpcEnvelope {
 	return isConnectorJsonRpcEnvelope(
 		value as Parameters<typeof isConnectorJsonRpcEnvelope>[0],
 	)
 }
 
-export function parseHomeConnectorMessage(
+export function parseRemoteConnectorMessage(
 	raw: string | ArrayBuffer,
-): HomeConnectorServerMessage {
-	return parseConnectorMessage(raw) as HomeConnectorServerMessage
+): RemoteConnectorServerMessage {
+	return parseConnectorMessage(raw) as RemoteConnectorServerMessage
 }
 
-export function stringifyHomeConnectorMessage(
-	message: HomeConnectorServerMessage | HomeConnectorClientMessage,
+export function stringifyRemoteConnectorMessage(
+	message: RemoteConnectorServerMessage | RemoteConnectorClientMessage,
 ) {
 	return stringifyConnectorMessage(
 		message as Parameters<typeof stringifyConnectorMessage>[0],

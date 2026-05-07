@@ -50,7 +50,7 @@ the ref into a follow-up `entity` lookup when needed.
 
 If ranked search misses what you need, **rephrase the query** or use
 **`meta_list_capabilities`** to read the live capability registry (including
-dynamic entries such as home connector tools). **`entity`** does not help when a
+dynamic entries from remote connectors). **`entity`** does not help when a
 **`query`** returned no matches — **`entity`** looks up a known id, not a fix
 for an empty ranked list.
 

@@ -1,34 +1,31 @@
 import { expect, test } from 'vitest'
 import { normalizeRemoteConnectorRefs } from '@kody-internal/shared/remote-connectors.ts'
 
-test('normalizeRemoteConnectorRefs maps homeConnectorId when remoteConnectors unset', () => {
+test('normalizeRemoteConnectorRefs returns empty when remoteConnectors unset', () => {
 	expect(
 		normalizeRemoteConnectorRefs({
-			homeConnectorId: 'living-room',
 			remoteConnectors: undefined,
 		}),
-	).toEqual([{ kind: 'home', instanceId: 'living-room' }])
+	).toEqual([])
 })
 
-test('normalizeRemoteConnectorRefs uses remoteConnectors when provided', () => {
+test('normalizeRemoteConnectorRefs normalizes remoteConnectors when provided', () => {
 	expect(
 		normalizeRemoteConnectorRefs({
-			homeConnectorId: 'ignored',
 			remoteConnectors: [
-				{ kind: 'Home', instanceId: '  a  ' },
+				{ kind: 'Lights', instanceId: '  a  ' },
 				{ kind: 'custom', instanceId: 'x' },
 			],
 		}),
 	).toEqual([
-		{ kind: 'home', instanceId: 'a' },
+		{ kind: 'lights', instanceId: 'a' },
 		{ kind: 'custom', instanceId: 'x' },
 	])
 })
 
-test('normalizeRemoteConnectorRefs empty array does not fall back to homeConnectorId', () => {
+test('normalizeRemoteConnectorRefs preserves an empty connector list', () => {
 	expect(
 		normalizeRemoteConnectorRefs({
-			homeConnectorId: 'living-room',
 			remoteConnectors: [],
 		}),
 	).toEqual([])

@@ -57,15 +57,15 @@ test('batch approval parsers round-trip entries and reject invalid payloads', ()
 	const capabilityEntries = [
 		{
 			secretName: 'lutronUsername',
-			capabilityName: 'home_lutron_set_credentials',
+			capabilityName: 'lighting_lutron_set_credentials',
 			approvalUrl:
-				'https://example.com/account/secrets/user/lutronUsername?capability=home_lutron_set_credentials',
+				'https://example.com/account/secrets/user/lutronUsername?capability=lighting_lutron_set_credentials',
 		},
 		{
 			secretName: 'lutronPassword',
-			capabilityName: 'home_lutron_set_credentials',
+			capabilityName: 'lighting_lutron_set_credentials',
 			approvalUrl:
-				'https://example.com/account/secrets/user/lutronPassword?capability=home_lutron_set_credentials',
+				'https://example.com/account/secrets/user/lutronPassword?capability=lighting_lutron_set_credentials',
 		},
 	]
 	expect(

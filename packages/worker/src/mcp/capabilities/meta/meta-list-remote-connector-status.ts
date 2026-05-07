@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
 import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
-import { getRemoteConnectorStatus } from '#worker/home/status.ts'
+import { getRemoteConnectorStatus } from '#worker/remote-connector/status.ts'
 import { normalizeRemoteConnectorRefs } from '@kody-internal/shared/remote-connectors.ts'
 
 const connectorStatusSchema = z.object({

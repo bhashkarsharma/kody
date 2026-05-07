@@ -72,7 +72,6 @@ function createContext() {
 				email: 'user@example.com',
 				displayName: 'User',
 			},
-			homeConnectorId: null,
 			remoteConnectors: null,
 			storageContext: null,
 			repoContext: null,

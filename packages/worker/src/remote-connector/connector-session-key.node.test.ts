@@ -6,8 +6,10 @@ import {
 } from './connector-session-key.ts'
 
 test('connectorSessionKey prefixes connector ids with kind', () => {
-	expect(connectorSessionKey('home', 'default')).toBe('home:default')
-	expect(connectorSessionKey('HOME', 'living-room')).toBe('home:living-room')
+	expect(connectorSessionKey('lights', 'default')).toBe('lights:default')
+	expect(connectorSessionKey('LIGHTS', 'living-room')).toBe(
+		'lights:living-room',
+	)
 	expect(connectorSessionKey('custom', 'alpha')).toBe('custom:alpha')
 })
 
@@ -18,23 +20,23 @@ test('parseConnectorRoutePath handles connector paths', () => {
 		rest: '/snapshot',
 	})
 	expect(
-		parseConnectorRoutePath('/connectors/home/default/rpc/tools-list'),
+		parseConnectorRoutePath('/connectors/lights/default/rpc/tools-list'),
 	).toEqual({
-		kind: 'home',
+		kind: 'lights',
 		instanceId: 'default',
 		rest: '/rpc/tools-list',
 	})
-	expect(parseConnectorRoutePath('/connectors/home/default')).toEqual({
-		kind: 'home',
+	expect(parseConnectorRoutePath('/connectors/lights/default')).toEqual({
+		kind: 'lights',
 		instanceId: 'default',
 		rest: '',
 	})
-	expect(parseConnectorRoutePath('/connectors/home')).toBeNull()
+	expect(parseConnectorRoutePath('/connectors/lights')).toBeNull()
 })
 
 test('connectorIngressPath creates connector URLs', () => {
-	expect(connectorIngressPath('home', 'default')).toBe(
-		'/connectors/home/default',
+	expect(connectorIngressPath('lights', 'default')).toBe(
+		'/connectors/lights/default',
 	)
 	expect(connectorIngressPath('custom', 'a b')).toBe('/connectors/custom/a%20b')
 })

@@ -1,22 +1,25 @@
 import { type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { connectorSessionKey } from '#worker/remote-connector/connector-session-key.ts'
-import { type HomeConnectorSnapshot, type HomeToolDescriptor } from './types.ts'
+import {
+	type RemoteConnectorSnapshot,
+	type RemoteConnectorToolDescriptor,
+} from './types.ts'
 
-export type HomeMcpTool = HomeToolDescriptor
+export type RemoteConnectorMcpTool = RemoteConnectorToolDescriptor
 
-export type HomeMcpClient = {
-	listTools(): Promise<Array<HomeMcpTool>>
+export type RemoteConnectorMcpClient = {
+	listTools(): Promise<Array<RemoteConnectorMcpTool>>
 	callTool(
 		name: string,
 		args?: Record<string, unknown>,
 	): Promise<CallToolResult>
-	getSnapshot(): Promise<HomeConnectorSnapshot | null>
+	getSnapshot(): Promise<RemoteConnectorSnapshot | null>
 }
 
 function getSessionStub(env: Env, kind: string, instanceId: string) {
 	const sessionKey = connectorSessionKey(kind, instanceId)
-	return env.HOME_CONNECTOR_SESSION.get(
-		env.HOME_CONNECTOR_SESSION.idFromName(sessionKey),
+	return env.REMOTE_CONNECTOR_SESSION.get(
+		env.REMOTE_CONNECTOR_SESSION.idFromName(sessionKey),
 	)
 }
 
@@ -24,7 +27,7 @@ export function createRemoteConnectorMcpClient(
 	env: Env,
 	kind: string,
 	instanceId: string,
-): HomeMcpClient {
+): RemoteConnectorMcpClient {
 	const stub = getSessionStub(env, kind, instanceId)
 
 	return {
@@ -38,11 +41,4 @@ export function createRemoteConnectorMcpClient(
 			return stub.getSnapshot()
 		},
 	}
-}
-
-export function createHomeMcpClient(
-	env: Env,
-	connectorId: string,
-): HomeMcpClient {
-	return createRemoteConnectorMcpClient(env, 'home', connectorId)
 }

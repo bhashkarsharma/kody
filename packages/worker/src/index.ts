@@ -1,8 +1,7 @@
 import * as Sentry from '@sentry/cloudflare'
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
 import { ChatAgent } from './chat-agent.ts'
-import { HomeConnectorSession } from './home/session.ts'
-import { HomeMCP } from './home/mcp.ts'
+import { RemoteConnectorSession } from './remote-connector/session.ts'
 import { MCP } from './mcp/index.ts'
 import { JobManager } from './jobs/manager-do.ts'
 import { StorageRunner } from './storage-runner.ts'
@@ -59,8 +58,7 @@ export {
 	AgentTurnRunner,
 	RepoSession,
 	CodemodeFetchGateway,
-	HomeConnectorSession,
-	HomeMCP,
+	RemoteConnectorSession,
 	MCP,
 	JobManager,
 	PackageRealtimeSession,
@@ -207,8 +205,8 @@ const appHandler = withCors({
 				connectorRoute.kind,
 				connectorRoute.instanceId,
 			)
-			const stub = env.HOME_CONNECTOR_SESSION.get(
-				env.HOME_CONNECTOR_SESSION.idFromName(sessionKey),
+			const stub = env.REMOTE_CONNECTOR_SESSION.get(
+				env.REMOTE_CONNECTOR_SESSION.idFromName(sessionKey),
 			)
 			const forwardUrl = new URL(request.url)
 			forwardUrl.pathname = connectorRoute.rest || '/'

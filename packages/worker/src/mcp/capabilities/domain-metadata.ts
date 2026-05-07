@@ -3,7 +3,6 @@ export const capabilityDomainNames = {
 	apps: 'apps',
 	coding: 'coding',
 	email: 'email',
-	home: 'home',
 	jobs: 'jobs',
 	math: 'math',
 	meta: 'meta',
@@ -18,5 +17,5 @@ export const capabilityDomainNames = {
 export type BuiltinCapabilityDomain =
 	(typeof capabilityDomainNames)[keyof typeof capabilityDomainNames]
 
-/** Built-in domain ids plus runtime remote-connector domains (e.g. `remote:home:default`). */
+/** Built-in domain ids plus runtime remote-connector domains (e.g. `remote:lights:default`). */
 export type CapabilityDomain = string

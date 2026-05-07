@@ -50,8 +50,8 @@ To merge extra domains later (e.g. plugins), the seam is:
 **Remote connectors:** at runtime, `getCapabilityRegistryForContext` also merges
 domains synthesized from outbound WebSocket connectors (see
 [`architecture/remote-connectors.md`](./architecture/remote-connectors.md)).
-Those domains are driven by MCP **`remoteConnectors`** / **`homeConnectorId`**
-rather than by editing `builtinDomains` in-repo.
+Those domains are driven by MCP **`remoteConnectors`** rather than by editing
+`builtinDomains` in-repo.
 
 `defineCapability()` in
 `packages/worker/src/mcp/capabilities/define-capability.ts` normalizes Zod →

@@ -35,115 +35,19 @@ Quick notes for getting a local kody environment running.
   values for `COOKIE_SECRET` and `SECRET_STORE_KEY`; all environments must set
   both secrets (see
   [`docs/contributing/secret-rotation.md`](./secret-rotation.md)).
-- `npm run dev` (starts mock API servers automatically, the main worker, and the
-  local home connector; it sets `AI_MODE=mock`, `AI_MOCK_BASE_URL`, and
-  `CLOUDFLARE_API_BASE_URL` + `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`
-  to the local Cloudflare API mock Worker for the internal Cloudflare API
-  client, local email sending, and Artifacts REST repo
-  create/get/list/token/fork calls. Those REST calls do not hit the live
-  Cloudflare Artifacts control plane during normal local development. The mock
-  covers only the REST control plane; repo-session git clone/pull/push flows
-  need a real Git-capable Artifacts remote and are not fully simulated by the
-  local mock. Password reset email sends as `kody@<APP_BASE_URL hostname>` and
-  requires `APP_BASE_URL` to be set. Set `SKIP_CLOUDFLARE_MOCK=1` to skip the
-  local Cloudflare mock entirely. The home connector receives the resolved
-  worker origin via `WORKER_BASE_URL`. When `HOME_CONNECTOR_SHARED_SECRET` is
-  unset, the launcher generates one and passes it to both the worker and the
-  connector so the outbound registration handshake succeeds in local
-  development. The main worker and home connector stream logs live; the client
-  bundle and background mock workers buffer logs and only print them if that
-  child process exits with an error.)
-- The home automation connector lives in the sibling
-  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
-  repo by default.
-  - `npm run dev` starts the local connector app on Node 24 with `node --watch`,
-    so connector code changes automatically restart the local process. Override
-    the checkout path with `HOME_CONNECTOR_DIR`.
-  - The connector uses the `kentcdodds.com` mock bootstrap shape: only
-    `index.ts` imports `mocks/` when `MOCKS=true`.
-  - The connector dev entry enables `MOCKS=true` by default for local
-    development and also sets
-    `ROKU_DISCOVERY_URL=http://roku.mock.local/discovery`,
-    `LUTRON_DISCOVERY_URL=http://lutron.mock.local/discovery`, and
-    `SAMSUNG_TV_DISCOVERY_URL=http://samsung-tv.mock.local/discovery` unless you
-    override them.
-  - `npm run dev` forwards `HOME_CONNECTOR_*` environment variables to the
-    underlying connector process with the prefix removed, so
-    `HOME_CONNECTOR_MOCKS=false` becomes `MOCKS=false` and
-    `HOME_CONNECTOR_ROKU_DISCOVERY_URL=...` becomes `ROKU_DISCOVERY_URL=...`.
-    Likewise, `HOME_CONNECTOR_LUTRON_DISCOVERY_URL=...` becomes
-    `LUTRON_DISCOVERY_URL=...`, `HOME_CONNECTOR_SAMSUNG_TV_DISCOVERY_URL=...`
-    becomes `SAMSUNG_TV_DISCOVERY_URL=...`, `HOME_CONNECTOR_DATA_PATH=...`
-    becomes `HOME_CONNECTOR_DATA_PATH=...`, and `HOME_CONNECTOR_DB_PATH=...`
-    becomes `HOME_CONNECTOR_DB_PATH=...` in the connector process.
-  - When `ROKU_DISCOVERY_URL` is unset, the connector defaults Roku discovery to
-    SSDP at `ssdp://239.255.255.250:1900`.
-  - When `LUTRON_DISCOVERY_URL` is unset, the connector defaults Lutron
-    discovery to `mdns://_lutron._tcp.local`. Live discovery uses one
-    cross-platform pure-JS mDNS path, so the same code works on macOS and in
-    Linux containers as long as the process has multicast visibility to the LAN.
-  - When `SAMSUNG_TV_DISCOVERY_URL` is unset, the connector defaults Samsung TV
-    discovery to `mdns://_samsungmsf._tcp.local`. Live discovery uses the same
-    cross-platform pure-JS mDNS path, so the same code works on macOS and in
-    Linux containers as long as the process has multicast visibility to the LAN.
-  - Samsung TV pairing tokens/device metadata and Lutron processor
-    credentials/metadata are persisted locally in a SQLite database. By default
-    the connector stores that DB at
-    `~/.kody/home-connector/home-connector.sqlite`. Override the directory with
-    `HOME_CONNECTOR_DATA_PATH` or the full file path with
-    `HOME_CONNECTOR_DB_PATH`.
-  - Island router SSH diagnostics are optional. Set `ISLAND_ROUTER_HOST`,
-    `ISLAND_ROUTER_USERNAME`, and `ISLAND_ROUTER_PRIVATE_KEY_PATH` to enable the
-    router status tool plus `router_run_command`, a generic command executor
-    backed by a typed allowlisted catalog of documented Island CLI templates.
-    The catalog includes read commands such as `show version`,
-    `show interface summary`, `show ip neighbors`, `show ip routes`,
-    `show ip dhcp-reservations`, `show log`, `show syslog`, and `ping`, plus
-    guarded write-risk commands such as `clear dhcp-client`, `clear log`,
-    `write memory`, `ip dhcp-reserve`, interface-context updates, syslog server
-    updates, and port-forward creation. Log filtering and limits are applied by
-    Kody after filterable show commands return.
-  - Prefer mounting the private key read-only into the container or host
-    runtime, for example
-    `-v /path/to/id_ed25519:/run/secrets/island-router-key:ro` plus
-    `HOME_CONNECTOR_ISLAND_ROUTER_PRIVATE_KEY_PATH=/run/secrets/island-router-key`
-    when launching through `npm run dev`, or
-    `ISLAND_ROUTER_PRIVATE_KEY_PATH=/run/secrets/island-router-key` when running
-    the connector directly.
-  - For host verification, set either `ISLAND_ROUTER_KNOWN_HOSTS_PATH`
-    (preferred) or `ISLAND_ROUTER_HOST_FINGERPRINT`. When neither is set, the
-    connector runs with SSH host verification disabled and reports a warning.
-  - The Island router integration intentionally does not expose arbitrary
-    command execution over MCP. Every user-supplied value is validated and
-    rendered as a single CLI token or controlled quoted text from the catalog.
-  - Write-risk Island router catalog entries are available when SSH host
-    verification is configured with `ISLAND_ROUTER_KNOWN_HOSTS_PATH` or
-    `ISLAND_ROUTER_HOST_FINGERPRINT`. They require a specific operator reason
-    and the exact connector confirmation phrase.
-  - No write command silently runs `write memory`. Catalog metadata tells
-    callers when a running-config change needs a separate explicit
-    `write memory` command to persist.
-  - These write-risk commands exist for carefully scoped operational recovery
-    and maintenance only. Their tool descriptions intentionally use strong
-    language because mistakes can disrupt connectivity, erase diagnostics,
-    expose services, or persist a bad router state with severe consequences.
-    Agents must be highly certain before using them.
-  - Local operational routes live at `/health`, `/roku/status`, `/roku/setup`,
-    `/lutron/status`, `/lutron/setup`, `/samsung-tv/status`, and
-    `/samsung-tv/setup`.
-  - The Lutron tool surface intentionally focuses on dynamic processor
-    discovery, persisted credentials, LEAP inventory reads over `8081`, keypad
-    button presses, and direct zone level changes. It does not use the more
-    privileged `8902` QSX channel.
-  - The Samsung TV tool surface intentionally focuses on discovery, pairing,
-    remote keys, known-app probing, explicit app launch by app ID, and Art Mode
-    control.
-  - Samsung power support is exposed as best-effort `power off` and `power on`
-    actions. Power off uses the local Samsung remote channel and power on uses
-    Wake-on-LAN with the stored TV MAC address. These semantics are model- and
-    firmware-dependent, especially on Frame TVs where the regular power key may
-    be mapped to Art Mode rather than true standby.
-  - Full installed-app enumeration is considered model- and firmware-dependent.
+- `npm run dev` starts mock API servers automatically plus the main worker; it
+  sets `AI_MODE=mock`, `AI_MOCK_BASE_URL`, and `CLOUDFLARE_API_BASE_URL` +
+  `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` to the local Cloudflare API
+  mock Worker for the internal Cloudflare API client, local email sending, and
+  Artifacts REST repo create/get/list/token/fork calls. Those REST calls do not
+  hit the live Cloudflare Artifacts control plane during normal local
+  development. The mock covers only the REST control plane; repo-session git
+  clone/pull/push flows need a real Git-capable Artifacts remote and are not
+  fully simulated by the local mock. Password reset email sends as
+  `kody@<APP_BASE_URL hostname>` and requires `APP_BASE_URL` to be set. Set
+  `SKIP_CLOUDFLARE_MOCK=1` to skip the local Cloudflare mock entirely. The main
+  worker streams logs live; the client bundle and background mock workers buffer
+  logs and only print them if that child process exits with an error.
 - MCP **`search`** uses a deterministic offline ranker in tests and when
   `WRANGLER_IS_LOCAL_DEV` is set (no Vectorize / Workers AI embedding calls
   required for `npm run test` or unauthenticated local runs). Production uses
@@ -197,18 +101,6 @@ Quick notes for getting a local kody environment running.
 - `npm run test:mcp` runs MCP server E2E tests and also depends on the cached
   `worker:prepare-e2e-env` target, which writes `packages/worker/.env` from
   `.env.example` when needed and backfills `COOKIE_SECRET` before the test run.
-
-## Home Connector Docker publishing
-
-Docker publishing now lives in
-[`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector).
-
-- The workflow reruns `npm test` before publishing.
-- Docker Hub auth comes from GitHub Actions secrets `DOCKERHUB_USERNAME` and
-  `DOCKERHUB_TOKEN`.
-- The Docker Hub repository name comes from the GitHub Actions variable
-  `HOME_CONNECTOR_DOCKER_IMAGE` (for example `kentcdodds/kody-home-connector`).
-- Successful publishes push both `latest` and `sha-<shortsha>` tags.
 
 ## Documentation maintenance
 
