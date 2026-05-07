@@ -299,16 +299,126 @@ export declare const celsiusToFahrenheit: (value: number) => number
 					description: 'Look up the forecast for a city.',
 					typeDefinition:
 						'export declare function forecast(city: string): Promise<string>',
+					referencedTypes: [],
 				},
 				{
 					name: 'celsiusToFahrenheit',
 					description: 'Convert Celsius to Fahrenheit.',
 					typeDefinition:
 						'export declare const celsiusToFahrenheit: (value: number) => number',
+					referencedTypes: [],
 				},
 			],
+			referencedTypes: [],
 		}),
 	])
+})
+
+test('buildPackageSearchProjection includes only referenced local named types', () => {
+	const manifest = parseAuthoredPackageJson({
+		content: JSON.stringify({
+			name: '@kentcdodds/cursor-cloud-agents',
+			exports: {
+				'./launch-cursor-cloud-agent': {
+					import: './src/launch-cursor-cloud-agent.ts',
+					types: './src/launch-cursor-cloud-agent.d.ts',
+				},
+			},
+			kody: {
+				id: 'cursor-cloud-agents',
+				description: 'Cursor cloud agents package',
+			},
+		}),
+		manifestPath: 'package.json',
+	})
+
+	const projection = buildPackageSearchProjection(manifest, {
+		'src/launch-cursor-cloud-agent.d.ts': `type LaunchCursorCloudAgentInput = {
+	prompt: string
+	repository: RepositoryTarget
+	mode?: LaunchMode
+	metadata?: Record<string, string>
+	createdAt?: Date
+}
+
+interface RepositoryTarget {
+	owner: string
+	repo: string
+}
+
+enum LaunchMode {
+	Background = 'background',
+	Interactive = 'interactive',
+}
+
+type UnrelatedLocalType = {
+	ignored: boolean
+}
+
+/**
+ * Launch a Cursor Cloud agent.
+ */
+export declare function launch(input: LaunchCursorCloudAgentInput): Promise<Response>
+`,
+	})
+
+	const [exportDetail] = projection.exports
+	expect(exportDetail).toMatchObject({
+		subpath: './launch-cursor-cloud-agent',
+		functions: [
+			expect.objectContaining({
+				name: 'launch',
+				description: 'Launch a Cursor Cloud agent.',
+				typeDefinition:
+					'export declare function launch(input: LaunchCursorCloudAgentInput): Promise<Response>',
+			}),
+		],
+	})
+	expect(exportDetail?.referencedTypes).toEqual([
+		{
+			name: 'LaunchCursorCloudAgentInput',
+			kind: 'type',
+			definition: `type LaunchCursorCloudAgentInput = {
+	prompt: string
+	repository: RepositoryTarget
+	mode?: LaunchMode
+	metadata?: Record<string, string>
+	createdAt?: Date
+}`,
+		},
+		{
+			name: 'RepositoryTarget',
+			kind: 'interface',
+			definition: `interface RepositoryTarget {
+	owner: string
+	repo: string
+}`,
+		},
+		{
+			name: 'LaunchMode',
+			kind: 'enum',
+			definition: `enum LaunchMode {
+	Background = 'background',
+	Interactive = 'interactive',
+}`,
+		},
+	])
+	expect(exportDetail?.functions[0]?.referencedTypes).toEqual(
+		exportDetail?.referencedTypes,
+	)
+	const referencedTypeText = exportDetail?.referencedTypes
+		.map((type) => type.definition)
+		.join('\n')
+	expect(referencedTypeText).not.toContain('UnrelatedLocalType')
+	expect(referencedTypeText).not.toContain('type Record')
+	expect(referencedTypeText).not.toContain('type Date')
+	expect(referencedTypeText).not.toContain('interface Response')
+
+	const document = buildPackageSearchDocument(projection)
+	expect(document).toContain('LaunchCursorCloudAgentInput')
+	expect(document).toContain('RepositoryTarget')
+	expect(document).toContain('LaunchMode')
+	expect(document).not.toContain('UnrelatedLocalType')
 })
 
 test('buildPackageSearchProjection uses local declaration kind for exported const signatures', () => {
@@ -327,17 +437,29 @@ test('buildPackageSearchProjection uses local declaration kind for exported cons
 	})
 
 	const projection = buildPackageSearchProjection(manifest, {
-		'src/index.ts': `/**
+		'src/index.ts': `type GenericBound = {
+	value: string
+}
+
+type RenderedInput = {
+	value: string
+}
+
+/**
  * Package version metadata.
  */
 export declare const VERSION: string
 
 export declare const typed: (value: string) => string
 
+export declare const typedGeneric: <T extends RenderedInput>(input: T) => string
+
 /**
  * Runtime formatter.
  */
 export const format = (value: string): string => value.trim()
+
+export const genericFormat = <T extends GenericBound>(input: T): string => input.value
 `,
 	})
 
@@ -346,11 +468,82 @@ export const format = (value: string): string => value.trim()
 			name: 'typed',
 			description: null,
 			typeDefinition: 'export declare const typed: (value: string) => string',
+			referencedTypes: [],
+		},
+		{
+			name: 'typedGeneric',
+			description: null,
+			typeDefinition:
+				'export declare const typedGeneric: <T extends RenderedInput>(input: T) => string',
+			referencedTypes: [
+				{
+					name: 'RenderedInput',
+					kind: 'type',
+					definition: `type RenderedInput = {
+	value: string
+}`,
+				},
+			],
 		},
 		{
 			name: 'format',
 			description: 'Runtime formatter.',
 			typeDefinition: 'export function format(value: string): string',
+			referencedTypes: [],
+		},
+		{
+			name: 'genericFormat',
+			description: null,
+			typeDefinition: 'export function genericFormat(input: T): string',
+			referencedTypes: [],
+		},
+	])
+	expect(
+		projection.exports[0]?.referencedTypes.map((type) => type.name),
+	).toEqual(['RenderedInput'])
+})
+
+test('buildPackageSearchProjection skips referenced types that exceed the size budget', () => {
+	const manifest = parseAuthoredPackageJson({
+		content: JSON.stringify({
+			name: '@kentcdodds/large-type-tools',
+			exports: {
+				'.': './src/index.ts',
+			},
+			kody: {
+				id: 'large-type-tools',
+				description: 'Large type tools package',
+			},
+		}),
+		manifestPath: 'package.json',
+	})
+	const oversizedFields = Array.from(
+		{ length: 1_500 },
+		(_, index) => `	field${index}: string`,
+	).join('\n')
+
+	const projection = buildPackageSearchProjection(manifest, {
+		'src/index.ts': `type HugeInput = {
+${oversizedFields}
+}
+
+type SmallInput = {
+	value: string
+}
+
+export function run(huge: HugeInput, small: SmallInput): string {
+	return small.value
+}
+`,
+	})
+
+	expect(projection.exports[0]?.referencedTypes).toEqual([
+		{
+			name: 'SmallInput',
+			kind: 'type',
+			definition: `type SmallInput = {
+	value: string
+}`,
 		},
 	])
 })

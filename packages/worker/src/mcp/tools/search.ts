@@ -162,6 +162,17 @@ type SearchUnifiedResult = {
 	guidance?: string
 }
 
+function flattenReferencedTypeFields(
+	referencedTypes:
+		| ReadonlyArray<{ name: string; definition: string }>
+		| undefined,
+): Array<string> {
+	return (referencedTypes ?? []).flatMap((referencedType) => [
+		referencedType.name,
+		referencedType.definition,
+	])
+}
+
 function buildFallbackPackageSearchProjection(
 	record: Awaited<ReturnType<typeof listSavedPackagesByUserId>>[number],
 ): PackageSearchProjection {
@@ -337,10 +348,12 @@ function buildSearchableEntityDescriptors(input: {
 					exportDetail.subpath,
 					exportDetail.description ?? '',
 					exportDetail.typeDefinition ?? '',
+					...flattenReferencedTypeFields(exportDetail.referencedTypes),
 					...(exportDetail.functions ?? []).flatMap((fn) => [
 						fn.name,
 						fn.description ?? '',
 						fn.typeDefinition ?? '',
+						...flattenReferencedTypeFields(fn.referencedTypes),
 					]),
 				]),
 				...entry.projection.jobs.map((job) => job.name),
@@ -699,10 +712,12 @@ function buildPackageCandidates(input: {
 						exportDetail.typesPath ?? '',
 						exportDetail.description ?? '',
 						exportDetail.typeDefinition ?? '',
+						...flattenReferencedTypeFields(exportDetail.referencedTypes),
 						...(exportDetail.functions ?? []).flatMap((fn) => [
 							fn.name,
 							fn.description ?? '',
 							fn.typeDefinition ?? '',
+							...flattenReferencedTypeFields(fn.referencedTypes),
 						]),
 					]),
 					...jobs.flatMap((job) => [
