@@ -6,7 +6,7 @@ audit for findings and rationale.
 ## Public connector routes are WebSocket-only
 
 The Worker entrypoint (`packages/worker/src/index.ts`) only forwards connector
-route requests (`/home/connectors/...`, `/connectors/...`) when the request
+route requests (`/connectors/home/...`, `/connectors/...`) when the request
 carries a `WebSocket` upgrade header. Non-upgrade HTTP requests are rejected
 with `404` before reaching the Durable Object.
 

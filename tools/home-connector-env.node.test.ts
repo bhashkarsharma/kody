@@ -11,6 +11,7 @@ test('forwards supported HOME_CONNECTOR_ vars and skips blank or unrelated value
 		HOME_CONNECTOR_SENTRY_ENVIRONMENT: 'preview',
 		HOME_CONNECTOR_SENTRY_TRACES_SAMPLE_RATE: '0.25',
 		HOME_CONNECTOR_APP_COMMIT_SHA: 'abc123',
+		HOME_CONNECTOR_DIR: '../kody-home-connector',
 		HOME_CONNECTOR_ID: 'living-room',
 		HOME_CONNECTOR_SHARED_SECRET: 'super-secret',
 		UNRELATED: 'ignored',

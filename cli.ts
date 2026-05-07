@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { platform } from 'node:os'
+import { resolve } from 'node:path'
 import readline from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import getPort, { clearLockedPorts } from 'get-port'
@@ -55,7 +56,10 @@ type ChildOutputConfig = {
 	filterKey?: OutputFilterKey
 	label?: string
 	mode?: ProcessOutputMode
+	cwd?: string
 }
+
+type ResolvedChildOutputConfig = Required<Omit<ChildOutputConfig, 'cwd'>>
 
 const outputFilters: Record<OutputFilterKey, Array<RegExp>> = {
 	client: [],
@@ -112,12 +116,13 @@ function runNpmScript(
 		filterKey: options.filterKey ?? 'default',
 		label: options.label ?? script,
 		mode: options.mode ?? 'live',
-	} satisfies Required<ChildOutputConfig>
+	} satisfies ResolvedChildOutputConfig
 	const child = spawnInOwnProcessGroup(
 		resolveNpmCommand(),
 		['run', '--silent', script, '--', ...args],
 		{
 			stdio: ['inherit', 'pipe', 'pipe'],
+			cwd: options.cwd,
 			env: { ...process.env, ...envOverrides },
 		},
 	)
@@ -136,7 +141,7 @@ function runNpmScript(
 	return child
 }
 
-function pipeOutput(child: ChildProcess, options: Required<ChildOutputConfig>) {
+function pipeOutput(child: ChildProcess, options: ResolvedChildOutputConfig) {
 	const controller = createProcessOutputController({
 		label: options.label,
 		mode: options.mode,
@@ -297,6 +302,9 @@ async function restartDev(
 	const homeConnectorPort = await getPort({ port: homeConnectorPortRange })
 	homeConnectorOrigin = `http://localhost:${homeConnectorPort}`
 	const forwardedHomeConnectorEnv = getForwardedHomeConnectorEnv(process.env)
+	const homeConnectorDir =
+		process.env.HOME_CONNECTOR_DIR?.trim() ||
+		resolve('..', 'kody-home-connector')
 	const client = runNpmScript(
 		'dev:client',
 		[],
@@ -336,7 +344,7 @@ async function restartDev(
 		)
 	}
 	const homeConnector = runNpmScript(
-		'dev:home-connector',
+		'dev',
 		[],
 		{
 			...forwardedHomeConnectorEnv,
@@ -348,6 +356,7 @@ async function restartDev(
 		{
 			label: 'dev:home-connector',
 			mode: 'live',
+			cwd: homeConnectorDir,
 		},
 	)
 	devChildren = [client, worker, homeConnector]

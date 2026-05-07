@@ -53,15 +53,16 @@ Quick notes for getting a local kody environment running.
   development. The main worker and home connector stream logs live; the client
   bundle and background mock workers buffer logs and only print them if that
   child process exits with an error.)
-- The home automation connector lives in `packages/home-connector`.
-  - `npm run dev:home-connector` starts the local connector app on Node 24 with
-    `node --watch`, so connector code changes automatically restart the local
-    process.
+- The home automation connector lives in the sibling
+  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
+  repo by default.
+  - `npm run dev` starts the local connector app on Node 24 with `node --watch`,
+    so connector code changes automatically restart the local process. Override
+    the checkout path with `HOME_CONNECTOR_DIR`.
   - The connector uses the `kentcdodds.com` mock bootstrap shape: only
-    `packages/home-connector/index.ts` imports `packages/home-connector/mocks/`
-    when `MOCKS=true`.
-  - The dev entry at `packages/home-connector/server/dev-server.ts` enables
-    `MOCKS=true` by default for local development and also sets
+    `index.ts` imports `mocks/` when `MOCKS=true`.
+  - The connector dev entry enables `MOCKS=true` by default for local
+    development and also sets
     `ROKU_DISCOVERY_URL=http://roku.mock.local/discovery`,
     `LUTRON_DISCOVERY_URL=http://lutron.mock.local/discovery`, and
     `SAMSUNG_TV_DISCOVERY_URL=http://samsung-tv.mock.local/discovery` unless you
@@ -108,7 +109,7 @@ Quick notes for getting a local kody environment running.
     `HOME_CONNECTOR_ISLAND_ROUTER_PRIVATE_KEY_PATH=/run/secrets/island-router-key`
     when launching through `npm run dev`, or
     `ISLAND_ROUTER_PRIVATE_KEY_PATH=/run/secrets/island-router-key` when running
-    `packages/home-connector` directly.
+    the connector directly.
   - For host verification, set either `ISLAND_ROUTER_KNOWN_HOSTS_PATH`
     (preferred) or `ISLAND_ROUTER_HOST_FINGERPRINT`. When neither is set, the
     connector runs with SSH host verification disabled and reports a warning.
@@ -199,12 +200,10 @@ Quick notes for getting a local kody environment running.
 
 ## Home Connector Docker publishing
 
-Pushes to `main` that change `packages/home-connector/**`, `package.json`,
-`package-lock.json`, or `.github/workflows/home-connector-publish.yml` run the
-dedicated Home Connector publish workflow.
+Docker publishing now lives in
+[`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector).
 
-- The workflow reruns `npm --prefix packages/home-connector run test` before
-  publishing.
+- The workflow reruns `npm test` before publishing.
 - Docker Hub auth comes from GitHub Actions secrets `DOCKERHUB_USERNAME` and
   `DOCKERHUB_TOKEN`.
 - The Docker Hub repository name comes from the GitHub Actions variable

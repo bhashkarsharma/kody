@@ -6,20 +6,19 @@ over that socket. The Worker’s `HomeConnectorSession` Durable Object (binding
 name `HOME_CONNECTOR_SESSION`) holds one live session per **session key** and
 proxies HTTP `fetch` from Worker code to JSON-RPC on the socket.
 
-The in-repo connector implementation is **`packages/home-connector`**
-(`kind: home`). Additional kinds use the same protocol and routing pattern
-described below.
+The reference `home` connector implementation lives in
+[`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector).
+Additional kinds use the same protocol and routing pattern described below.
 
 ## URLs and session keys
 
-- **Home (legacy URL, supported):**  
-  `wss://<worker-origin>/home/connectors/<instanceId>`  
-  Session key = `<instanceId>`.
+- **Home:**  
+  `wss://<worker-origin>/connectors/home/<instanceId>`  
+  Session key = `home:<instanceId>`.
 
 - **Generic:**  
   `wss://<worker-origin>/connectors/<kind>/<instanceId>`  
-  Session key = `<kind>:<instanceId>` when `kind` is not `home` (lowercase
-  compared after trim).
+  Session key = `<kind>:<instanceId>` (lowercase compared after trim).
 
 The Worker sets header **`X-Kody-Connector-Session-Key`** on requests forwarded
 into the Durable Object. The connector’s **`connector.hello`** must declare a
@@ -39,8 +38,7 @@ All messages are **JSON objects** with a **`type`** field.
      `living-room`).
    - **`sharedSecret`:** string — must match Worker configuration (see
      [Environment variables](../environment-variables.md#remote-connector-secrets)).
-   - **`connectorKind`:** string (optional but **required for generic
-     `/connectors/...` URLs**). Omit or set to `"home"` for the home connector.
+   - **`connectorKind`:** non-empty string. Use `"home"` for the home connector.
      Lowercase values are normalized.
 
 2. **`connector.heartbeat`**
@@ -72,7 +70,7 @@ The Worker sends MCP-style requests over the WebSocket wrapped in
 
 If the Worker forwards **`notifications/tools/list_changed`**, the connector
 should re-list tools when it supports dynamic registration. Separately, the
-reference implementation in `packages/home-connector` **proactively** sends
+reference home connector implementation **proactively** sends
 `notifications/tools/list_changed` **to** the Worker right after
 **`server.ack`** so the session performs an initial tool snapshot refresh.
 
@@ -137,12 +135,12 @@ Source: `packages/shared/src/chat.ts`,
 - Ingress and session key:
   `packages/worker/src/remote-connector/connector-session-key.ts`
 - Home connector WebSocket client:
-  `packages/home-connector/src/transport/worker-connector.ts`
+  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
 
 ## Related docs
 
-- [Home Connector](./home-connector.md) — the `home` implementation in this repo
-  (Roku, Lutron, Samsung TV, Sonos).
+- [Home Connector](https://github.com/kentcdodds/kody-home-connector) — the
+  `home` reference implementation (Roku, Lutron, Samsung TV, Sonos).
 - [Request lifecycle](./request-lifecycle.md) — where connector routes sit in
   the Worker.
 - [Environment variables](../environment-variables.md#remote-connector-secrets)

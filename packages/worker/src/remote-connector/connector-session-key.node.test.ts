@@ -5,33 +5,17 @@ import {
 	parseConnectorRoutePath,
 } from './connector-session-key.ts'
 
-test('connectorSessionKey preserves home instance id', () => {
-	expect(connectorSessionKey('home', 'default')).toBe('default')
-	expect(connectorSessionKey('HOME', 'living-room')).toBe('living-room')
-})
-
-test('connectorSessionKey prefixes home ids containing colons', () => {
-	expect(connectorSessionKey('home', 'other:default')).toBe(
-		'home:other:default',
-	)
-})
-
-test('connectorSessionKey prefixes non-home kinds', () => {
+test('connectorSessionKey prefixes connector ids with kind', () => {
+	expect(connectorSessionKey('home', 'default')).toBe('home:default')
+	expect(connectorSessionKey('HOME', 'living-room')).toBe('home:living-room')
 	expect(connectorSessionKey('custom', 'alpha')).toBe('custom:alpha')
 })
 
-test('parseConnectorRoutePath handles generic and legacy paths', () => {
+test('parseConnectorRoutePath handles connector paths', () => {
 	expect(parseConnectorRoutePath('/connectors/custom/my-id/snapshot')).toEqual({
 		kind: 'custom',
 		instanceId: 'my-id',
 		rest: '/snapshot',
-	})
-	expect(
-		parseConnectorRoutePath('/home/connectors/default/rpc/tools-list'),
-	).toEqual({
-		kind: 'home',
-		instanceId: 'default',
-		rest: '/rpc/tools-list',
 	})
 	expect(
 		parseConnectorRoutePath('/connectors/home/default/rpc/tools-list'),
@@ -40,12 +24,17 @@ test('parseConnectorRoutePath handles generic and legacy paths', () => {
 		instanceId: 'default',
 		rest: '/rpc/tools-list',
 	})
-	expect(parseConnectorRoutePath('/home/connectors')).toBeNull()
+	expect(parseConnectorRoutePath('/connectors/home/default')).toEqual({
+		kind: 'home',
+		instanceId: 'default',
+		rest: '',
+	})
+	expect(parseConnectorRoutePath('/connectors/home')).toBeNull()
 })
 
-test('connectorIngressPath prefers legacy home URL', () => {
+test('connectorIngressPath creates connector URLs', () => {
 	expect(connectorIngressPath('home', 'default')).toBe(
-		'/home/connectors/default',
+		'/connectors/home/default',
 	)
 	expect(connectorIngressPath('custom', 'a b')).toBe('/connectors/custom/a%20b')
 })

@@ -18,6 +18,7 @@ export function getForwardedHomeConnectorEnv(env: EnvRecord) {
 		const forwardedKey = key.slice(homeConnectorEnvPrefix.length)
 		if (
 			forwardedKey.length === 0 ||
+			forwardedKey === 'DIR' ||
 			forwardedKey === 'ID' ||
 			forwardedKey === 'SHARED_SECRET'
 		) {

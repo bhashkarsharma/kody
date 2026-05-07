@@ -18,23 +18,22 @@ async function workerFetch(request: Request): Promise<Response> {
 
 test('connector entrypoints reject unauthenticated HTTP access while allowing WebSocket upgrades', async () => {
 	const unauthorizedRequests = [
-		createRequest('/home/connectors/default/snapshot'),
-		createRequest('/home/connectors/default/rpc/tools-list', {
+		createRequest('/connectors/home/default/snapshot'),
+		createRequest('/connectors/home/default/rpc/tools-list', {
 			method: 'POST',
 		}),
-		createRequest('/home/connectors/default/rpc/tools-call', {
+		createRequest('/connectors/home/default/rpc/tools-call', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ name: 'test', arguments: {} }),
 		}),
-		createRequest('/home/connectors/default/rpc/jsonrpc', {
+		createRequest('/connectors/home/default/rpc/jsonrpc', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
 				message: { jsonrpc: '2.0', method: 'ping', id: 1 },
 			}),
 		}),
-		createRequest('/connectors/home/default/snapshot'),
 	]
 
 	for (const request of unauthorizedRequests) {
@@ -42,7 +41,7 @@ test('connector entrypoints reject unauthenticated HTTP access while allowing We
 		expect(response.status).toBe(404)
 	}
 
-	const websocketRequest = createRequest('/home/connectors/default', {
+	const websocketRequest = createRequest('/connectors/home/default', {
 		headers: { Upgrade: 'websocket' },
 	})
 	const websocketResponse = await workerFetch(websocketRequest)

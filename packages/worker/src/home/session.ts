@@ -215,7 +215,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 		}
 		const kind = (connectorKind && connectorKind.trim()) || ('home' as const)
 		return {
-			...(kind !== 'home' ? { connectorKind: kind } : {}),
+			connectorKind: kind,
 			connectorId,
 			connectedAt,
 			lastSeenAt,
@@ -324,10 +324,7 @@ class HomeConnectorSessionBase extends DurableObject<Env> {
 	}
 
 	private async handleHello(ws: WebSocket, message: HomeConnectorHelloMessage) {
-		const trimmedKind = (message.connectorKind ?? '').trim()
-		const declaredKind = (
-			trimmedKind === '' ? 'home' : trimmedKind
-		).toLowerCase()
+		const declaredKind = message.connectorKind.trim().toLowerCase()
 		const canonicalInstanceId = message.connectorId.trim()
 		const expectedSessionKey = connectorSessionKey(
 			declaredKind,

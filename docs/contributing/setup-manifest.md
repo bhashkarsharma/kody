@@ -130,8 +130,9 @@ Configure these GitHub Actions secrets and variables for workflows:
 - `SENTRY_AUTH_TOKEN` (optional GitHub **secret**; Sentry auth token with
   `project:releases` / source map upload permissions — used only by CI to run
   `npm run sentry:upload-sourcemaps` after deploy)
-- `DOCKERHUB_USERNAME` (required to publish `packages/home-connector` to Docker
-  Hub)
+- `DOCKERHUB_USERNAME` (required in the
+  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
+  repo to publish the Docker image)
 - `DOCKERHUB_TOKEN` (required Docker Hub access token/password for image
   publish)
 - `HOME_CONNECTOR_DOCKER_IMAGE` (required GitHub **variable**; Docker Hub image
@@ -202,13 +203,13 @@ How to get/set each value:
     `HOME_CONNECTOR_DOCKER_IMAGE` with the target Docker Hub image name (for
     example `kentcdodds/kody-home-connector`).
   - The Home Connector publish workflow pushes both `latest` and
-    `sha-<shortsha>` tags to that image whenever `main` changes under
-    `packages/home-connector` (or its Docker build inputs).
+    `sha-<shortsha>` tags to that image whenever `main` changes in
+    `kentcdodds/kody-home-connector`.
 - Home connector runtime Sentry env (set these on the deployed container or the
   service that runs the published Docker image, not in the GitHub Actions
   workflow itself):
   - `HOME_CONNECTOR_SENTRY_DSN` (optional; enables Sentry error reporting and
-    tracing for the Node-based `packages/home-connector` service)
+    tracing for the Node-based home connector service)
   - `HOME_CONNECTOR_SENTRY_ENVIRONMENT` (optional; forwarded to the connector as
     `SENTRY_ENVIRONMENT`, defaults to `production` in the published Docker
     image)

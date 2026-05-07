@@ -39,10 +39,10 @@ Requests are handled in this order:
 6. Remote connector session endpoints (internal-only Worker routes that proxy
    WebSocket upgrades and JSON-RPC helper requests to the `HomeConnectorSession`
    Durable Object):
-   - `/home/connectors/:connectorId...` — legacy **`home`** connector URL
-     (session key equals `connectorId`)
+   - `/connectors/home/:connectorId...` — **`home`** connector URL (session key
+     `home:connectorId`)
    - `/connectors/:kind/:instanceId...` — generic **`kind`** + instance (session
-     key `kind:instanceId` when `kind` is not `home`)
+     key `kind:instanceId`)
 
    See [Remote connectors](./remote-connectors.md).
 

@@ -17,10 +17,10 @@ to become.
   MCP auth.
 - [Data Storage](./data-storage.md): what is stored in D1, KV, and Durable
   Objects.
-- [Home Connector](./home-connector.md): local device adapters, Samsung token
-  persistence, and connector-specific discovery/runtime behavior.
 - [Remote connectors](./remote-connectors.md): generic outbound WebSocket
   protocol, URLs, secrets, and MCP caller context for any `kind` / instance.
+- [Kody Home Connector](https://github.com/kentcdodds/kody-home-connector):
+  external `home` reference connector implementation.
 - [Local Agent Bridge Direction](./local-agent-bridge.md): proposed direction
   for securely reaching local-network systems through an outbound agent
   connection.

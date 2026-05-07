@@ -132,13 +132,14 @@ Optional Worker secrets/vars (see `packages/worker/src/env-schema.ts` and
 Optional Worker secret/var (see `packages/worker/src/env-schema.ts` and
 `packages/worker/src/home/session.ts`):
 
-- `packages/home-connector` participates in the npm workspace and executes
-  directly on Node 24. Local and container runs therefore need Node 24 with
-  `node:sqlite` support.
+- The home connector lives in
+  [`kentcdodds/kody-home-connector`](https://github.com/kentcdodds/kody-home-connector)
+  and executes directly on Node 24. Local and container runs therefore need Node
+  24 with `node:sqlite` support.
 - `HOME_CONNECTOR_SHARED_SECRET` — shared secret used by the locally running
-  `packages/home-connector` service when it opens the outbound WebSocket session
-  to the worker. When unset, the worker rejects home connector registration and
-  the internal home MCP bridge cannot route `home` capabilities.
+  home connector service when it opens the outbound WebSocket session to the
+  worker. When unset, the worker rejects home connector registration and the
+  internal home MCP bridge cannot route `home` capabilities.
 
 ### Remote connector secrets (Worker)
 
@@ -162,10 +163,12 @@ Authoring guide for outbound WebSocket services:
 - `HOME_CONNECTOR_*` — when you start the full local stack with `npm run dev`,
   any `HOME_CONNECTOR_`-prefixed variable is forwarded to the child connector
   process with the prefix removed. For example, `HOME_CONNECTOR_MOCKS=false`
-  sets `MOCKS=false` for `packages/home-connector`, and
-  `HOME_CONNECTOR_ROKU_DISCOVERY_URL=...` sets `ROKU_DISCOVERY_URL=...`. This
-  also applies to `HOME_CONNECTOR_LUTRON_DISCOVERY_URL=...`,
-  `HOME_CONNECTOR_SENTRY_DSN`, `HOME_CONNECTOR_SENTRY_ENVIRONMENT`,
+  sets `MOCKS=false` for the home connector, and
+  `HOME_CONNECTOR_ROKU_DISCOVERY_URL=...` sets `ROKU_DISCOVERY_URL=...`. Set
+  `HOME_CONNECTOR_DIR=...` to override the local checkout path used by the Kody
+  dev launcher. Prefix forwarding also applies to
+  `HOME_CONNECTOR_LUTRON_DISCOVERY_URL=...`, `HOME_CONNECTOR_SENTRY_DSN`,
+  `HOME_CONNECTOR_SENTRY_ENVIRONMENT`,
   `HOME_CONNECTOR_SENTRY_TRACES_SAMPLE_RATE`,
   `HOME_CONNECTOR_ISLAND_ROUTER_HOST=...`,
   `HOME_CONNECTOR_ISLAND_ROUTER_PORT=...`,
@@ -177,10 +180,10 @@ Authoring guide for outbound WebSocket services:
 - `ROKU_DISCOVERY_URL` — optional connector env var. Defaults to
   `ssdp://239.255.255.250:1900`. Mocked connector runs should set an explicit
   value such as `http://roku.mock.local/discovery`.
-- `SENTRY_DSN` — optional connector env var. When set for
-  `packages/home-connector`, the service initializes `@sentry/node` and reports
-  startup errors, websocket failures, and handled operational exceptions. Use
-  `HOME_CONNECTOR_SENTRY_DSN` when launching through `npm run dev`.
+- `SENTRY_DSN` — optional connector env var. When set for the home connector,
+  the service initializes `@sentry/node` and reports startup errors, websocket
+  failures, and handled operational exceptions. Use `HOME_CONNECTOR_SENTRY_DSN`
+  when launching through `npm run dev`.
 - `SENTRY_ENVIRONMENT` — optional connector env var. The published Docker image
   defaults this to `production`; otherwise the home connector falls back to
   `NODE_ENV` (or `development`) when unset.
