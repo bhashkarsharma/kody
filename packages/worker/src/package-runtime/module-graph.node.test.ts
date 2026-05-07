@@ -1308,4 +1308,7 @@ test('buildKodyAppBundle runtime module exports service helper', async () => {
 	expect(firstCall?.files?.['.__kody_virtual__/runtime.js']).toContain(
 		'export const service = runtime.service ?? null;',
 	)
+	expect(firstCall?.files?.['.__kody_virtual__/runtime.js']).not.toContain(
+		'params',
+	)
 })
