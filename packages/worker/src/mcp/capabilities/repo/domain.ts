@@ -15,7 +15,7 @@ import { repoTreeCapability } from './repo-tree.ts'
 export const repoDomain = defineDomain({
 	name: capabilityDomainNames.repo,
 	description:
-		'Repo-backed source sessions for opening entity workspaces, running constrained git command workflows, and searching code inside live session overlays.',
+		'Repo-backed source sessions for MCP-native edits when agents cannot or should not use a local clone: open workspaces, run constrained git command workflows, search code, validate, and publish live overlays.',
 	keywords: ['repo', 'artifact', 'session', 'workspace', 'git', 'search'],
 	capabilities: [
 		repoOpenSessionCapability,

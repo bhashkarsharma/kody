@@ -11,7 +11,7 @@ import { savePackageCapability } from './save-package.ts'
 export const packagesDomain = defineDomain({
 	name: capabilityDomainNames.packages,
 	description:
-		'Saved packages are the only top-level persisted primitive. A package is a repo-backed module with exports, optional app UI, optional package-owned jobs, and package metadata rooted at package.json.',
+		'Saved packages are the only top-level persisted primitive. Coding agents with local git access can use package_get_git_remote for clone-edit-push workflows; tool-only agents can edit through repo sessions. Package metadata is rooted at package.json.',
 	keywords: ['package', 'repo', 'package.json', 'exports', 'jobs', 'app'],
 	capabilities: [
 		savePackageCapability,

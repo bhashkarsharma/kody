@@ -58,7 +58,7 @@ export const savePackageCapability = defineDomainCapability(
 	{
 		name: 'package_save',
 		description:
-			'Create or replace a saved package for the signed-in user. The package repo is rooted at package.json and package.json#kody is the Kody-specific metadata block.',
+			'Create or replace a saved package by writing a complete package file set. Prefer package_get_git_remote or repo sessions for iterative edits. The package repo is rooted at package.json and package.json#kody is the Kody-specific metadata block.',
 		keywords: ['package', 'save', 'create', 'update', 'repo', 'package.json'],
 		readOnly: false,
 		idempotent: false,

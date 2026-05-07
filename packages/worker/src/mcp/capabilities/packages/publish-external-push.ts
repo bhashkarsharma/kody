@@ -56,7 +56,7 @@ export const publishExternalPushCapability = defineDomainCapability(
 	{
 		name: 'package_publish_external_push',
 		description:
-			'Publish the current Artifacts git HEAD for a saved package after server-side checks pass.',
+			'Publish the current Artifacts git HEAD for a saved package after a package_get_git_remote clone/edit/push workflow and server-side checks pass.',
 		keywords: ['package', 'publish', 'git', 'artifacts', 'external', 'push'],
 		readOnly: false,
 		idempotent: true,

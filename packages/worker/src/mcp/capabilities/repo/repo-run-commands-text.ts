@@ -15,7 +15,7 @@ export const repoRunCommandsSupportedForms = [
 ] as const
 
 export const repoRunCommandsCapabilityDescription = [
-	'Run a parsed git-only workflow in a repo session.',
+	'Run a parsed git-only workflow in a Kody-managed repo session for MCP-native edits.',
 	'Commands are newline-separated and parsed, not shell-executed.',
 	'Only supported git command forms are accepted; unsupported syntax returns line-specific parse errors.',
 ].join(' ')

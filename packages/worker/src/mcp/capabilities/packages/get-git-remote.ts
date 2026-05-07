@@ -40,8 +40,17 @@ export const getGitRemoteCapability = defineDomainCapability(
 	{
 		name: 'package_get_git_remote',
 		description:
-			'Mint a short-lived Cloudflare Artifacts git remote for directly cloning, pulling, or pushing a saved package source repository.',
-		keywords: ['package', 'git', 'remote', 'artifacts', 'clone', 'push'],
+			'Mint a short-lived Cloudflare Artifacts git remote for coding agents with local filesystem/git access to clone a saved package into a temporary directory, edit normally, push, and publish with package_publish_external_push.',
+		keywords: [
+			'package',
+			'git',
+			'remote',
+			'artifacts',
+			'clone',
+			'push',
+			'local clone',
+			'temporary directory',
+		],
 		readOnly: false,
 		idempotent: false,
 		destructive: false,
