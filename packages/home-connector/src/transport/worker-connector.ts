@@ -4,11 +4,11 @@ import {
 	type JSONRPCResponse,
 } from '@modelcontextprotocol/sdk/types.js'
 import {
-	type HomeConnectorHelloMessage,
-	type HomeConnectorClientMessage,
-	type HomeConnectorJsonRpcEnvelope,
-} from '../../../worker/src/home/types.ts'
-import { stringifyHomeConnectorMessage } from '../../../worker/src/home/utils.ts'
+	type ConnectorHelloMessage,
+	type ConnectorJsonRpcEnvelope,
+	type KodyToConnectorMessage,
+	stringifyConnectorMessage,
+} from '@kody-bot/connector-kit/protocol'
 import { type HomeConnectorConfig } from '../config.ts'
 import { type HomeConnectorState, updateConnectionState } from '../state.ts'
 import { type HomeConnectorToolRegistry } from '../mcp/server.ts'
@@ -211,7 +211,7 @@ export function createWorkerConnector(input: {
 	const heartbeat = setInterval(() => {
 		if (socket?.readyState === WebSocket.OPEN) {
 			socket.send(
-				stringifyHomeConnectorMessage({
+				stringifyConnectorMessage({
 					type: 'connector.heartbeat',
 				}),
 			)
@@ -292,7 +292,7 @@ export function createWorkerConnector(input: {
 					consecutiveReconnects,
 				}),
 			})
-			const hello: HomeConnectorHelloMessage = {
+			const hello: ConnectorHelloMessage = {
 				type: 'connector.hello',
 				connectorKind: 'home',
 				connectorId: input.config.homeConnectorId,
@@ -308,14 +308,14 @@ export function createWorkerConnector(input: {
 					consecutiveReconnects,
 				}),
 			})
-			socket?.send(stringifyHomeConnectorMessage(hello))
+			socket?.send(stringifyConnectorMessage(hello))
 		})
 
 		socket.addEventListener('message', async (event) => {
 			try {
 				const value = JSON.parse(String(event.data)) as
-					| HomeConnectorClientMessage
-					| HomeConnectorJsonRpcEnvelope
+					| KodyToConnectorMessage
+					| ConnectorJsonRpcEnvelope
 				switch (value.type) {
 					case 'server.ping':
 						hasReportedSocketIssue = false
@@ -379,7 +379,7 @@ export function createWorkerConnector(input: {
 								}),
 							})
 							socket.send(
-								stringifyHomeConnectorMessage({
+								stringifyConnectorMessage({
 									type: 'connector.jsonrpc',
 									message: createToolsChangedNotification(),
 								}),
@@ -405,7 +405,7 @@ export function createWorkerConnector(input: {
 								input.toolRegistry,
 							)
 							socket.send(
-								stringifyHomeConnectorMessage({
+								stringifyConnectorMessage({
 									type: 'connector.jsonrpc',
 									message: response,
 								}),

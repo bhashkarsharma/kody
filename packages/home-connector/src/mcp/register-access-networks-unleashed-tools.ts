@@ -1,5 +1,5 @@
 import { type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { markSecretInputFields } from '@kody-internal/shared/secret-input-schema.ts'
+import { markSecretInputFields } from '@kody-bot/connector-kit/schema'
 import { z } from 'zod'
 import {
 	accessNetworksUnleashedRequestConfirmation,

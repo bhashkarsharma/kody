@@ -9,7 +9,7 @@
     "test": "vitest run --root ../.. --project node-unit packages/home-connector"
   },
   "dependencies": {
-    "@kody-internal/shared": "file:../shared",
+    "@kody-bot/connector-kit": "^1.0.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@remix-run/node-fetch-server": "^0.13.1",
     "@sentry/node": "^10.45.0",

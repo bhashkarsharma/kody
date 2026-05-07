@@ -1,43 +1,33 @@
 import {
+	type ConnectorHelloMessage,
+	type ConnectorHeartbeatMessage,
+	type ConnectorJsonRpcEnvelope,
+	type ConnectorSnapshot,
+	type ConnectorToolDescriptor,
+	type KodyConnectorAckMessage,
+	type KodyConnectorErrorMessage,
+	type KodyConnectorPingMessage,
+	type KodyToConnectorMessage,
+} from '@kody-bot/connector-kit/protocol'
+import {
 	type JSONRPCErrorResponse,
 	type JSONRPCMessage,
 	type JSONRPCRequest,
 	type JSONRPCResultResponse,
 } from '@modelcontextprotocol/sdk/types.js'
 
-export type HomeToolDescriptor = {
-	name: string
-	title?: string
-	description?: string
-	inputSchema?: Record<string, unknown>
-	outputSchema?: Record<string, unknown>
-	annotations?: Record<string, unknown>
-	_meta?: Record<string, unknown>
-}
+export type HomeToolDescriptor = ConnectorToolDescriptor
 
-export type HomeConnectorSnapshot = {
-	/** Logical connector kind (e.g. `home`). Defaults to `home` when omitted. */
-	connectorKind?: string
-	connectorId: string
-	connectedAt: string
-	lastSeenAt: string
-	tools: Array<HomeToolDescriptor>
-}
+export type HomeConnectorSnapshot = ConnectorSnapshot
 
-export type HomeConnectorHelloMessage = {
-	type: 'connector.hello'
-	connectorId: string
-	sharedSecret: string
-	/** When omitted, treated as `home` for backward compatibility. */
-	connectorKind?: string
-}
+export type HomeConnectorHelloMessage = ConnectorHelloMessage
 
-export type HomeConnectorHeartbeatMessage = {
-	type: 'connector.heartbeat'
-}
+export type HomeConnectorHeartbeatMessage = ConnectorHeartbeatMessage
 
-export type HomeConnectorJsonRpcEnvelope = {
-	type: 'connector.jsonrpc'
+export type HomeConnectorJsonRpcEnvelope = Omit<
+	ConnectorJsonRpcEnvelope,
+	'message'
+> & {
 	message: JSONRPCMessage
 }
 
@@ -46,24 +36,13 @@ export type HomeConnectorServerMessage =
 	| HomeConnectorHeartbeatMessage
 	| HomeConnectorJsonRpcEnvelope
 
-export type HomeConnectorAckMessage = {
-	type: 'server.ack'
-	connectorId: string
-}
+export type HomeConnectorAckMessage = KodyConnectorAckMessage
 
-export type HomeConnectorErrorMessage = {
-	type: 'server.error'
-	message: string
-}
+export type HomeConnectorErrorMessage = KodyConnectorErrorMessage
 
-export type HomeConnectorPingMessage = {
-	type: 'server.ping'
-}
+export type HomeConnectorPingMessage = KodyConnectorPingMessage
 
-export type HomeConnectorClientMessage =
-	| HomeConnectorAckMessage
-	| HomeConnectorErrorMessage
-	| HomeConnectorPingMessage
+export type HomeConnectorClientMessage = KodyToConnectorMessage
 
 export type HomeConnectorPersistedState = {
 	connectorId: string | null

@@ -1,7 +1,7 @@
 import * as Sentry from '@sentry/node'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { markSecretInputFields } from '@kody-internal/shared/secret-input-schema.ts'
+import { markSecretInputFields } from '@kody-bot/connector-kit/schema'
 import { z } from 'zod'
 import { type createAccessNetworksUnleashedAdapter } from '../adapters/access-networks-unleashed/index.ts'
 import { type createBondAdapter } from '../adapters/bond/index.ts'

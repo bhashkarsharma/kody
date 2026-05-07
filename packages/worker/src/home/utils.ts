@@ -4,6 +4,11 @@ import {
 	type HomeConnectorServerMessage,
 } from './types.ts'
 import {
+	isConnectorJsonRpcEnvelope,
+	parseConnectorMessage,
+	stringifyConnectorMessage,
+} from '@kody-bot/connector-kit/protocol'
+import {
 	type JSONRPCErrorResponse,
 	type JSONRPCMessage,
 	type JSONRPCRequest,
@@ -24,66 +29,23 @@ export function jsonResponse(data: unknown, init?: ResponseInit) {
 export function isJsonRpcEnvelope(
 	value: HomeConnectorServerMessage,
 ): value is HomeConnectorJsonRpcEnvelope {
-	return value.type === 'connector.jsonrpc'
+	return isConnectorJsonRpcEnvelope(
+		value as Parameters<typeof isConnectorJsonRpcEnvelope>[0],
+	)
 }
 
 export function parseHomeConnectorMessage(
 	raw: string | ArrayBuffer,
 ): HomeConnectorServerMessage {
-	const text =
-		typeof raw === 'string'
-			? raw
-			: new TextDecoder().decode(new Uint8Array(raw))
-	const value = JSON.parse(text) as unknown
-	if (!value || typeof value !== 'object') {
-		throw new Error('Expected object message.')
-	}
-	const type = (value as Record<string, unknown>)['type']
-	if (type === 'connector.hello') {
-		const connectorId = (value as Record<string, unknown>)['connectorId']
-		const sharedSecret = (value as Record<string, unknown>)['sharedSecret']
-		const record = value as Record<string, unknown>
-		const hasConnectorKindKey = Object.hasOwn(record, 'connectorKind')
-		const connectorKindRaw = record['connectorKind']
-		if (hasConnectorKindKey && typeof connectorKindRaw !== 'string') {
-			throw new Error(
-				'Invalid connector hello: connectorKind must be a string.',
-			)
-		}
-		const connectorKind =
-			typeof connectorKindRaw === 'string' && connectorKindRaw.trim()
-				? connectorKindRaw.trim().toLowerCase()
-				: undefined
-		if (typeof connectorId !== 'string' || typeof sharedSecret !== 'string') {
-			throw new Error('Invalid connector hello payload.')
-		}
-		return {
-			type,
-			connectorId,
-			sharedSecret,
-			...(connectorKind ? { connectorKind } : {}),
-		}
-	}
-	if (type === 'connector.heartbeat') {
-		return { type }
-	}
-	if (type === 'connector.jsonrpc') {
-		const message = (value as Record<string, unknown>)['message']
-		if (!message || typeof message !== 'object') {
-			throw new Error('Invalid JSON-RPC envelope payload.')
-		}
-		return {
-			type,
-			message: message as HomeConnectorJsonRpcEnvelope['message'],
-		}
-	}
-	throw new Error(`Unknown home connector message type: ${String(type)}`)
+	return parseConnectorMessage(raw) as HomeConnectorServerMessage
 }
 
 export function stringifyHomeConnectorMessage(
 	message: HomeConnectorServerMessage | HomeConnectorClientMessage,
 ) {
-	return JSON.stringify(message)
+	return stringifyConnectorMessage(
+		message as Parameters<typeof stringifyConnectorMessage>[0],
+	)
 }
 
 export function createJsonRpcRequest(
