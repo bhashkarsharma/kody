@@ -163,6 +163,17 @@ export async function refreshSavedPackageProjection(input: {
 				entryPoint,
 			})
 		},
+		buildImportableModuleBundle: async ({ entryPoint }) => {
+			const { buildKodyImportableModuleBundle } =
+				await import('#worker/package-runtime/module-graph.ts')
+			return await buildKodyImportableModuleBundle({
+				env: input.env,
+				baseUrl: input.baseUrl,
+				userId: input.userId,
+				sourceFiles: loaded.files,
+				entryPoint,
+			})
+		},
 	})
 	try {
 		await refreshPackageRetrieverManifestCache({

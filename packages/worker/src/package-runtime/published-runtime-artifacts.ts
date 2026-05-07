@@ -8,7 +8,12 @@ const sourceSnapshotPrefix = 'source-snapshot'
 const sourceManifestSnapshotPrefix = 'source-manifest-snapshot'
 const bundleArtifactPrefix = 'bundle-artifact'
 
-export type BundleArtifactKind = 'app' | 'job' | 'module' | 'service'
+export type BundleArtifactKind =
+	| 'app'
+	| 'importable-module'
+	| 'job'
+	| 'module'
+	| 'service'
 
 export type BundleArtifactDependency = {
 	sourceId: string

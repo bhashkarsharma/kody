@@ -278,6 +278,11 @@ export async function rebuildPublishedPackageArtifacts(input: {
 		modules: WorkerLoaderModules
 		dependencies?: Array<BundleArtifactDependency>
 	}>
+	buildImportableModuleBundle: (args: { entryPoint: string }) => Promise<{
+		mainModule: string
+		modules: WorkerLoaderModules
+		dependencies?: Array<BundleArtifactDependency>
+	}>
 }) {
 	const fallbackDependencies = await collectDependenciesFromFiles({
 		env: input.env,
@@ -347,6 +352,25 @@ export async function rebuildPublishedPackageArtifacts(input: {
 			mainModule: bundle.mainModule,
 			modules: bundle.modules,
 			dependencies: bundle.dependencies ?? fallbackDependencies,
+			packageContext: {
+				packageId: input.savedPackage.id,
+				kodyId: input.savedPackage.kodyId,
+				sourceId: input.savedPackage.sourceId,
+			},
+		})
+		const importableBundle = await input.buildImportableModuleBundle({
+			entryPoint,
+		})
+		await persistPublishedBundleArtifact({
+			env: input.env,
+			userId: input.userId,
+			source: input.source,
+			kind: 'importable-module',
+			artifactName: exportName,
+			entryPoint,
+			mainModule: importableBundle.mainModule,
+			modules: importableBundle.modules,
+			dependencies: importableBundle.dependencies ?? fallbackDependencies,
 			packageContext: {
 				packageId: input.savedPackage.id,
 				kodyId: input.savedPackage.kodyId,

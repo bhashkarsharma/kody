@@ -241,6 +241,7 @@ test('refreshSavedPackageProjection resyncs the job manager after syncing packag
 		files: { 'package.json': '{}' },
 		buildAppBundle: expect.any(Function),
 		buildModuleBundle: expect.any(Function),
+		buildImportableModuleBundle: expect.any(Function),
 	})
 	expect(mockModule.refreshPackageRetrieverManifestCache).toHaveBeenCalledWith({
 		env,

@@ -332,7 +332,7 @@ test('buildKodyModuleBundle imports callable entrypoints as ESM default exports'
 	).not.toContain('?? userModule')
 })
 
-test('buildKodyModuleBundle prefers published export artifacts for saved package imports', async () => {
+test('buildKodyModuleBundle prefers published importable export artifacts for saved package imports', async () => {
 	mockModule.createWorker.mockResolvedValue(
 		createBundleResult('published-artifact'),
 	)
@@ -370,39 +370,44 @@ test('buildKodyModuleBundle prefers published export artifacts for saved package
 				'import { marked } from "marked"\nexport default async function render() { return marked.parse("**ok**") }',
 		},
 	})
-	mockModule.loadPublishedBundleArtifactByIdentity.mockResolvedValue({
-		row: {
-			id: 'artifact-1',
-		},
-		artifact: {
-			version: 1,
-			kind: 'module',
-			artifactName: './html',
-			sourceId: 'source-1',
-			publishedCommit: 'commit-1',
-			entryPoint: 'src/html.ts',
-			mainModule: 'dist/html.js',
-			modules: {
-				'dist/html.js':
-					'export default async function render() { return "<p><strong>ok</strong></p>" }',
-			},
-			dependencies: [
-				{
-					sourceId: 'source-1',
-					publishedCommit: 'commit-1',
-					kodyId: 'example-package',
-					packageName: '@kentcdodds/example-package',
-				},
-			],
-			packageContext: {
-				packageId: 'pkg-1',
-				kodyId: 'example-package',
-				sourceId: 'source-1',
-			},
-			serviceContext: null,
-			createdAt: '2026-05-01T00:00:00.000Z',
-		},
-	})
+	mockModule.loadPublishedBundleArtifactByIdentity.mockImplementation(
+		async (input: { kind: string }) =>
+			input.kind === 'importable-module'
+				? {
+						row: {
+							id: 'artifact-1',
+						},
+						artifact: {
+							version: 1,
+							kind: 'importable-module',
+							artifactName: './html',
+							sourceId: 'source-1',
+							publishedCommit: 'commit-1',
+							entryPoint: 'src/html.ts',
+							mainModule: 'dist/html.js',
+							modules: {
+								'dist/html.js':
+									'export const helper = "ok"; export default async function render(input) { return input }',
+							},
+							dependencies: [
+								{
+									sourceId: 'source-1',
+									publishedCommit: 'commit-1',
+									kodyId: 'example-package',
+									packageName: '@kentcdodds/example-package',
+								},
+							],
+							packageContext: {
+								packageId: 'pkg-1',
+								kodyId: 'example-package',
+								sourceId: 'source-1',
+							},
+							serviceContext: null,
+							createdAt: '2026-05-01T00:00:00.000Z',
+						},
+					}
+				: null,
+	)
 
 	const { buildKodyModuleBundle } = await import('./module-graph.ts')
 
@@ -447,7 +452,16 @@ test('buildKodyModuleBundle prefers published export artifacts for saved package
 		([path]) =>
 			path.includes('.__published_bundle__') && path.endsWith('/dist/html.js'),
 	)
-	expect(artifactEntry?.[1]).toContain('<p><strong>ok</strong></p>')
+	expect(artifactEntry?.[1]).toContain('export const helper = "ok"')
+	expect(artifactEntry?.[1]).toContain('return input')
+	expect(artifactEntry?.[1]).not.toContain('__kodyRuntime')
+	expect(mockModule.loadPublishedBundleArtifactByIdentity).toHaveBeenCalledWith(
+		expect.objectContaining({
+			kind: 'importable-module',
+			artifactName: './html',
+			entryPoint: 'src/html.ts',
+		}),
+	)
 	const proxyEntry = Object.entries(firstCall?.files ?? {}).find(([path]) =>
 		path.includes('__kody_virtual__/imports/'),
 	)

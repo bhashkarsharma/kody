@@ -63,6 +63,16 @@ test('rebuildPublishedPackageArtifacts bundles declared subscription handlers', 
 			dependencies: [],
 		}),
 	)
+	const buildImportableModuleBundle = vi.fn(
+		async ({ entryPoint }: { entryPoint: string }) => ({
+			mainModule: `dist/importable_${entryPoint.replaceAll('/', '_')}.js`,
+			modules: {
+				[`dist/importable_${entryPoint.replaceAll('/', '_')}.js`]:
+					'export default async function run(input) { return input }',
+			},
+			dependencies: [],
+		}),
+	)
 
 	await rebuildPublishedPackageArtifacts({
 		env: {
@@ -128,10 +138,14 @@ test('rebuildPublishedPackageArtifacts bundles declared subscription handlers', 
 		},
 		buildAppBundle,
 		buildModuleBundle,
+		buildImportableModuleBundle,
 	})
 
 	expect(buildAppBundle).not.toHaveBeenCalled()
 	expect(buildModuleBundle).toHaveBeenCalledWith({
+		entryPoint: './src/index.ts',
+	})
+	expect(buildImportableModuleBundle).toHaveBeenCalledWith({
 		entryPoint: './src/index.ts',
 	})
 	expect(buildModuleBundle).toHaveBeenCalledWith({
@@ -140,14 +154,17 @@ test('rebuildPublishedPackageArtifacts bundles declared subscription handlers', 
 	expect(buildModuleBundle).toHaveBeenCalledWith({
 		entryPoint: 'src/on-email-quarantined.ts',
 	})
-	expect(mockModule.insertPublishedBundleArtifactRow).toHaveBeenCalledTimes(3)
+	expect(buildImportableModuleBundle).toHaveBeenCalledTimes(1)
+	expect(mockModule.insertPublishedBundleArtifactRow).toHaveBeenCalledTimes(4)
 	expect(
-		mockModule.insertPublishedBundleArtifactRow.mock.calls.map(
-			(call) => call[1].artifactName,
-		),
+		mockModule.insertPublishedBundleArtifactRow.mock.calls.map((call) => [
+			call[1].artifactKind,
+			call[1].artifactName,
+		]),
 	).toEqual([
-		'.',
-		'subscription:email.message.quarantined',
-		'subscription:email.message.received',
+		['module', '.'],
+		['importable-module', '.'],
+		['module', 'subscription:email.message.quarantined'],
+		['module', 'subscription:email.message.received'],
 	])
 })

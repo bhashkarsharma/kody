@@ -342,7 +342,7 @@ async function maybeEnsurePublishedArtifactTarget(input: {
 		env: input.state.env,
 		userId: input.state.userId,
 		sourceId: input.loaded.row.sourceId,
-		kind: 'module',
+		kind: 'importable-module',
 		artifactName: exportName,
 		entryPoint,
 	})
