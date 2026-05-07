@@ -152,7 +152,8 @@ vi.mock('#worker/package-runtime/module-graph.ts', () => ({
 	buildKodyModuleBundle: vi.fn(async () => ({
 		mainModule: 'entry.js',
 		modules: {
-			'entry.js': 'export default async function main(input = {}) { return input }',
+			'entry.js':
+				'export default async function main(input = {}) { return input }',
 		},
 	})),
 }))

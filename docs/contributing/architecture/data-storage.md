@@ -179,9 +179,9 @@ Artifacts tokens.
 
 Production note:
 
-- Production deploys warn that the documented Artifacts Worker binding config
-  is unexpected, and deploy logs show no `env.ARTIFACTS` binding in the
-  deployed Worker binding summary.
+- Production deploys warn that the documented Artifacts Worker binding config is
+  unexpected, and deploy logs show no `env.ARTIFACTS` binding in the deployed
+  Worker binding summary.
 - Because that binding is absent in production, repo source code uses the
   documented Artifacts REST API as the single integration path for
   create/get/token/fork operations.
