@@ -19,6 +19,7 @@ declare namespace Cloudflare {
 		AI_MODE: "remote";
 		AI_MODEL: "@cf/zai-org/glm-4.7-flash";
 		SENTRY_ENVIRONMENT: "production";
+		WORKFLOW_CONCURRENT_LIMIT: "100";
 		COOKIE_SECRET: string;
 		APP_BASE_URL: string;
 		RESEND_API_BASE_URL: string;
@@ -34,6 +35,7 @@ declare namespace Cloudflare {
 		REPO_SESSION: DurableObjectNamespace<import("./src/index").RepoSession>;
 		PACKAGE_REALTIME_SESSION: DurableObjectNamespace<import("./src/index").PackageRealtimeSession>;
 		PACKAGE_SERVICE_INSTANCE: DurableObjectNamespace<import("./src/index").PackageServiceInstance>;
+		DYNAMIC_CALLABLE_WORKFLOWS: Workflow<Parameters<import("./src/index").DynamicCallableWorkflow['run']>[0]['payload']>;
 		PACKAGE_WORKFLOWS: Workflow<Parameters<import("./src/index").PackageWorkflowEntrypoint['run']>[0]['payload']>;
 	}
 }
@@ -42,7 +44,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "AI_MODE" | "AI_MODEL" | "SENTRY_ENVIRONMENT" | "COOKIE_SECRET" | "APP_BASE_URL" | "RESEND_API_BASE_URL" | "RESEND_API_KEY" | "RESEND_FROM_EMAIL" | "SENTRY_DSN">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "AI_MODE" | "AI_MODEL" | "SENTRY_ENVIRONMENT" | "WORKFLOW_CONCURRENT_LIMIT" | "COOKIE_SECRET" | "APP_BASE_URL" | "RESEND_API_BASE_URL" | "RESEND_API_KEY" | "RESEND_FROM_EMAIL" | "SENTRY_DSN">> {}
 }
 
 // Begin runtime types

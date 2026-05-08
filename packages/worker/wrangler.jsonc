@@ -91,6 +91,11 @@
 			],
 			"workflows": [
 				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+				},
+				{
 					"binding": "PACKAGE_WORKFLOWS",
 					"name": "kody-package-workflows",
 					"class_name": "PackageWorkflowEntrypoint",
@@ -171,6 +176,7 @@
 				"AI_MODE": "remote",
 				"AI_MODEL": "@cf/zai-org/glm-4.7-flash",
 				"SENTRY_ENVIRONMENT": "production",
+				"WORKFLOW_CONCURRENT_LIMIT": "100",
 			},
 		},
 		"preview": {
@@ -187,6 +193,11 @@
 				},
 			],
 			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-preview-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+				},
 				{
 					"binding": "PACKAGE_WORKFLOWS",
 					"name": "kody-preview-package-workflows",
@@ -268,6 +279,7 @@
 				"AI_MODE": "remote",
 				"AI_MODEL": "@cf/zai-org/glm-4.7-flash",
 				"SENTRY_ENVIRONMENT": "preview",
+				"WORKFLOW_CONCURRENT_LIMIT": "100",
 			},
 		},
 		"test": {
@@ -284,6 +296,11 @@
 				},
 			],
 			"workflows": [
+				{
+					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
+					"name": "kody-test-dynamic-callable-workflows",
+					"class_name": "DynamicCallableWorkflow",
+				},
 				{
 					"binding": "PACKAGE_WORKFLOWS",
 					"name": "kody-test-package-workflows",
@@ -359,6 +376,7 @@
 				"AI_MODE": "mock",
 				"AI_MODEL": "@cf/zai-org/glm-4.7-flash",
 				"SENTRY_ENVIRONMENT": "test",
+				"WORKFLOW_CONCURRENT_LIMIT": "100",
 				"COOKIE_SECRET": "LOCAL_AND_PREVIEW_COOKIE_SECRET_32_CHARS_MINIMUM",
 				"SECRET_STORE_KEY": "LOCAL_TEST_SECRET_STORE_KEY_32_CHARS_MINIMUM_OK",
 			},
