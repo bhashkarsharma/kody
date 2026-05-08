@@ -48,7 +48,7 @@ Saved package surface:
 Sandbox surface:
 - Import runtime helpers from \`kody:runtime\`.
 - \`import { codemode } from 'kody:runtime'\` for builtin capabilities.
-- \`import { storage } from 'kody:runtime'\` for durable storage helpers on the bound \`storageId\`, including \`storage.sql(query, params?)\`.
+- \`import { storage } from 'kody:runtime'\` for durable storage helpers on the bound \`storageId\`, including \`storage.sql(query, params?)\`. \`storage.sql\` returns \`{ columns, rows, rowCount, rowsRead, rowsWritten }\`; read query rows from \`.rows\`.
 - \`import { refreshAccessToken, createAuthenticatedFetch } from 'kody:runtime'\` for OAuth integrations. Integration \`name\` may be account-specific (e.g. \`google-personal\`, \`google-business\`); call \`integration_list\` first when the task involves a provider that may have multiple accounts connected.
 - \`import { agentChatTurnStream } from 'kody:runtime'\` for streamed agent turns.
 - \`import { workflows } from 'kody:runtime'\` for durable Cloudflare Workflows. \`workflows.create\` accepts either inline \`code\` or a saved-package \`exportName\`; use \`workflow_list\` to inspect recent runs.

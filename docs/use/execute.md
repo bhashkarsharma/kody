@@ -194,6 +194,24 @@ package-owned jobs and non-package jobs created with `job_schedule` or
 - use **`storage.get(...)`**, **`storage.set(...)`**, **`storage.list(...)`**,
   and **`storage.sql(query, params?)`**
 
+`storage.sql(...)` returns a result object, not the row array directly:
+
+```ts
+const result = await storage.sql('select value from counters')
+
+return {
+	columns: result.columns,
+	rows: result.rows,
+	rowCount: result.rowCount,
+	rowsRead: result.rowsRead,
+	rowsWritten: result.rowsWritten,
+}
+```
+
+Read query rows from **`result.rows`**. The other fields are useful for
+inspection and debugging, especially when validating whether a query read or
+wrote storage.
+
 For dedicated inspection, use:
 
 - **`storage_export`** — export one storage bucket as JSON
