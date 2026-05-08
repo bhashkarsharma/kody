@@ -446,6 +446,13 @@ function buildAppOptionDescription(updatedAt: string) {
 	return `Updated ${new Date(updatedAt).toLocaleDateString()}`
 }
 
+const truncatedTextCss = {
+	minWidth: 0,
+	overflow: 'hidden',
+	textOverflow: 'ellipsis',
+	whiteSpace: 'nowrap',
+} as const
+
 export function AccountSecretsRoute(handle: Handle) {
 	let status: AccountStatus = 'loading'
 	let email = ''
@@ -1210,7 +1217,10 @@ export function AccountSecretsRoute(handle: Handle) {
 											},
 										),
 
-										css(inputCss),
+										css({
+											...inputCss,
+											paddingRight: spacing.xl,
+										}),
 									]}
 								/>
 							</label>
@@ -1277,6 +1287,7 @@ export function AccountSecretsRoute(handle: Handle) {
 								mix={css({
 									maxHeight: 'min(65vh, 48rem)',
 									overflowY: 'auto',
+									overflowX: 'hidden',
 									paddingRight: spacing.xs,
 								})}
 							>
@@ -1292,7 +1303,7 @@ export function AccountSecretsRoute(handle: Handle) {
 									{filteredSecrets.map((secret) => {
 										const isActive = activeSecretId === secret.id
 										return (
-											<li key={secret.id}>
+											<li key={secret.id} mix={css({ minWidth: 0 })}>
 												<button
 													type="button"
 													mix={[
@@ -1304,10 +1315,12 @@ export function AccountSecretsRoute(handle: Handle) {
 
 														css({
 															width: '100%',
+															minWidth: 0,
 															textAlign: 'left',
 															display: 'grid',
 															gap: spacing.xs,
 															padding: spacing.md,
+															overflow: 'hidden',
 															borderRadius: radius.md,
 															border: `1px solid ${
 																isActive ? colors.primary : colors.border
@@ -1324,13 +1337,21 @@ export function AccountSecretsRoute(handle: Handle) {
 												>
 													<div
 														mix={css({
-															display: 'flex',
-															justifyContent: 'space-between',
-															gap: spacing.sm,
+															display: 'grid',
+															gridTemplateColumns: 'minmax(0, 1fr) auto',
+															gap: spacing.md,
 															alignItems: 'baseline',
+															minWidth: 0,
 														})}
 													>
-														<strong>{secret.name}</strong>
+														<strong
+															mix={css({
+																...truncatedTextCss,
+																display: 'block',
+															})}
+														>
+															{secret.name}
+														</strong>
 														<span
 															mix={css({
 																fontSize: typography.fontSize.xs,
@@ -1342,6 +1363,8 @@ export function AccountSecretsRoute(handle: Handle) {
 													</div>
 													<span
 														mix={css({
+															...truncatedTextCss,
+															display: 'block',
 															fontSize: typography.fontSize.sm,
 															color: colors.textMuted,
 														})}
@@ -1352,8 +1375,14 @@ export function AccountSecretsRoute(handle: Handle) {
 													{secret.description ? (
 														<span
 															mix={css({
+																display: '-webkit-box',
 																fontSize: typography.fontSize.sm,
 																color: colors.textMuted,
+																overflow: 'hidden',
+																overflowWrap: 'anywhere',
+																textOverflow: 'ellipsis',
+																'-webkit-box-orient': 'vertical',
+																'-webkit-line-clamp': '2',
 															})}
 														>
 															{secret.description}
