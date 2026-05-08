@@ -10,9 +10,14 @@ import { registerResources } from './register-resources.ts'
 import {
 	buildMcpServerInstructions,
 	conversationIdGuidance,
+	type RemoteConnectorInstructionSummary,
 } from './server-instructions.ts'
 import { registerTools } from './register-tools.ts'
 import { getMcpUserServerInstructions } from './user-server-instructions-repo.ts'
+import { createRemoteConnectorMcpClient } from '#worker/remote-connector/client.ts'
+import { remoteConnectorDomainId } from '#worker/remote-connector/remote-domain-id.ts'
+import { normalizeRemoteConnectorRefs } from '@kody-internal/shared/remote-connectors.ts'
+import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
 
 export type State = {
 	searchConversationIdsWithPreamble?: Array<string>
@@ -26,6 +31,41 @@ const serverImplementation = {
 	version: '1.0.0',
 } as const
 
+async function loadRemoteConnectorInstructionSummaries(input: {
+	env: Env
+	caller: McpCallerContext
+}): Promise<Array<RemoteConnectorInstructionSummary>> {
+	const refs = normalizeRemoteConnectorRefs(input.caller)
+	const settled = await Promise.allSettled(
+		refs.map(async (ref) => {
+			const snapshot = await createRemoteConnectorMcpClient(
+				input.env,
+				ref.kind,
+				ref.instanceId,
+			).getSnapshot()
+			if (!snapshot) return null
+			const connectorKind = snapshot.connectorKind.trim().toLowerCase()
+			const connectorId = snapshot.connectorId.trim()
+			return {
+				name: `${connectorKind}/${connectorId}`,
+				domain: remoteConnectorDomainId(ref),
+				description: snapshot.description ?? null,
+			}
+		}),
+	)
+	return settled.flatMap((outcome, index) => {
+		if (outcome.status === 'fulfilled') {
+			return outcome.value ? [outcome.value] : []
+		}
+		const ref = refs[index]
+		console.error(
+			`[loadRemoteConnectorInstructionSummaries] failed for ${ref?.kind ?? '?'}:${ref?.instanceId ?? '?'}`,
+			outcome.reason,
+		)
+		return []
+	})
+}
+
 class MCPBase extends McpAgent<Env, State, Props> {
 	initialState: State = {
 		searchConversationIdsWithPreamble: [],
@@ -34,12 +74,20 @@ class MCPBase extends McpAgent<Env, State, Props> {
 	async init() {
 		const caller = this.getCallerContext()
 		const userId = caller.user?.userId ?? null
-		const overlay =
+		const [overlay, remoteConnectors] = await Promise.all([
 			userId !== null
-				? await getMcpUserServerInstructions(this.env.APP_DB, userId)
-				: null
+				? getMcpUserServerInstructions(this.env.APP_DB, userId)
+				: Promise.resolve(null),
+			loadRemoteConnectorInstructionSummaries({
+				env: this.env,
+				caller,
+			}),
+		])
 		this.server = new McpServer(serverImplementation, {
-			instructions: buildMcpServerInstructions(overlay),
+			instructions: buildMcpServerInstructions({
+				userOverlay: overlay,
+				remoteConnectors,
+			}),
 			jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
 		})
 		await registerResources(this)

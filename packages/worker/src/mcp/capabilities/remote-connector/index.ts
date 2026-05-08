@@ -167,9 +167,16 @@ export async function synthesizeRemoteToolDomain(
 	const k = ref.kind.trim().toLowerCase()
 	const domainIdForCapabilities: CapabilityDomain = domainId
 
-	const domainKeywordRoots = [k, 'integration', 'connector']
+	const domainKeywordRoots = [
+		k,
+		snapshot.description ?? '',
+		'integration',
+		'connector',
+	]
 
-	const domainDescription = `Capabilities discovered from the connected "${ref.kind}" remote connector ("${ref.instanceId}").`
+	const domainDescription =
+		snapshot.description?.trim() ||
+		`Capabilities discovered from the connected "${ref.kind}" remote connector ("${ref.instanceId}").`
 
 	const capabilities: Array<Capability> = []
 	const bindings: Record<string, RemoteToolCapabilityBinding> = {}

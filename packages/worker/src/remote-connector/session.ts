@@ -51,6 +51,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 		persisted: {
 			connectorId: null,
 			connectorKind: null,
+			description: null,
 			connectedAt: null,
 			lastSeenAt: null,
 		},
@@ -210,7 +211,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 	}
 
 	async getSnapshot(): Promise<RemoteConnectorSnapshot | null> {
-		const { connectorId, connectorKind, connectedAt, lastSeenAt } =
+		const { connectorId, connectorKind, description, connectedAt, lastSeenAt } =
 			this.stateSnapshot.persisted
 		if (!connectorId || !connectedAt || !lastSeenAt) return null
 		if (this.ctx.getWebSockets(connectorTag).length === 0) {
@@ -220,6 +221,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 		return {
 			connectorKind: kind,
 			connectorId,
+			...(description ? { description } : {}),
 			connectedAt,
 			lastSeenAt,
 			tools: this.stateSnapshot.tools,
@@ -232,6 +234,9 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 		if (!stored) return
 		if (stored.persisted.connectorKind === undefined) {
 			stored.persisted.connectorKind = null
+		}
+		if (stored.persisted.description === undefined) {
+			stored.persisted.description = null
 		}
 		this.stateSnapshot = stored
 	}
@@ -398,6 +403,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 		this.stateSnapshot.persisted = {
 			connectorId: canonicalInstanceId,
 			connectorKind: declaredKind,
+			description: message.description?.trim() || null,
 			connectedAt: this.stateSnapshot.persisted.connectedAt ?? now,
 			lastSeenAt: now,
 		}

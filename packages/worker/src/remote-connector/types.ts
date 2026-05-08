@@ -47,6 +47,7 @@ export type RemoteConnectorClientMessage = KodyToConnectorMessage
 export type RemoteConnectorPersistedState = {
 	connectorId: string | null
 	connectorKind: string | null
+	description: string | null
 	connectedAt: string | null
 	lastSeenAt: string | null
 }

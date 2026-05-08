@@ -4,10 +4,46 @@ const domainInstructions = builtinDomains
 	.map((domain) => `- \`${domain.name}\`: ${domain.description}`)
 	.join('\n')
 
+const maxRemoteConnectorDescriptionChars = 240
+
+export type RemoteConnectorInstructionSummary = {
+	name: string
+	domain: string
+	description?: string | null
+}
+
+function truncateRemoteConnectorDescription(description: string) {
+	if (description.length <= maxRemoteConnectorDescriptionChars) {
+		return description
+	}
+	return `${description.slice(0, maxRemoteConnectorDescriptionChars - 3).trimEnd()}...`
+}
+
+function formatRemoteConnectorInstructions(
+	connectors: ReadonlyArray<RemoteConnectorInstructionSummary> | undefined,
+) {
+	if (!connectors?.length) return ''
+	const lines = connectors.map((connector) => {
+		const description = connector.description?.trim()
+		return description
+			? `- \`${connector.name}\` (\`${connector.domain}\`): ${truncateRemoteConnectorDescription(description)}`
+			: `- \`${connector.name}\` (\`${connector.domain}\`)`
+	})
+	return `
+
+Connected remote connectors
+${lines.join('\n')}
+`
+}
+
 export const conversationIdGuidance =
 	'The public MCP tools accept optional `conversationId` and `memoryContext` fields. `conversationId` ties related calls together. If you already have a `conversationId` from an earlier response in the same conversation, pass it back unchanged. Otherwise omit this field to receive a server-generated ID, then reuse the returned `conversationId` on subsequent calls - this enables optimizations like reduced response size. Do not invent your own `conversationId`.'
 
-export function buildBaseMcpServerInstructions(): string {
+export function buildBaseMcpServerInstructions(
+	input: {
+		remoteConnectors?: ReadonlyArray<RemoteConnectorInstructionSummary>
+	} = {},
+): string {
 	return `
 End-user documentation (workflows, secrets, troubleshooting):
 https://github.com/kentcdodds/kody/tree/main/docs/use
@@ -39,9 +75,10 @@ Kody repository (for contributors): https://github.com/kentcdodds/kody
 
 Domains (builtin capability groups)
 ${domainInstructions}
+${formatRemoteConnectorInstructions(input.remoteConnectors)}
 
 What shows up in \`search\` (before you search)
-- Result **types**: \`capability\` (built-in), \`package\` (saved repo-backed package), \`value\` (persisted non-secret config), \`integration\` (saved integration config), \`secret\` (metadata only). Use \`entity: "{id}:{type}"\` for one item’s detail.
+- Result **types**: \`capability\` (built-in or connected remote connector), \`package\` (saved repo-backed package), \`value\` (persisted non-secret config), \`integration\` (saved integration config), \`secret\` (metadata only). Use \`entity: "{id}:{type}"\` for one item’s detail.
 
 search
 - \`query\`: natural language; results are ranked (order matters). Optional \`limit\`, \`maxResponseSize\`.
@@ -63,9 +100,21 @@ open_generated_ui
 }
 
 export function buildMcpServerInstructions(
-	userOverlay: string | null | undefined,
+	input:
+		| string
+		| null
+		| undefined
+		| {
+				userOverlay?: string | null | undefined
+				remoteConnectors?: ReadonlyArray<RemoteConnectorInstructionSummary>
+		  },
 ): string {
-	const base = buildBaseMcpServerInstructions()
+	const normalizedInput =
+		typeof input === 'object' && input !== null ? input : { userOverlay: input }
+	const base = buildBaseMcpServerInstructions({
+		remoteConnectors: normalizedInput.remoteConnectors,
+	})
+	const userOverlay = normalizedInput.userOverlay
 	const trimmed = userOverlay?.trim()
 	if (!trimmed) return base
 	return `${base}

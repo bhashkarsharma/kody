@@ -28,6 +28,7 @@ type StoredRemoteConnectorSessionState = {
 	persisted: {
 		connectorId: string | null
 		connectorKind: string | null
+		description?: string | null
 		connectedAt: string | null
 		lastSeenAt: string | null
 	}
@@ -83,6 +84,7 @@ test('constructor restores persisted state through blockConcurrencyWhile', async
 			persisted: {
 				connectorId: 'default',
 				connectorKind: 'lights',
+				description: 'Local lighting automation.',
 				connectedAt: '2026-04-26T05:00:00.000Z',
 				lastSeenAt: '2026-04-26T05:01:00.000Z',
 			},
@@ -106,6 +108,7 @@ test('constructor restores persisted state through blockConcurrencyWhile', async
 	const snapshot = await session.getSnapshot()
 	expect(snapshot).toMatchObject({
 		connectorId: 'default',
+		description: 'Local lighting automation.',
 		tools: [{ name: 'bond_shade_set_position' }],
 	})
 })
