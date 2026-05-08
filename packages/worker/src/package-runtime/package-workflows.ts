@@ -374,10 +374,10 @@ export class PackageWorkflowEntrypointBase extends WorkflowEntrypoint<
 		step: WorkflowStep,
 	) {
 		const payload = validatePackageWorkflowPayload(event.payload)
-		await step.sleepUntil(
-			'wait until package workflow runAt',
-			new Date(payload.runAt),
-		)
+		const runAt = new Date(payload.runAt)
+		if (runAt.getTime() > Date.now()) {
+			await step.sleepUntil('wait until package workflow runAt', runAt)
+		}
 		const invokePackageWorkflowExport = async (): Promise<JsonValue> => {
 			const response = await invokePackageExport({
 				env: this.env,

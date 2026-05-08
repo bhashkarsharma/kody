@@ -336,12 +336,14 @@ test('createPackageWorkflow forwards package context into the workflow helper', 
 	})
 })
 
-test('PackageWorkflowEntrypoint sleeps until runAt and invokes saved package export with scoped token', async () => {
+test('PackageWorkflowEntrypoint sleeps for future runAt and invokes saved package export with scoped token', async () => {
 	invocationMocks.invokePackageExport.mockReset()
 	invocationMocks.invokePackageExport.mockResolvedValueOnce({
 		status: 200,
 		body: { ok: true, result: { applied: true } },
 	})
+	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-05-03T12:00:00.000Z'))
 	const workflow = new PackageWorkflowEntrypointBase(
 		{} as ExecutionContext,
 		{ APP_BASE_URL: 'https://app.example.com' } as Env,
@@ -360,52 +362,116 @@ test('PackageWorkflowEntrypoint sleeps until runAt and invokes saved package exp
 		workflowName: 'shade-event',
 		exportName: './run-event',
 		idempotencyKey: 'event-key',
-		runAt: '2026-05-03T12:34:56.000Z',
+		runAt: '2026-05-03T12:34:56.789Z',
 		params: { eventId: 'event-1' },
 	})
 
-	const result = await workflow.run(
-		{ payload, timestamp: new Date(), instanceId: 'instance-1' },
-		{
-			sleepUntil,
-			do: stepDo,
-		} as unknown as WorkflowStep,
-	)
+	try {
+		const result = await workflow.run(
+			{ payload, timestamp: new Date(), instanceId: 'instance-1' },
+			{
+				sleepUntil,
+				do: stepDo,
+			} as unknown as WorkflowStep,
+		)
 
-	expect(sleepUntil).toHaveBeenCalledWith(
-		'wait until package workflow runAt',
-		new Date('2026-05-03T12:34:56.000Z'),
-	)
-	expect(stepDo).toHaveBeenCalledWith(
-		'invoke saved package workflow export',
-		expect.objectContaining({
-			retries: expect.objectContaining({ limit: 3 }),
-			timeout: '5 minutes',
-		}),
-		expect.any(Function),
-	)
-	expect(invocationMocks.invokePackageExport).toHaveBeenCalledWith({
-		env: expect.objectContaining({ APP_BASE_URL: 'https://app.example.com' }),
-		baseUrl: 'https://app.example.com',
-		token: expect.objectContaining({
-			tokenId: 'internal:package-workflows',
-			userId: 'user-1',
-			packageIds: ['pkg-1'],
-			packageKodyIds: ['shade-automation'],
-			exportNames: ['./run-event'],
-			sources: ['package-workflow'],
-		}),
-		request: {
-			packageIdOrKodyId: 'pkg-1',
-			exportName: './run-event',
-			params: { eventId: 'event-1' },
-			idempotencyKey: 'event-key',
-			source: 'package-workflow',
-			topic: 'shade-event',
-		},
-	})
-	expect(result).toEqual({
+		expect(sleepUntil).toHaveBeenCalledWith(
+			'wait until package workflow runAt',
+			new Date('2026-05-03T12:34:56.789Z'),
+		)
+		expect(stepDo).toHaveBeenCalledWith(
+			'invoke saved package workflow export',
+			expect.objectContaining({
+				retries: expect.objectContaining({ limit: 3 }),
+				timeout: '5 minutes',
+			}),
+			expect.any(Function),
+		)
+		expect(invocationMocks.invokePackageExport).toHaveBeenCalledWith({
+			env: expect.objectContaining({ APP_BASE_URL: 'https://app.example.com' }),
+			baseUrl: 'https://app.example.com',
+			token: expect.objectContaining({
+				tokenId: 'internal:package-workflows',
+				userId: 'user-1',
+				packageIds: ['pkg-1'],
+				packageKodyIds: ['shade-automation'],
+				exportNames: ['./run-event'],
+				sources: ['package-workflow'],
+			}),
+			request: {
+				packageIdOrKodyId: 'pkg-1',
+				exportName: './run-event',
+				params: { eventId: 'event-1' },
+				idempotencyKey: 'event-key',
+				source: 'package-workflow',
+				topic: 'shade-event',
+			},
+		})
+		expect(result).toEqual({
+			status: 200,
+			body: { ok: true, result: { applied: true } },
+		})
+	} finally {
+		vi.useRealTimers()
+	}
+})
+
+test('PackageWorkflowEntrypoint invokes already-due package workflows without sleeping', async () => {
+	invocationMocks.invokePackageExport.mockReset()
+	invocationMocks.invokePackageExport.mockResolvedValueOnce({
 		status: 200,
 		body: { ok: true, result: { applied: true } },
 	})
+	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-05-03T12:34:57.000Z'))
+	const workflow = new PackageWorkflowEntrypointBase(
+		{} as ExecutionContext,
+		{ APP_BASE_URL: 'https://app.example.com' } as Env,
+	)
+	const sleepUntil = vi.fn(async () => undefined)
+	const stepDo = vi.fn(
+		async (_name: string, _config: unknown, callback: () => unknown) => {
+			return await callback()
+		},
+	)
+	const payload = createPackageWorkflowPayload({
+		userId: 'user-1',
+		packageId: 'pkg-1',
+		kodyId: 'shade-automation',
+		sourceId: 'source-1',
+		workflowName: 'shade-event',
+		exportName: './run-event',
+		idempotencyKey: 'event-key',
+		runAt: '2026-05-03T12:34:56.789Z',
+		params: { eventId: 'event-1' },
+	})
+
+	try {
+		const result = await workflow.run(
+			{ payload, timestamp: new Date(), instanceId: 'instance-1' },
+			{
+				sleepUntil,
+				do: stepDo,
+			} as unknown as WorkflowStep,
+		)
+
+		expect(sleepUntil).not.toHaveBeenCalled()
+		expect(invocationMocks.invokePackageExport).toHaveBeenCalledWith(
+			expect.objectContaining({
+				request: expect.objectContaining({
+					packageIdOrKodyId: 'pkg-1',
+					exportName: './run-event',
+					idempotencyKey: 'event-key',
+					source: 'package-workflow',
+					topic: 'shade-event',
+				}),
+			}),
+		)
+		expect(result).toEqual({
+			status: 200,
+			body: { ok: true, result: { applied: true } },
+		})
+	} finally {
+		vi.useRealTimers()
+	}
 })
