@@ -12,20 +12,16 @@ up, read [`docs/contributing/project-intent.md`](./project-intent.md) first.
 This repo uses starter-oriented conventions in some docs and structure, and the
 project intent is to build a personal assistant with an MCP-first architecture.
 
-## Create the project with degit
-
-```
-npx degit epicweb-dev/epicflare my-kody-app
-cd my-kody-app
-```
-
 ## Install dependencies
 
 We use npm for installs and scripts, with Node 24 as the runtime.
 
-```
+```bash
 npm install
 ```
+
+To scaffold a **new** project from the epicflare template instead of working
+inside this repo, run `npx create-epicflare`.
 
 ## Expectations and assumptions
 
