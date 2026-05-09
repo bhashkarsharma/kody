@@ -15,18 +15,13 @@ export async function ensurePrimaryUserExists(request: APIRequestContext) {
 		return
 	}
 
-	if (response.status() !== 409) {
-		throw new Error(`Failed to seed primary user (${response.status()}).`)
+	if (response.status() === 429) {
+		throw new Error(
+			'Failed to seed primary user because /auth is rate-limited.',
+		)
 	}
 
-	response = await request.post('/auth', {
-		data: { ...primaryTestUser, mode: 'login' },
-		headers: { 'Content-Type': 'application/json' },
-	})
-
-	if (!response.ok()) {
-		throw new Error(
-			`Primary user exists but could not log in (${response.status()}).`,
-		)
+	if (response.status() !== 409) {
+		throw new Error(`Failed to seed primary user (${response.status()}).`)
 	}
 }
