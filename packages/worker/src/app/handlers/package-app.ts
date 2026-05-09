@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/cloudflare'
 import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import { redirectToLogin } from '#app/auth-redirect.ts'
 import { getAppBaseUrl } from '#app/app-base-url.ts'
@@ -45,6 +46,45 @@ function parsePackageRealtimePath(restPath: string) {
 	}
 }
 
+function reportPackageAppFailure(input: {
+	error: unknown
+	phase: 'host-setup' | 'realtime-connect'
+	requestUrl: URL
+	kodyId: string
+	packageId: string
+	packageName: string
+	sourceId: string
+	forwardedPath: string
+	realtimePath: string
+}) {
+	try {
+		if (!Sentry.isInitialized()) return
+		const client = Sentry.getClient()
+		if (!client?.getOptions().dsn) return
+
+		Sentry.withScope((scope) => {
+			scope.setLevel('error')
+			scope.setTag('package_app.phase', input.phase)
+			scope.setTag('package_app.kody_id', input.kodyId)
+			scope.setTag('package_app.package_id', input.packageId)
+			scope.setTag('package_app.source_id', input.sourceId)
+			scope.setContext('package_app', {
+				phase: input.phase,
+				kodyId: input.kodyId,
+				packageId: input.packageId,
+				packageName: input.packageName,
+				sourceId: input.sourceId,
+				forwardedPath: input.forwardedPath,
+				realtimePath: input.realtimePath,
+				hostPath: input.requestUrl.pathname,
+			})
+			Sentry.captureException(input.error)
+		})
+	} catch (sentryError) {
+		console.warn('Failed to report package app failure to Sentry.', sentryError)
+	}
+}
+
 export async function handlePackageAppRequest(
 	request: Request,
 	env: Env,
@@ -73,12 +113,10 @@ export async function handlePackageAppRequest(
 	if (!savedPackage || !savedPackage.hasApp) {
 		return new Response('Saved package app not found.', { status: 404 })
 	}
-	try {
-		const baseUrl = getAppBaseUrl({ env, requestUrl: request.url })
-		const packageRealtimePath = parsePackageRealtimePath(
-			packageRealtimeRestPath,
-		)
-		if (packageRealtimePath && request.headers.get('Upgrade') === 'websocket') {
+	const baseUrl = getAppBaseUrl({ env, requestUrl: request.url })
+	const packageRealtimePath = parsePackageRealtimePath(packageRealtimeRestPath)
+	if (packageRealtimePath && request.headers.get('Upgrade') === 'websocket') {
+		try {
 			return await packageRealtimeSessionRpc({
 				env,
 				userId: user.mcpUser.userId,
@@ -87,7 +125,26 @@ export async function handlePackageAppRequest(
 				sourceId: savedPackage.sourceId,
 				baseUrl,
 			}).connect(request, packageRealtimePath.facet)
+		} catch (error) {
+			console.error('Package realtime handler failed:', error)
+			reportPackageAppFailure({
+				error,
+				phase: 'realtime-connect',
+				requestUrl,
+				kodyId: savedPackage.kodyId,
+				packageId: savedPackage.id,
+				packageName: savedPackage.name,
+				sourceId: savedPackage.sourceId,
+				forwardedPath: forwardedPackageRestPath,
+				realtimePath: packageRealtimeRestPath,
+			})
+			return new Response('Internal Server Error', { status: 500 })
 		}
+	}
+
+	let forwardedRequest: Request
+	let entrypoint: { fetch(request: Request): Promise<Response> }
+	try {
 		const packageSource = await loadPackageSourceBySourceId({
 			env,
 			baseUrl,
@@ -121,13 +178,30 @@ export async function handlePackageAppRequest(
 				callerContext,
 			},
 		})
-		const entrypoint = appWorker.stub.getEntrypoint(appWorker.entrypointName)
+		entrypoint = appWorker.stub.getEntrypoint(appWorker.entrypointName)
 		const forwardedUrl = new URL(requestUrl)
 		forwardedUrl.pathname = forwardedPackageRestPath
-		const forwardedRequest = new Request(forwardedUrl.toString(), request)
-		return await entrypoint.fetch(forwardedRequest)
+		forwardedRequest = new Request(forwardedUrl.toString(), request)
 	} catch (error) {
 		console.error('Package app handler failed:', error)
+		reportPackageAppFailure({
+			error,
+			phase: 'host-setup',
+			requestUrl,
+			kodyId: savedPackage.kodyId,
+			packageId: savedPackage.id,
+			packageName: savedPackage.name,
+			sourceId: savedPackage.sourceId,
+			forwardedPath: forwardedPackageRestPath,
+			realtimePath: packageRealtimeRestPath,
+		})
+		return new Response('Internal Server Error', { status: 500 })
+	}
+
+	try {
+		return await entrypoint.fetch(forwardedRequest)
+	} catch (error) {
+		console.error('Package app entrypoint failed:', error)
 		return new Response('Internal Server Error', { status: 500 })
 	}
 }

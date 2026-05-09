@@ -1,6 +1,16 @@
-import { expect, test, vi } from 'vitest'
+import { beforeEach, expect, test, vi } from 'vitest'
 
 const mockModule = vi.hoisted(() => ({
+	captureException: vi.fn(),
+	getSentryClient: vi.fn(() => ({
+		getOptions: () => ({ dsn: 'https://dsn' }),
+	})),
+	isSentryInitialized: vi.fn(() => true),
+	sentryScope: {
+		setLevel: vi.fn(),
+		setTag: vi.fn(),
+		setContext: vi.fn(),
+	},
 	readAuthenticatedAppUser: vi.fn(async () => ({
 		email: 'user@example.com',
 		displayName: 'User',
@@ -33,6 +43,16 @@ const mockModule = vi.hoisted(() => ({
 	packageRealtimeConnect: vi.fn(
 		async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
 	),
+}))
+
+vi.mock('@sentry/cloudflare', () => ({
+	isInitialized: (...args: Array<unknown>) =>
+		mockModule.isSentryInitialized(...args),
+	getClient: (...args: Array<unknown>) => mockModule.getSentryClient(...args),
+	withScope: (callback: (scope: typeof mockModule.sentryScope) => void) =>
+		callback(mockModule.sentryScope),
+	captureException: (...args: Array<unknown>) =>
+		mockModule.captureException(...args),
 }))
 
 vi.mock('#app/authenticated-user.ts', () => ({
@@ -75,6 +95,10 @@ vi.mock('#worker/package-runtime/realtime-session.ts', () => ({
 
 const { handlePackageAppRequest } = await import('./package-app.ts')
 
+beforeEach(() => {
+	vi.clearAllMocks()
+})
+
 test('handlePackageAppRequest returns a plain 500 when package app runtime setup fails', async () => {
 	const response = await handlePackageAppRequest(
 		new Request('https://example.com/packages/example'),
@@ -83,6 +107,93 @@ test('handlePackageAppRequest returns a plain 500 when package app runtime setup
 
 	expect(response.status).toBe(500)
 	await expect(response.text()).resolves.toBe('Internal Server Error')
+})
+
+test('handlePackageAppRequest reports package app runtime failures to Sentry', async () => {
+	const response = await handlePackageAppRequest(
+		new Request('https://example.com/packages/example/report?tab=errors'),
+		{} as Env,
+	)
+
+	expect(response.status).toBe(500)
+	expect(mockModule.captureException).toHaveBeenCalledTimes(1)
+	expect(mockModule.captureException).toHaveBeenCalledWith(expect.any(Error))
+	expect(mockModule.sentryScope.setLevel).toHaveBeenCalledWith('error')
+	expect(mockModule.sentryScope.setTag).toHaveBeenCalledWith(
+		'package_app.phase',
+		'host-setup',
+	)
+	expect(mockModule.sentryScope.setTag).toHaveBeenCalledWith(
+		'package_app.kody_id',
+		'example',
+	)
+	expect(mockModule.sentryScope.setTag).toHaveBeenCalledWith(
+		'package_app.package_id',
+		'package-1',
+	)
+	expect(mockModule.sentryScope.setTag).toHaveBeenCalledWith(
+		'package_app.source_id',
+		'source-1',
+	)
+	expect(mockModule.sentryScope.setTag).not.toHaveBeenCalledWith(
+		'package_app.forwarded_path',
+		expect.any(String),
+	)
+	expect(mockModule.sentryScope.setTag).not.toHaveBeenCalledWith(
+		'package_app.realtime_path',
+		expect.any(String),
+	)
+	expect(mockModule.sentryScope.setTag).not.toHaveBeenCalledWith(
+		'package_app.host_path',
+		expect.any(String),
+	)
+	expect(mockModule.sentryScope.setContext).toHaveBeenCalledWith(
+		'package_app',
+		expect.objectContaining({
+			phase: 'host-setup',
+			kodyId: 'example',
+			packageId: 'package-1',
+			packageName: '@kody/example',
+			sourceId: 'source-1',
+			forwardedPath: '/report',
+			hostPath: '/packages/example/report',
+		}),
+	)
+})
+
+test('handlePackageAppRequest does not report package entrypoint failures to Kody Sentry', async () => {
+	mockModule.loadPackageSourceBySourceId.mockResolvedValueOnce({
+		source: {
+			published_commit: 'commit-1',
+			manifest_path: 'package.json',
+			source_root: '/',
+		},
+		files: {
+			'package.json': JSON.stringify({
+				name: '@kody/example',
+				kody: { id: 'example', app: { entry: 'app.js' } },
+			}),
+			'app.js': 'export default {}',
+		},
+	})
+	mockModule.buildPackageAppWorker.mockResolvedValueOnce({
+		entrypointName: 'entry',
+		stub: {
+			getEntrypoint: () => ({
+				async fetch() {
+					throw new Error('package code failed')
+				},
+			}),
+		},
+	})
+
+	const response = await handlePackageAppRequest(
+		new Request('https://example.com/packages/example'),
+		{} as Env,
+	)
+
+	expect(response.status).toBe(500)
+	expect(mockModule.captureException).not.toHaveBeenCalled()
 })
 
 test('handlePackageAppRequest routes websocket package paths to realtime session manager', async () => {
