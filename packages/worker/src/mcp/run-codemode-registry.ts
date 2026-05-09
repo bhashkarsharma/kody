@@ -1,4 +1,5 @@
 import {
+	normalizeCode,
 	resolveProvider,
 	type ExecuteResult,
 	type ResolvedProvider,
@@ -6,6 +7,7 @@ import {
 } from '@cloudflare/codemode'
 import { exports as workerExports } from 'cloudflare:workers'
 import { type McpCallerContext } from '@kody-internal/shared/chat.ts'
+import { createExecuteExecutor } from '#mcp/executor.ts'
 import {
 	getAdditionalPropertiesSchema,
 	getArrayItemSchema,
@@ -32,6 +34,11 @@ import {
 	stripCodeFences,
 } from '#worker/module-source.ts'
 import { buildKodyModuleBundle } from '#worker/package-runtime/module-graph.ts'
+import {
+	beginPackageRuntimeRun,
+	finishPackageRuntimeRun,
+	type PackageRuntimeDebugContext,
+} from '#worker/package-runtime/package-runtime-debug.ts'
 import {
 	createDynamicCallableWorkflow,
 	type PackageWorkflowCreateInput,
@@ -521,8 +528,6 @@ export async function runCodemodeWithRegistry(
 			executorTimeoutMs: options?.executorTimeoutMs,
 		})
 	}
-	const { createExecuteExecutor } = await import('#mcp/executor.ts')
-	const { normalizeCode } = await import('@cloudflare/codemode')
 	const secretRedactor = createExecutionSecretRedactor()
 	const normalizedStorageContext = normalizeStorageContext(
 		callerContext.storageContext ?? null,
@@ -662,6 +667,16 @@ export async function runModuleWithRegistry(
 	)
 }
 
+async function finishPackageRuntimeRunBestEffort(
+	input: Parameters<typeof finishPackageRuntimeRun>[0],
+) {
+	try {
+		await finishPackageRuntimeRun(input)
+	} catch (error) {
+		console.warn('package-runtime-debug-finish-unhandled', error)
+	}
+}
+
 export async function runBundledModuleWithRegistry(
 	env: Env,
 	callerContext: McpCallerContext,
@@ -683,71 +698,88 @@ export async function runBundledModuleWithRegistry(
 		workflowTools?: PackageWorkflowTools
 		skipCapabilityRegistry?: boolean
 		executorTimeoutMs?: number | null
+		runtimeDebug?: PackageRuntimeDebugContext | null
 	},
 ): Promise<ExecuteResult> {
-	const { createExecuteExecutor } = await import('#mcp/executor.ts')
 	const secretRedactor = createExecutionSecretRedactor()
 	const normalizedStorageContext = normalizeStorageContext(
 		callerContext.storageContext ?? null,
 	)
-	const executor = createExecuteExecutor({
+	const runtimeDebugContext = options?.runtimeDebug
+		? {
+				...options.runtimeDebug,
+				storageId:
+					options.runtimeDebug.storageId ??
+					options.storageTools?.storageId ??
+					normalizedStorageContext?.storageId ??
+					null,
+			}
+		: null
+	const runtimeDebugRun = await beginPackageRuntimeRun({
 		env,
-		exports: options?.executorExports ?? workerExports,
-		timeoutMs: options?.executorTimeoutMs,
-		gatewayProps: {
-			baseUrl: callerContext.baseUrl,
-			userId: callerContext.user?.userId ?? null,
-			storageContext: normalizedStorageContext,
-		},
-		modules: bundle.modules,
+		userId: callerContext.user?.userId ?? null,
+		context: runtimeDebugContext,
 	})
-	const workflowTools =
-		options?.workflowTools ??
-		createWorkflowTools({
+	let runtimeDebugFinished = false
+	try {
+		const executor = createExecuteExecutor({
 			env,
-			callerContext,
-			packageContext: options?.packageContext ?? null,
+			exports: options?.executorExports ?? workerExports,
+			timeoutMs: options?.executorTimeoutMs,
+			gatewayProps: {
+				baseUrl: callerContext.baseUrl,
+				userId: callerContext.user?.userId ?? null,
+				storageContext: normalizedStorageContext,
+			},
+			modules: bundle.modules,
 		})
-	const provider = await buildCodemodeProvider(env, callerContext, {
-		trackSecretInputValue: (value) => {
-			secretRedactor.track(value)
-		},
-		additionalTools: options?.additionalTools,
-		storageTools: options?.storageTools,
-		serviceTools: options?.serviceTools,
-		packageSecretTools: options?.packageContext
-			? createPackageSecretTools({
-					env,
-					callerContext,
-					packageId: options.packageContext.packageId,
-				})
-			: undefined,
-		emailTools: options?.emailTools,
-		workflowTools,
-		skipCapabilityRegistry: options?.skipCapabilityRegistry,
-	})
-	const storageHelperPrelude = options?.storageTools
-		? createStorageHelperPrelude({
-				storageId: options.storageTools.storageId,
-				writable: options.storageTools.writable,
+		const workflowTools =
+			options?.workflowTools ??
+			createWorkflowTools({
+				env,
+				callerContext,
+				packageContext: options?.packageContext ?? null,
 			})
-		: ''
-	const serviceHelperPrelude = options?.serviceTools
-		? createServiceHelperPrelude()
-		: ''
-	const packageSecretsHelperPrelude = options?.packageContext
-		? createPackageSecretsHelperPrelude()
-		: ''
-	const emailHelperPrelude = options?.emailTools
-		? createEmailHelperPrelude()
-		: ''
-	const workflowsHelperPrelude = workflowTools
-		? createWorkflowsHelperPrelude()
-		: ''
-	const entrypointInputJson = JSON.stringify(params)
-	const entrypointInputSource =
-		entrypointInputJson === undefined ? 'undefined' : entrypointInputJson
-	const wrapped = `async () => {
+		const provider = await buildCodemodeProvider(env, callerContext, {
+			trackSecretInputValue: (value) => {
+				secretRedactor.track(value)
+			},
+			additionalTools: options?.additionalTools,
+			storageTools: options?.storageTools,
+			serviceTools: options?.serviceTools,
+			packageSecretTools: options?.packageContext
+				? createPackageSecretTools({
+						env,
+						callerContext,
+						packageId: options.packageContext.packageId,
+					})
+				: undefined,
+			emailTools: options?.emailTools,
+			workflowTools,
+			skipCapabilityRegistry: options?.skipCapabilityRegistry,
+		})
+		const storageHelperPrelude = options?.storageTools
+			? createStorageHelperPrelude({
+					storageId: options.storageTools.storageId,
+					writable: options.storageTools.writable,
+				})
+			: ''
+		const serviceHelperPrelude = options?.serviceTools
+			? createServiceHelperPrelude()
+			: ''
+		const packageSecretsHelperPrelude = options?.packageContext
+			? createPackageSecretsHelperPrelude()
+			: ''
+		const emailHelperPrelude = options?.emailTools
+			? createEmailHelperPrelude()
+			: ''
+		const workflowsHelperPrelude = workflowTools
+			? createWorkflowsHelperPrelude()
+			: ''
+		const entrypointInputJson = JSON.stringify(params)
+		const entrypointInputSource =
+			entrypointInputJson === undefined ? 'undefined' : entrypointInputJson
+		const wrapped = `async () => {
 ${createExecuteHelperPrelude()}
 ${storageHelperPrelude ? `${storageHelperPrelude}\n` : ''}
 ${serviceHelperPrelude ? `${serviceHelperPrelude}\n` : ''}
@@ -782,18 +814,61 @@ ${workflowsHelperPrelude ? `${workflowsHelperPrelude}\n` : ''}
     }
   }
 }`
-	const result = await executor.execute(wrapped, [provider])
-	const sanitizedResult = secretRedactor.sanitizeExecuteResult(result)
-	if (!result.error) return sanitizedResult
-	const batchMessage = await rewriteCapabilitySecretError({
-		error: result.error,
-		env,
-		callerContext,
-	})
-	if (!batchMessage) return sanitizedResult
-	return {
-		...sanitizedResult,
-		error: secretRedactor.redactErrorMessage(batchMessage),
+		try {
+			const result = await executor.execute(wrapped, [provider])
+			const sanitizedResult = secretRedactor.sanitizeExecuteResult(result)
+			if (!result.error) {
+				await finishPackageRuntimeRunBestEffort({
+					env,
+					handle: runtimeDebugRun,
+					status: 'success',
+					logs: sanitizedResult.logs ?? [],
+				})
+				runtimeDebugFinished = true
+				return sanitizedResult
+			}
+			const batchMessage = await rewriteCapabilitySecretError({
+				error: result.error,
+				env,
+				callerContext,
+			})
+			const finalResult = batchMessage
+				? {
+						...sanitizedResult,
+						error: secretRedactor.redactErrorMessage(batchMessage),
+					}
+				: sanitizedResult
+			await finishPackageRuntimeRunBestEffort({
+				env,
+				handle: runtimeDebugRun,
+				status: 'error',
+				logs: finalResult.logs ?? [],
+				error: finalResult.error,
+			})
+			runtimeDebugFinished = true
+			return finalResult
+		} catch (error) {
+			if (!runtimeDebugFinished) {
+				await finishPackageRuntimeRunBestEffort({
+					env,
+					handle: runtimeDebugRun,
+					status: 'error',
+					error,
+				})
+				runtimeDebugFinished = true
+			}
+			throw error
+		}
+	} catch (error) {
+		if (!runtimeDebugFinished) {
+			await finishPackageRuntimeRunBestEffort({
+				env,
+				handle: runtimeDebugRun,
+				status: 'error',
+				error,
+			})
+		}
+		throw error
 	}
 }
 async function rewriteCapabilitySecretError(input: {

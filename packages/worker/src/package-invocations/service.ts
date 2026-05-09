@@ -3,6 +3,7 @@ import { toHex } from '@kody-internal/shared/hex.ts'
 import { extractRawContent, getExecutionErrorDetails } from '#mcp/executor.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { runBundledModuleWithRegistry } from '#mcp/run-codemode-registry.ts'
+import { type PackageRuntimeSurface } from '#worker/package-runtime/package-runtime-debug.ts'
 import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
@@ -21,6 +22,7 @@ import {
 	loadPublishedBundleArtifactByIdentity,
 	persistPublishedBundleArtifact,
 } from '#worker/package-runtime/published-bundle-artifacts.ts'
+import { packageWorkflowInvocationSource } from '#worker/package-runtime/package-invocation-sources.ts'
 import { assertPublishedSourceCanRebuildWithoutInstallingDeps } from '#worker/package-runtime/published-source-dependencies.ts'
 import {
 	buildPackageSubscriptionArtifactName,
@@ -513,6 +515,49 @@ function isMissingPackageModuleError(error: unknown) {
 	)
 }
 
+function resolveInvocationRuntimeSurface(input: {
+	selector: PackageModuleSelector
+	source: string | null
+}): PackageRuntimeSurface {
+	if (input.source === packageWorkflowInvocationSource) return 'workflow'
+	switch (input.selector.kind) {
+		case 'export':
+			return 'export'
+		case 'subscription':
+			return 'subscription'
+		default: {
+			const selector: never = input.selector
+			void selector
+			throw new Error('Unhandled package module selector.')
+		}
+	}
+}
+
+function resolveInvocationRuntimeName(input: {
+	surface: PackageRuntimeSurface
+	invocationName: string
+	topic: string | null
+}) {
+	switch (input.surface) {
+		case 'workflow':
+		case 'subscription':
+			return input.topic ?? input.invocationName
+		case 'export':
+			return input.invocationName
+		case 'app_fetch':
+		case 'app_realtime':
+		case 'service':
+		case 'job':
+		case 'retriever':
+			return input.invocationName
+		default: {
+			const surface: never = input.surface
+			void surface
+			throw new Error('Unhandled package runtime surface.')
+		}
+	}
+}
+
 async function invokeSavedPackageModule(input: {
 	env: Env
 	baseUrl: string
@@ -656,6 +701,10 @@ async function invokeSavedPackageModule(input: {
 			},
 			repoContext: repoSource ? createRepoContext(repoSource) : null,
 		})
+		const runtimeSurface = resolveInvocationRuntimeSurface({
+			selector: input.moduleSelector,
+			source: input.source,
+		})
 		const executionResult = await runBundledModuleWithRegistry(
 			input.env,
 			callerContext,
@@ -669,6 +718,25 @@ async function invokeSavedPackageModule(input: {
 					userId: input.actor.userId,
 					storageId: buildPackageInvocationStorageId(input.savedPackage.id),
 					writable: true,
+				},
+				runtimeDebug: {
+					packageId: input.savedPackage.id,
+					kodyId: input.savedPackage.kodyId,
+					sourceId: input.savedPackage.sourceId,
+					publishedCommit: repoSource?.published_commit ?? null,
+					surface: runtimeSurface,
+					name: resolveInvocationRuntimeName({
+						surface: runtimeSurface,
+						invocationName: input.invocationName,
+						topic: input.topic,
+					}),
+					invocationId,
+					idempotencyKey: input.idempotencyKey,
+					metadata: {
+						exportName: input.invocationName,
+						source: input.source,
+						topic: input.topic,
+					},
 				},
 				emailTools: {
 					getMessage: async (messageId) => {
