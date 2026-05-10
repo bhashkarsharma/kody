@@ -419,25 +419,55 @@ async function executePublishedJobArtifact(input: {
 	bypassLogs: Array<string>
 }): Promise<ExecuteResult> {
 	const source = await getEntitySourceById(input.env.APP_DB, input.job.sourceId)
+	const callerContext = {
+		...input.callerContext,
+		repoContext: source
+			? {
+					sourceId: source.id,
+					repoId: source.repo_id,
+					sessionId: null,
+					sessionRepoId: null,
+					baseCommit: source.published_commit,
+					manifestPath: source.manifest_path,
+					sourceRoot: source.source_root,
+					publishedCommit: source.published_commit,
+					entityKind: source.entity_kind,
+					entityId: source.entity_id,
+				}
+			: null,
+	}
+	const packageContext = input.artifact.packageContext ?? null
+	const runtimeDebug = packageContext
+		? {
+				packageId: packageContext.packageId,
+				kodyId: packageContext.kodyId,
+				sourceId: packageContext.sourceId ?? input.job.sourceId,
+				publishedCommit: source?.published_commit ?? input.job.publishedCommit,
+				surface: 'job' as const,
+				name: input.job.name,
+				storageId: input.job.storageId,
+				jobId: input.job.id,
+			}
+		: null
+	const packageInvokeTools = packageContext
+		? await (async () => {
+				// Avoid a top-level jobs -> package-invocations cycle during capability
+				// registry initialization.
+				const { createPackageRuntimeInvokeTools } =
+					await import('#worker/package-invocations/service.ts')
+				return createPackageRuntimeInvokeTools({
+					env: input.env,
+					baseUrl: input.callerContext.baseUrl,
+					callerContext,
+					packageContext,
+					parentRuntimeDebug: runtimeDebug,
+					packageInvokeDepth: 0,
+				})
+			})()
+		: null
 	return await runBundledModuleWithRegistry(
 		input.env,
-		{
-			...input.callerContext,
-			repoContext: source
-				? {
-						sourceId: source.id,
-						repoId: source.repo_id,
-						sessionId: null,
-						sessionRepoId: null,
-						baseCommit: source.published_commit,
-						manifestPath: source.manifest_path,
-						sourceRoot: source.source_root,
-						publishedCommit: source.published_commit,
-						entityKind: source.entity_kind,
-						entityId: source.entity_id,
-					}
-				: null,
-		},
+		callerContext,
 		{
 			mainModule: input.artifact.mainModule,
 			modules: input.artifact.modules,
@@ -449,23 +479,13 @@ async function executePublishedJobArtifact(input: {
 				storageId: input.job.storageId,
 				writable: true,
 			},
-			...(input.artifact.packageContext
-				? { packageContext: input.artifact.packageContext }
-				: {}),
-			runtimeDebug: input.artifact.packageContext
+			...(packageContext ? { packageContext } : {}),
+			runtimeDebug,
+			...(packageContext && packageInvokeTools
 				? {
-						packageId: input.artifact.packageContext.packageId,
-						kodyId: input.artifact.packageContext.kodyId,
-						sourceId:
-							input.artifact.packageContext.sourceId ?? input.job.sourceId,
-						publishedCommit:
-							source?.published_commit ?? input.job.publishedCommit,
-						surface: 'job',
-						name: input.job.name,
-						storageId: input.job.storageId,
-						jobId: input.job.id,
+						packageInvokeTools,
 					}
-				: null,
+				: {}),
 		},
 	).then((result) => ({
 		...result,
