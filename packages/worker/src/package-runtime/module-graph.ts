@@ -98,6 +98,7 @@ type RewriteState = {
 	baseUrl: string
 	userId: string
 	files: Record<string, string>
+	sourceFiles: Record<string, string>
 	rootPackage: {
 		manifest: AuthoredPackageJson
 		prefix: string
@@ -107,34 +108,6 @@ type RewriteState = {
 		string,
 		LoadedPackageSource & { row: SavedPackageRecord; prefix: string }
 	>
-	dependencies: Map<string, BundleArtifactDependency>
-}
-
-function createDependencyKey(dependency: BundleArtifactDependency) {
-	return `${dependency.sourceId}:${dependency.publishedCommit}:${dependency.kodyId}`
-}
-
-function rememberDependency(
-	state: RewriteState,
-	dependency: BundleArtifactDependency,
-) {
-	const key = createDependencyKey(dependency)
-	const existing = state.dependencies.get(key)
-	state.dependencies.set(
-		key,
-		existing?.packageName && !dependency.packageName
-			? { ...dependency, packageName: existing.packageName }
-			: dependency,
-	)
-}
-
-function rememberDependencies(
-	state: RewriteState,
-	dependencies: Array<BundleArtifactDependency>,
-) {
-	for (const dependency of dependencies) {
-		rememberDependency(state, dependency)
-	}
 }
 
 function createRelativeImportSpecifier(fromPath: string, targetPath: string) {
@@ -240,6 +213,23 @@ function createPackageProxyPathSegment(specifier: string) {
 	)
 }
 
+function resolvePackageExportSourcePath(input: {
+	files: Record<string, string>
+	manifest: AuthoredPackageJson
+	exportName: string
+}) {
+	const exportPath = resolvePackageExportPath({
+		manifest: input.manifest,
+		exportName: input.exportName,
+	})
+	return (
+		resolveWorkspaceSourceFilePath({
+			files: input.files,
+			path: exportPath,
+		}) ?? exportPath
+	)
+}
+
 function readRootPackage(sourceFiles: Record<string, string>) {
 	const packageJson = sourceFiles[packageManifestPath]
 	if (!packageJson) return null
@@ -274,17 +264,11 @@ function normalizeWorkspaceModulePath(path: string) {
 	return parts.join('/')
 }
 
-function resolveLocalImportPath(input: {
+function resolveWorkspaceSourceFilePath(input: {
 	files: Record<string, string>
-	fromPath: string
-	specifier: string
+	path: string
 }) {
-	if (!input.specifier.startsWith('./') && !input.specifier.startsWith('../')) {
-		return null
-	}
-	const basePath = normalizeWorkspaceModulePath(
-		joinPath(dirname(input.fromPath), input.specifier),
-	)
+	const basePath = normalizeWorkspaceModulePath(input.path)
 	const candidates = [
 		basePath,
 		`${basePath}.ts`,
@@ -293,22 +277,60 @@ function resolveLocalImportPath(input: {
 		`${basePath}.jsx`,
 		`${basePath}.mts`,
 		`${basePath}.cts`,
+		`${basePath}.mjs`,
+		`${basePath}.cjs`,
 		joinPath(basePath, 'index.ts'),
 		joinPath(basePath, 'index.tsx'),
 		joinPath(basePath, 'index.js'),
 		joinPath(basePath, 'index.jsx'),
 		joinPath(basePath, 'index.mts'),
 		joinPath(basePath, 'index.cts'),
+		joinPath(basePath, 'index.mjs'),
+		joinPath(basePath, 'index.cjs'),
 	]
+	const substitutionBase = basePath.replace(/\.(?:js|jsx|mjs|cjs)$/, '')
+	if (substitutionBase !== basePath) {
+		candidates.push(
+			`${substitutionBase}.ts`,
+			`${substitutionBase}.tsx`,
+			`${substitutionBase}.mts`,
+			`${substitutionBase}.cts`,
+			`${substitutionBase}.mjs`,
+			`${substitutionBase}.cjs`,
+		)
+	}
 	return candidates.find((candidate) => input.files[candidate] != null) ?? null
+}
+
+function resolveLocalImportPath(input: {
+	files: Record<string, string>
+	fromPath: string
+	specifier: string
+}) {
+	if (!input.specifier.startsWith('./') && !input.specifier.startsWith('../')) {
+		return null
+	}
+	return resolveWorkspaceSourceFilePath({
+		files: input.files,
+		path: joinPath(dirname(input.fromPath), input.specifier),
+	})
 }
 
 function collectReachableSourceFilePaths(input: {
 	files: Record<string, string>
 	entryPoint: string
+	rootPackage: {
+		manifest: AuthoredPackageJson
+		prefix: string
+	} | null
 }) {
 	const reachable = new Set<string>()
-	const stack = [normalizePackageWorkspacePath(input.entryPoint)]
+	const stack = [
+		resolveWorkspaceSourceFilePath({
+			files: input.files,
+			path: input.entryPoint,
+		}) ?? normalizePackageWorkspacePath(input.entryPoint),
+	]
 	while (stack.length > 0) {
 		const filePath = stack.pop()
 		if (
@@ -322,6 +344,22 @@ function collectReachableSourceFilePaths(input: {
 		if (source == null) continue
 		reachable.add(filePath)
 		for (const node of collectLiteralImportNodes(source)) {
+			if (node.specifier.startsWith(packageSpecifierPrefix)) {
+				const parsed = parseKodyPackageSpecifier(node.specifier)
+				if (parsed.packageName === input.rootPackage?.manifest.name) {
+					const exportPath = resolvePackageExportPath({
+						manifest: input.rootPackage.manifest,
+						exportName: parsed.exportName,
+					})
+					stack.push(
+						resolveWorkspaceSourceFilePath({
+							files: input.files,
+							path: exportPath,
+						}) ?? exportPath,
+					)
+				}
+				continue
+			}
 			const localPath = resolveLocalImportPath({
 				files: input.files,
 				fromPath: filePath,
@@ -347,9 +385,15 @@ async function resolveDirectKodyDependenciesForEntryPoint(input: {
 	>
 }) {
 	const rootPackage = readRootPackage(input.sourceFiles)
+	const entryPoint =
+		resolveWorkspaceSourceFilePath({
+			files: input.sourceFiles,
+			path: input.entryPoint,
+		}) ?? normalizePackageWorkspacePath(input.entryPoint)
 	const reachable = collectReachableSourceFilePaths({
 		files: input.sourceFiles,
-		entryPoint: input.entryPoint,
+		entryPoint,
+		rootPackage,
 	})
 	const reachableFiles = Object.fromEntries(
 		Object.entries(input.sourceFiles).filter(([filePath]) =>
@@ -517,7 +561,6 @@ async function maybeEnsurePublishedArtifactTarget(input: {
 	if (!artifact?.artifact) {
 		return null
 	}
-	rememberDependencies(input.state, artifact.artifact.dependencies)
 	const artifactPrefix = joinPath(
 		input.loaded.prefix,
 		'.__published_bundle__',
@@ -581,14 +624,6 @@ async function ensurePackageLoaded(
 		prefix: joinPath(packageSourcePrefix, packageKey),
 	}
 	state.packages.set(packageKey, entry)
-	if (loaded.source.published_commit) {
-		rememberDependency(state, {
-			sourceId: loaded.source.id,
-			publishedCommit: loaded.source.published_commit,
-			kodyId: row.kodyId,
-			packageName: row.name,
-		})
-	}
 	for (const [filePath, content] of Object.entries(loaded.files)) {
 		const normalizedPath = normalizePackageWorkspacePath(filePath)
 		const targetPath = joinPath(entry.prefix, normalizedPath)
@@ -616,7 +651,8 @@ async function ensurePackageProxy(
 		parsed.packageName === state.rootPackage?.manifest.name
 			? joinPath(
 					state.rootPackage.prefix,
-					resolvePackageExportPath({
+					resolvePackageExportSourcePath({
+						files: state.sourceFiles,
 						manifest: state.rootPackage.manifest,
 						exportName: parsed.exportName,
 					}),
@@ -636,7 +672,8 @@ async function ensurePackageProxy(
 									parsed.exportName,
 								)}"`,
 							})
-							const exportPath = resolvePackageExportPath({
+							const exportPath = resolvePackageExportSourcePath({
+								files: loaded.files,
 								manifest: loaded.manifest,
 								exportName: parsed.exportName,
 							})
@@ -705,11 +742,14 @@ export async function buildKodyModuleBundle(input: {
 		baseUrl: input.baseUrl,
 		userId: input.userId,
 		sourceFiles: input.sourceFiles,
+		entryPoint: input.entryPoint,
 	})
-	const normalizedEntrypoint = joinPath(
-		rootSourcePrefix,
-		normalizePackageWorkspacePath(input.entryPoint),
-	)
+	const entryPoint =
+		resolveWorkspaceSourceFilePath({
+			files: input.sourceFiles,
+			path: input.entryPoint,
+		}) ?? normalizePackageWorkspacePath(input.entryPoint)
+	const normalizedEntrypoint = joinPath(rootSourcePrefix, entryPoint)
 	const bootstrapPath = joinPath(rootSourcePrefix, '.__kody_execute_entry__.js')
 	files[bootstrapPath] = createExecuteEntrypointSource({
 		modulePath: createRelativeImportSpecifier(
@@ -747,11 +787,14 @@ export async function buildKodyImportableModuleBundle(input: {
 		baseUrl: input.baseUrl,
 		userId: input.userId,
 		sourceFiles: input.sourceFiles,
+		entryPoint: input.entryPoint,
 	})
-	const normalizedEntrypoint = joinPath(
-		rootSourcePrefix,
-		normalizePackageWorkspacePath(input.entryPoint),
-	)
+	const entryPoint =
+		resolveWorkspaceSourceFilePath({
+			files: input.sourceFiles,
+			path: input.entryPoint,
+		}) ?? normalizePackageWorkspacePath(input.entryPoint)
+	const normalizedEntrypoint = joinPath(rootSourcePrefix, entryPoint)
 	const bootstrapPath = joinPath(rootSourcePrefix, '.__kody_import_entry__.js')
 	files[bootstrapPath] = createImportableEntrypointSource({
 		modulePath: createRelativeImportSpecifier(
@@ -782,19 +825,31 @@ async function prepareKodyGraphFiles(input: {
 	baseUrl: string
 	userId: string
 	sourceFiles: Record<string, string>
+	entryPoint: string
 }) {
 	const files: Record<string, string> = {
 		[runtimeModulePath]: createRuntimeModuleSource(),
 	}
+	const rootPackage = readRootPackage(input.sourceFiles)
+	const entryPoint =
+		resolveWorkspaceSourceFilePath({
+			files: input.sourceFiles,
+			path: input.entryPoint,
+		}) ?? normalizePackageWorkspacePath(input.entryPoint)
+	const reachableRootFiles = collectReachableSourceFilePaths({
+		files: input.sourceFiles,
+		entryPoint,
+		rootPackage,
+	})
 	const state: RewriteState = {
 		env: input.env,
 		baseUrl: input.baseUrl,
 		userId: input.userId,
 		files,
-		rootPackage: readRootPackage(input.sourceFiles),
+		sourceFiles: input.sourceFiles,
+		rootPackage,
 		proxies: new Map(),
 		packages: new Map(),
-		dependencies: new Map(),
 	}
 	for (const [filePath, content] of Object.entries(input.sourceFiles)) {
 		const normalizedSourcePath = normalizePackageWorkspacePath(filePath)
@@ -808,11 +863,14 @@ async function prepareKodyGraphFiles(input: {
 			continue
 		}
 		const normalizedPath = joinPath(rootSourcePrefix, normalizedSourcePath)
-		if (isTypeDeclarationFilePath(normalizedSourcePath)) {
+		if (normalizedSourcePath === packageManifestPath) {
 			files[normalizedPath] = content
 			continue
 		}
-		if (normalizedSourcePath === packageManifestPath) {
+		if (!reachableRootFiles.has(normalizedSourcePath)) {
+			continue
+		}
+		if (isTypeDeclarationFilePath(normalizedSourcePath)) {
 			files[normalizedPath] = content
 			continue
 		}
@@ -825,7 +883,6 @@ async function prepareKodyGraphFiles(input: {
 	return {
 		files,
 		packages: state.packages,
-		dependencies: state.dependencies,
 	}
 }
 
@@ -843,11 +900,14 @@ export async function buildKodyAppBundle(input: {
 			baseUrl: input.baseUrl,
 			userId: input.userId,
 			sourceFiles: input.sourceFiles,
+			entryPoint: input.entryPoint,
 		})
-		const normalizedEntrypoint = joinPath(
-			rootSourcePrefix,
-			normalizePackageWorkspacePath(input.entryPoint),
-		)
+		const entryPoint =
+			resolveWorkspaceSourceFilePath({
+				files: input.sourceFiles,
+				path: input.entryPoint,
+			}) ?? normalizePackageWorkspacePath(input.entryPoint)
+		const normalizedEntrypoint = joinPath(rootSourcePrefix, entryPoint)
 		const bootstrapPath = joinPath(rootSourcePrefix, '.__kody_app_entry__.js')
 		files[bootstrapPath] = createAppEntrypointSource({
 			modulePath: createRelativeImportSpecifier(
