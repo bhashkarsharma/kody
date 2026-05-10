@@ -30,6 +30,10 @@ import {
 import { loadPublishedBundleArtifactByIdentity } from './published-bundle-artifacts.ts'
 import { assertPublishedSourceCanRebuildWithoutInstallingDeps } from './published-source-dependencies.ts'
 import {
+	collectStaticKodyPackageImportsFromFiles,
+	isTypeDeclarationFilePath,
+} from './static-kody-imports.ts'
+import {
 	collectLiteralImportNodes,
 	collectLiteralImportSpecifiers,
 	isBarePackageImportSpecifier,
@@ -257,6 +261,153 @@ function isBundlerRootDependencyPath(path: string) {
 	return path === 'node_modules' || path.startsWith('node_modules/')
 }
 
+function normalizeWorkspaceModulePath(path: string) {
+	const parts: Array<string> = []
+	for (const segment of path.replace(/\\/g, '/').split('/')) {
+		if (!segment || segment === '.') continue
+		if (segment === '..') {
+			parts.pop()
+			continue
+		}
+		parts.push(segment)
+	}
+	return parts.join('/')
+}
+
+function resolveLocalImportPath(input: {
+	files: Record<string, string>
+	fromPath: string
+	specifier: string
+}) {
+	if (!input.specifier.startsWith('./') && !input.specifier.startsWith('../')) {
+		return null
+	}
+	const basePath = normalizeWorkspaceModulePath(
+		joinPath(dirname(input.fromPath), input.specifier),
+	)
+	const candidates = [
+		basePath,
+		`${basePath}.ts`,
+		`${basePath}.tsx`,
+		`${basePath}.js`,
+		`${basePath}.jsx`,
+		`${basePath}.mts`,
+		`${basePath}.cts`,
+		joinPath(basePath, 'index.ts'),
+		joinPath(basePath, 'index.tsx'),
+		joinPath(basePath, 'index.js'),
+		joinPath(basePath, 'index.jsx'),
+		joinPath(basePath, 'index.mts'),
+		joinPath(basePath, 'index.cts'),
+	]
+	return candidates.find((candidate) => input.files[candidate] != null) ?? null
+}
+
+function collectReachableSourceFilePaths(input: {
+	files: Record<string, string>
+	entryPoint: string
+}) {
+	const reachable = new Set<string>()
+	const stack = [normalizePackageWorkspacePath(input.entryPoint)]
+	while (stack.length > 0) {
+		const filePath = stack.pop()
+		if (
+			!filePath ||
+			reachable.has(filePath) ||
+			isTypeDeclarationFilePath(filePath)
+		) {
+			continue
+		}
+		const source = input.files[filePath]
+		if (source == null) continue
+		reachable.add(filePath)
+		for (const node of collectLiteralImportNodes(source)) {
+			const localPath = resolveLocalImportPath({
+				files: input.files,
+				fromPath: filePath,
+				specifier: node.specifier,
+			})
+			if (localPath && !reachable.has(localPath)) {
+				stack.push(localPath)
+			}
+		}
+	}
+	return reachable
+}
+
+async function resolveDirectKodyDependenciesForEntryPoint(input: {
+	env: Env
+	baseUrl: string
+	userId: string
+	sourceFiles: Record<string, string>
+	entryPoint: string
+	loadedPackages?: Map<
+		string,
+		LoadedPackageSource & { row: SavedPackageRecord; prefix: string }
+	>
+}) {
+	const rootPackage = readRootPackage(input.sourceFiles)
+	const reachable = collectReachableSourceFilePaths({
+		files: input.sourceFiles,
+		entryPoint: input.entryPoint,
+	})
+	const reachableFiles = Object.fromEntries(
+		Object.entries(input.sourceFiles).filter(([filePath]) =>
+			reachable.has(filePath),
+		),
+	)
+	const importedPackages = new Map<string, string>()
+	for (const imported of collectStaticKodyPackageImportsFromFiles(
+		reachableFiles,
+	)) {
+		if (imported.packageName === rootPackage?.manifest.name) continue
+		importedPackages.set(imported.packageName, imported.specifier)
+	}
+	const dependencies: Array<BundleArtifactDependency> = []
+	for (const specifier of [...importedPackages.values()].sort((left, right) =>
+		left.localeCompare(right),
+	)) {
+		const parsed = parseKodyPackageSpecifier(specifier)
+		const cached = input.loadedPackages?.get(parsed.packageName)
+		const row =
+			cached?.row ??
+			(await resolveSavedPackageImport({
+				db: input.env.APP_DB,
+				userId: input.userId,
+				specifier: parsed,
+			}))
+		if (!row) {
+			throw new Error(
+				`Saved package "${parsed.packageName}" was not found for this user.`,
+			)
+		}
+		const loaded =
+			cached ??
+			(await loadPackageSourceBySourceId({
+				env: input.env,
+				baseUrl: input.baseUrl,
+				userId: input.userId,
+				sourceId: row.sourceId,
+			}))
+		if (!loaded.source.published_commit) {
+			throw new Error(
+				`Saved package "${row.name}" source "${row.sourceId}" has no published commit.`,
+			)
+		}
+		dependencies.push({
+			sourceId: loaded.source.id,
+			publishedCommit: loaded.source.published_commit,
+			kodyId: row.kodyId,
+			packageName: row.name,
+		})
+	}
+	return dependencies.sort(
+		(left, right) =>
+			left.kodyId.localeCompare(right.kodyId) ||
+			left.sourceId.localeCompare(right.sourceId),
+	)
+}
+
 function* iterateModuleSourceTexts(
 	modules: WorkerLoaderModules,
 ): Generator<[modulePath: string, source: string]> {
@@ -441,6 +592,10 @@ async function ensurePackageLoaded(
 	for (const [filePath, content] of Object.entries(loaded.files)) {
 		const normalizedPath = normalizePackageWorkspacePath(filePath)
 		const targetPath = joinPath(entry.prefix, normalizedPath)
+		if (isTypeDeclarationFilePath(normalizedPath)) {
+			state.files[targetPath] = content
+			continue
+		}
 		state.files[targetPath] = await rewriteKodyImports({
 			state,
 			source: content,
@@ -545,7 +700,7 @@ export async function buildKodyModuleBundle(input: {
 	sourceFiles: Record<string, string>
 	entryPoint: string
 }) {
-	const { files, dependencies } = await prepareKodyGraphFiles({
+	const { files, packages } = await prepareKodyGraphFiles({
 		env: input.env,
 		baseUrl: input.baseUrl,
 		userId: input.userId,
@@ -573,7 +728,10 @@ export async function buildKodyModuleBundle(input: {
 	return {
 		mainModule: bundle.mainModule,
 		modules: bundle.modules as WorkerLoaderModules,
-		dependencies: [...dependencies.values()],
+		dependencies: await resolveDirectKodyDependenciesForEntryPoint({
+			...input,
+			loadedPackages: packages,
+		}),
 	}
 }
 
@@ -584,7 +742,7 @@ export async function buildKodyImportableModuleBundle(input: {
 	sourceFiles: Record<string, string>
 	entryPoint: string
 }) {
-	const { files, dependencies } = await prepareKodyGraphFiles({
+	const { files, packages } = await prepareKodyGraphFiles({
 		env: input.env,
 		baseUrl: input.baseUrl,
 		userId: input.userId,
@@ -612,7 +770,10 @@ export async function buildKodyImportableModuleBundle(input: {
 	return {
 		mainModule: bundle.mainModule,
 		modules: bundle.modules as WorkerLoaderModules,
-		dependencies: [...dependencies.values()],
+		dependencies: await resolveDirectKodyDependenciesForEntryPoint({
+			...input,
+			loadedPackages: packages,
+		}),
 	}
 }
 
@@ -647,6 +808,10 @@ async function prepareKodyGraphFiles(input: {
 			continue
 		}
 		const normalizedPath = joinPath(rootSourcePrefix, normalizedSourcePath)
+		if (isTypeDeclarationFilePath(normalizedSourcePath)) {
+			files[normalizedPath] = content
+			continue
+		}
 		if (normalizedSourcePath === packageManifestPath) {
 			files[normalizedPath] = content
 			continue
@@ -659,6 +824,7 @@ async function prepareKodyGraphFiles(input: {
 	}
 	return {
 		files,
+		packages: state.packages,
 		dependencies: state.dependencies,
 	}
 }
@@ -672,7 +838,7 @@ export async function buildKodyAppBundle(input: {
 	cacheKey?: string | null
 }) {
 	const buildBundle = async () => {
-		const { files, dependencies } = await prepareKodyGraphFiles({
+		const { files, packages } = await prepareKodyGraphFiles({
 			env: input.env,
 			baseUrl: input.baseUrl,
 			userId: input.userId,
@@ -700,7 +866,10 @@ export async function buildKodyAppBundle(input: {
 		return {
 			mainModule: bundle.mainModule,
 			modules: bundle.modules as WorkerLoaderModules,
-			dependencies: [...dependencies.values()],
+			dependencies: await resolveDirectKodyDependenciesForEntryPoint({
+				...input,
+				loadedPackages: packages,
+			}),
 		}
 	}
 

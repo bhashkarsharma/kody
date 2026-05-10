@@ -17,6 +17,8 @@ Use `package.json` as the canonical source of truth for saved package metadata.
 - `kody.id` — user-scoped Kody package id
 - `kody.description` — package description for search/detail
 - `kody.tags` — search tags
+- `kody.dependencies` — direct static saved package dependencies imported via
+  `kody:@...`
 - `kody.app` — optional hosted package app config
 - `kody.jobs` — optional package-owned schedules
 - `kody.retrievers` — optional package-owned search/context retrievers
@@ -68,6 +70,18 @@ The top-level saved identity is the package.
 
 - Cross-package imports use the full package name, for example
   `kody:@scope/my-package/export-name`.
+- Static `kody:@...` imports are bundled snapshots. During checks and
+  publish-time artifact rebuilds, Kody records the imported saved package's
+  published commit in bundle dependency metadata. A later publish of that
+  imported package does not rewrite already-published dependent bundles.
+- Direct static `kody:@...` imports are a breaking manifest contract: they must
+  be listed in `package.json#kody.dependencies` by package name, for example
+  `"dependencies": ["@scope/my-package"]` inside the `kody` object. Repo checks
+  fail when a static import is missing from the list or when the list contains a
+  package that is not statically imported. Type-only imports do not count, and
+  declaration files such as `.d.ts` are treated as type-only. Literal dynamic
+  `import("kody:@...")` expressions are bundled snapshots too, so they must be
+  declared.
 - Callable exports are resolved from package exports, not from a second Kody
   registry.
 - Packages may also export non-callable helper modules and values for reuse.
@@ -274,6 +288,19 @@ advancing `entity_sources.published_commit`. Check failures return the failed
 checks and do not mutate D1, KV snapshots, published bundle artifacts, package
 projections, or vectors. Non-fast-forward external heads are refused unless the
 caller passes `allow_force: true`.
+
+When publish succeeds, `package_publish_external_push` decorates the response
+with `static_dependents`, a bounded summary of direct saved packages whose
+published bundle artifact dependency metadata references the package that was
+just published. `already_published` responses include the same summary when the
+published commit is available. The stale count compares each dependent
+artifact's captured dependency commit to the current published commit.
+
+This summary is visibility only. Do not add automatic fanout republishing to the
+publish path. Agents should inspect and republish dependent packages only when
+the static snapshot semantics matter for the change. Dynamic runtime invocation
+through package execution, where available, resolves the current published
+target at invocation time and should not force a dependent package republish.
 
 The scheduled reconcile job in
 `packages/worker/src/jobs/reconcile-artifacts-pushes.ts` is a safety net for
