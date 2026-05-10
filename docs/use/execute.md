@@ -30,6 +30,9 @@ helpers are runtime exports:
   [Workflows](./workflows.md)
 - use **`import { packageContext } from 'kody:runtime'`** inside saved package
   code when you need package metadata; it is **`null`** for ad hoc execute calls
+- use **`import { packages } from 'kody:runtime'`** only inside saved package
+  runtime contexts when you need dynamic current-version invocation through
+  `packages.invoke(...)`; it is **`null`** for ad hoc execute calls
 - use **`import { serviceContext } from 'kody:runtime'`** inside package service
   code when you need the current service identity; it is **`null`** outside
   package service runs
@@ -105,6 +108,12 @@ module-oriented runtime model:
   signed-in user
 - **`codemode.job_run_now(...)`** runs an existing scheduled job immediately and
   returns both the updated job state and the execution result for debugging
+
+Static saved-package imports from ad hoc **execute** run under the ad hoc
+execute runtime. That means imported package modules can share exported helpers,
+but `packageContext` and `packages` remain **`null`** unless the module is
+entered through a true saved-package runtime surface such as package invocation,
+a package job, a package service, a package app, or a package subscription.
 
 When you need to edit saved source, prefer the repo-backed workflow in
 [Repo-backed editing sessions](./repo-sessions.md). Open by package identity
