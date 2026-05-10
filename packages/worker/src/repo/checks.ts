@@ -39,6 +39,7 @@ export type RepoCheckRunResult = {
 	ok: boolean
 	results: Array<RepoCheckResult>
 	manifest: AuthoredPackageJson
+	sourceFiles: Record<string, string>
 }
 
 const executeTypecheckPreludePath = '.__kody_repo_runtime__.d.ts'
@@ -156,16 +157,14 @@ async function* workspaceFilesForSnapshot(input: {
 		/\/+$/,
 		'',
 	)
-	const pattern =
-		normalizedRoot === ''
-			? '**/*.{ts,tsx,js,jsx,json}'
-			: `${normalizedRoot}/**/*.{ts,tsx,js,jsx,json}`
+	const pattern = normalizedRoot === '' ? '**/*' : `${normalizedRoot}/**/*`
 	const files = await input.workspace.glob(pattern)
 	for (const file of files) {
 		if (file.type !== 'file') continue
+		const normalizedPath = normalizeRepoWorkspacePath(file.path)
+		if (normalizedPath.split('/').includes('.git')) continue
 		const content = await input.workspace.readFile(file.path)
 		if (content == null) continue
-		const normalizedPath = normalizeRepoWorkspacePath(file.path)
 		const relativePath =
 			normalizedRoot && normalizedPath.startsWith(`${normalizedRoot}/`)
 				? normalizedPath.slice(normalizedRoot.length + 1)
@@ -376,10 +375,6 @@ function parseDeclaredDependencies(packageJsonContent: string | null) {
 	} catch {
 		return []
 	}
-}
-
-function createSourceFilesRecord(snapshotFiles: Map<string, string>) {
-	return Object.fromEntries(snapshotFiles) as Record<string, string>
 }
 
 async function validatePackageBundles(input: {
@@ -641,20 +636,20 @@ export async function runRepoChecks(input: {
 		/\/+$/,
 		'',
 	)
-	const snapshotFiles = await (async () => {
-		const collected = new Map<string, string>()
+	const sourceFiles = await (async () => {
+		const collected: Record<string, string> = {}
 		for await (const [path, content] of workspaceFilesForSnapshot({
 			workspace: input.workspace,
 			root: sourceRoot,
 		})) {
-			collected.set(path, content)
+			collected[path] = content
 		}
 		return collected
 	})()
 	const { createFileSystemSnapshot } = await loadWorkerBundlerSnapshotTools()
 	const snapshot = await createFileSystemSnapshot(
 		(async function* () {
-			for (const [path, content] of snapshotFiles) {
+			for (const [path, content] of Object.entries(sourceFiles)) {
 				yield [path, content] as const
 			}
 		})(),
@@ -712,7 +707,7 @@ export async function runRepoChecks(input: {
 			: bundleContext
 				? await validatePackageBundles({
 						...bundleContext,
-						sourceFiles: createSourceFilesRecord(snapshotFiles),
+						sourceFiles,
 						entryPoints: bundleTargets,
 					})
 				: {
@@ -745,6 +740,7 @@ export async function runRepoChecks(input: {
 			ok: results.every((result) => result.ok),
 			results,
 			manifest,
+			sourceFiles,
 		}
 	}
 
@@ -770,6 +766,7 @@ export async function runRepoChecks(input: {
 			ok: results.every((result) => result.ok),
 			results,
 			manifest,
+			sourceFiles,
 		}
 	}
 
@@ -788,6 +785,7 @@ export async function runRepoChecks(input: {
 			ok: results.every((result) => result.ok),
 			results,
 			manifest,
+			sourceFiles,
 		}
 	}
 
@@ -835,5 +833,6 @@ export async function runRepoChecks(input: {
 		ok: results.every((result) => result.ok),
 		results,
 		manifest,
+		sourceFiles,
 	}
 }
