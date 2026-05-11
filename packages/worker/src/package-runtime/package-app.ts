@@ -4,7 +4,10 @@ import {
 	getPackageAppEntryPath,
 	parseAuthoredPackageJson,
 } from '#worker/package-registry/manifest.ts'
-import { buildCodemodeFns } from '#mcp/run-codemode-registry.ts'
+import {
+	buildCodemodeFns,
+	type PackageInvokeTools,
+} from '#mcp/run-codemode-registry.ts'
 import { getCapabilityRegistryForContext } from '#mcp/capabilities/registry.ts'
 import {
 	createAuthenticatedFetch,
@@ -283,7 +286,10 @@ function createWorkflowsProxy(runtimeBridge) {
 
 function createPackagesProxy(runtimeBridge) {
 	return {
+		check: async (input) => await runtimeBridge.packageInvokeCheck(input ?? {}),
 		invoke: async (input) => await runtimeBridge.packageInvoke(input ?? {}),
+		invokeChecked: async (input) =>
+			await runtimeBridge.packageInvokeChecked(input ?? {}),
 	};
 }
 
@@ -613,6 +619,8 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 	Env,
 	PackageAppRuntimeBridgeProps
 > {
+	private packageRuntimeInvokeTools: Promise<PackageInvokeTools> | null = null
+
 	private createCallerContext(storageId: string | null) {
 		return createMcpCallerContext({
 			baseUrl: this.ctx.props.baseUrl,
@@ -985,25 +993,46 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 		})
 	}
 
-	async packageInvoke(input: Record<string, unknown>) {
+	async createPackageRuntimeInvokeTools() {
+		if (this.packageRuntimeInvokeTools)
+			return await this.packageRuntimeInvokeTools
+
 		// Avoid a top-level package-app -> package-invocations cycle during worker
 		// startup; apps only need this helper when package code calls it.
-		const { createPackageRuntimeInvokeTools } =
-			await import('#worker/package-invocations/service.ts')
-		const packageContext = {
-			packageId: this.ctx.props.packageId,
-			kodyId: this.ctx.props.kodyId,
-			sourceId: this.ctx.props.sourceId,
-		}
-		const tools = createPackageRuntimeInvokeTools({
-			env: this.env,
-			baseUrl: this.ctx.props.baseUrl,
-			callerContext: this.createCallerContext(this.ctx.props.packageId),
-			packageContext,
-			parentRuntimeDebug: null,
-			packageInvokeDepth: 0,
-		})
+		this.packageRuntimeInvokeTools =
+			import('#worker/package-invocations/service.ts').then(
+				({ createPackageRuntimeInvokeTools }) => {
+					const packageContext = {
+						packageId: this.ctx.props.packageId,
+						kodyId: this.ctx.props.kodyId,
+						sourceId: this.ctx.props.sourceId,
+					}
+					return createPackageRuntimeInvokeTools({
+						env: this.env,
+						baseUrl: this.ctx.props.baseUrl,
+						callerContext: this.createCallerContext(this.ctx.props.packageId),
+						packageContext,
+						parentRuntimeDebug: null,
+						packageInvokeDepth: 0,
+					})
+				},
+			)
+		return await this.packageRuntimeInvokeTools
+	}
+
+	async packageInvoke(input: Record<string, unknown>) {
+		const tools = await this.createPackageRuntimeInvokeTools()
 		return await tools.invoke(input)
+	}
+
+	async packageInvokeCheck(input: Record<string, unknown>) {
+		const tools = await this.createPackageRuntimeInvokeTools()
+		return await tools.check(input)
+	}
+
+	async packageInvokeChecked(input: Record<string, unknown>) {
+		const tools = await this.createPackageRuntimeInvokeTools()
+		return await tools.invokeChecked(input)
 	}
 }
 
