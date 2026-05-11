@@ -16,18 +16,18 @@ async function workerFetch(request: Request): Promise<Response> {
 	return response
 }
 
-test('connector entrypoints reject unauthenticated HTTP access while allowing WebSocket upgrades', async () => {
+test('user-scoped connector entrypoints reject unauthenticated HTTP access while allowing WebSocket upgrades', async () => {
 	const unauthorizedRequests = [
-		createRequest('/connectors/lights/default/snapshot'),
-		createRequest('/connectors/lights/default/rpc/tools-list', {
+		createRequest('/connectors/u/user-1/lights/default/snapshot'),
+		createRequest('/connectors/u/user-1/lights/default/rpc/tools-list', {
 			method: 'POST',
 		}),
-		createRequest('/connectors/lights/default/rpc/tools-call', {
+		createRequest('/connectors/u/user-1/lights/default/rpc/tools-call', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ name: 'test', arguments: {} }),
 		}),
-		createRequest('/connectors/lights/default/rpc/jsonrpc', {
+		createRequest('/connectors/u/user-1/lights/default/rpc/jsonrpc', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
@@ -41,9 +41,12 @@ test('connector entrypoints reject unauthenticated HTTP access while allowing We
 		expect(response.status).toBe(404)
 	}
 
-	const websocketRequest = createRequest('/connectors/lights/default', {
-		headers: { Upgrade: 'websocket' },
-	})
+	const websocketRequest = createRequest(
+		'/connectors/u/user-1/lights/default',
+		{
+			headers: { Upgrade: 'websocket' },
+		},
+	)
 	const websocketResponse = await workerFetch(websocketRequest)
 
 	expect(websocketResponse.status).toBe(101)

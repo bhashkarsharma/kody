@@ -492,7 +492,13 @@ test('inbound email handler dispatches package subscriptions for stored inbound 
 		mainModule: 'dist/subscription.js',
 		modules: {
 			'.__kody_virtual__/runtime.js': `
-const runtime = globalThis.__kodyRuntime ?? {};
+import { AsyncLocalStorage } from 'node:async_hooks';
+const __kodyRuntimeStorageSymbol = Symbol.for('kody.runtimeStorage');
+const __kodyGlobal = globalThis;
+const __kodyRuntimeStorage =
+  __kodyGlobal[__kodyRuntimeStorageSymbol] ??
+  (__kodyGlobal[__kodyRuntimeStorageSymbol] = new AsyncLocalStorage());
+const runtime = __kodyRuntimeStorage.getStore() ?? {};
 export const codemode = runtime.codemode;
 export const email = runtime.email ?? null;
 `.trim(),

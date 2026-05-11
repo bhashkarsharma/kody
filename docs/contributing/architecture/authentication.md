@@ -1,5 +1,11 @@
 # Authentication
 
+`kody` is multi-user. Each signed-in user has a fully isolated assistant: their
+own packages, jobs, secrets, values, memories, chat threads, remote connectors,
+email inboxes, and durable storage. The auth layer is the boundary that
+establishes which user a request belongs to before any handler reads or writes
+data.
+
 `kody` uses two related authentication models:
 
 1. Cookie-based app sessions for browser users
@@ -38,6 +44,37 @@ request so cookie signing and verification are available to handlers.
 - Hashes passwords with `@kody-internal/shared/password-hash.ts`
 - Returns signed session cookie via `Set-Cookie` on success
 - Emits structured audit events through `packages/worker/src/app/audit-log.ts`
+
+### Signup posture
+
+Signup is open. The auth handler does not gate on email — anyone who can reach
+`POST /auth` with `mode: 'signup'` and a valid body can create an account. There
+is no application-level allowlist, invite flow, or privileged "primary user".
+Operators who want to restrict who can sign up should put the worker behind
+their own network-layer access control.
+
+## Account deletion
+
+`POST /account/delete` is implemented by
+`packages/worker/src/app/handlers/account-delete.ts` and orchestrated by
+`packages/worker/src/app/account-deletion.ts`.
+
+- Requires an active `kody_session` cookie and a JSON body with `password`
+  re-authenticating the current user; failures emit an audit event with
+  `action: 'account_delete'`, `result: 'failure'`.
+- On success, runs a full per-user cascade across:
+  - all `user_id`-scoped D1 tables (children before parents),
+  - the shared Vectorize capability index, removing memory, job and
+    saved-package entries by id,
+  - `BUNDLE_ARTIFACTS_KV` keys captured from `published_bundle_artifacts` and
+    `archived_job_artifacts`,
+  - the user's `StorageRunner` Durable Objects via the user-scoped
+    `storageRunnerRpc` stub,
+  - all OAuth grants for the user via the bound OAuth provider,
+  - the user row itself last so a partial failure can be retried.
+- Returns a structured
+  `{ ok, deletedRowCounts, deletedKvKeys, revokedOAuthGrants, clearedDurableObjects, deletedVectors, warnings }`
+  payload alongside a `Set-Cookie` that destroys the session.
 
 Related handlers:
 
