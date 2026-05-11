@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { afterEach, beforeEach, expect, test } from 'vitest'
+import { createRuntimeModuleSource } from './module-graph.ts'
 
 // The kody:runtime virtual module captures its named exports statically
 // when it evaluates inside the surrounding AsyncLocalStorage context. The
@@ -11,33 +12,13 @@ import { afterEach, beforeEach, expect, test } from 'vitest'
 // bundle fresh per request, so each request gets a fresh evaluation with
 // the per-request runtime values.
 //
-// These tests stand up the same shape against the local filesystem: a
-// fresh on-disk copy per "request", evaluated inside __kodyRunInRuntime,
-// to verify that two concurrent calls each capture their own runtime
-// view and that optional (undefined) runtime exports stay falsy so user
-// code's `if (email) { ... }` guards keep working.
+// These tests stand up the same shape against the local filesystem to verify
+// that two concurrent calls each capture their own runtime view, optional
+// runtime exports stay falsy so user code's `if (email) { ... }` guards keep
+// working, and a preloaded runtime still late-binds the always-present codemode
+// namespace inside the execution context.
 
-const runtimeSource = `
-import { AsyncLocalStorage } from 'node:async_hooks';
-
-const __kodyRuntimeStorageSymbol = Symbol.for('kody.runtimeStorage');
-const __globalAny = globalThis;
-const __kodyRuntimeStorage =
-	__globalAny[__kodyRuntimeStorageSymbol] ??
-	(__globalAny[__kodyRuntimeStorageSymbol] = new AsyncLocalStorage());
-
-export function __kodyRunInRuntime(runtime, callback) {
-	return __kodyRuntimeStorage.run(runtime, callback);
-}
-
-const runtime = __kodyRuntimeStorage.getStore() ?? {};
-
-export const codemode = runtime.codemode;
-export const storage = runtime.storage;
-export const email = runtime.email ?? null;
-export const packageContext = runtime.packageContext ?? null;
-export default runtime;
-`.trim()
+const runtimeSource = createRuntimeModuleSource()
 
 type RuntimeModule = {
 	__kodyRunInRuntime: <T>(
@@ -48,6 +29,9 @@ type RuntimeModule = {
 	storage: { get: (key: string) => Promise<unknown> } | undefined
 	email: unknown
 	packageContext: Record<string, unknown> | null
+	default: {
+		codemode?: { tool_call: (args: unknown) => Promise<unknown> }
+	}
 }
 
 const cleanupCallbacks: Array<() => Promise<void>> = []
@@ -177,4 +161,76 @@ test('optional runtime exports stay falsy when the wrapper omits them', async ()
 	expect(Boolean(mod.storage)).toBe(false)
 	// Provided exports survive.
 	expect(mod.packageContext).toEqual({ packageId: 'pkg-1' })
+})
+
+test('preloaded codemode export resolves from the active runtime store', async () => {
+	const sharedStorage = new AsyncLocalStorage<unknown>()
+	;(globalThis as unknown as Record<symbol, unknown>)[
+		Symbol.for('kody.runtimeStorage')
+	] = sharedStorage
+	const url = await writeRuntimeFile()
+	const mod = (await import(url)) as RuntimeModule
+
+	const result = await sharedStorage.run(
+		{
+			codemode: {
+				async tool_call(args: unknown) {
+					return { ok: true, args }
+				},
+			},
+		},
+		async () => {
+			const tool = mod.codemode
+			if (!tool) throw new Error('codemode missing')
+			return await tool.tool_call({ value: 'active-store' })
+		},
+	)
+
+	expect(result).toEqual({
+		ok: true,
+		args: { value: 'active-store' },
+	})
+})
+
+test('preloaded default runtime export exposes active codemode store', async () => {
+	const sharedStorage = new AsyncLocalStorage<unknown>()
+	;(globalThis as unknown as Record<symbol, unknown>)[
+		Symbol.for('kody.runtimeStorage')
+	] = sharedStorage
+	const url = await writeRuntimeFile()
+	const mod = (await import(url)) as RuntimeModule
+
+	const result = await sharedStorage.run(
+		{
+			codemode: {
+				async tool_call(args: unknown) {
+					return { ok: true, args }
+				},
+			},
+		},
+		async () => {
+			const tool = mod.default.codemode
+			if (!tool) throw new Error('default codemode missing')
+			return await tool.tool_call({ value: 'default-active-store' })
+		},
+	)
+
+	expect(result).toEqual({
+		ok: true,
+		args: { value: 'default-active-store' },
+	})
+})
+
+test('preloaded codemode export supports inspection outside a runtime store', async () => {
+	const url = await writeRuntimeFile()
+	const mod = (await import(url)) as RuntimeModule
+
+	expect(String(mod.codemode)).toBe('[KodyRuntime:codemode]')
+	expect(Object.prototype.toString.call(mod.codemode)).toBe(
+		'[object KodyRuntime:codemode]',
+	)
+	expect(Symbol.iterator in Object(mod.codemode)).toBe(false)
+	expect(() => mod.codemode?.tool_call({})).toThrow(
+		'kody:runtime export "codemode" is not available in this execution context.',
+	)
 })
