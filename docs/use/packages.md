@@ -91,13 +91,13 @@ exhaustive.
   current-version literal dynamic `import("kody:@...")` expressions do not need
   `kody.dependencies` declarations.
 - Computed dynamic Kody package imports, including template strings and
-  variables such as `import(packageSpecifier)`, are unsupported for now. Use a
+  variables such as `import(packageSpecifier)`, are unsupported. Use a
   string literal `import("kody:@scope/my-package/export")` when you want
   current-version runtime resolution.
 - `kody:runtime` is always host-owned and request-scoped. Static imports such as
   `import { codemode } from "kody:runtime"` stay valid, but saved package
   artifacts do not persist Kody's runtime implementation; execution always uses
-  the currently deployed host runtime.
+  the deployed host runtime.
 - Exports are normal modules. They may expose a default export, named exports,
   or both.
 - Direct package invocation calls the resolved module's default export when that
@@ -114,13 +114,13 @@ Package runtime code can invoke another package owned by the same user without
 statically importing it:
 
 ```ts
-import { packages } from 'kody:runtime'
+import { packages } from "kody:runtime";
 
 const result = await packages.invoke({
-	kodyId: 'discord-general-chat',
-	exportName: './handle-discord-message-created',
-	params: { event },
-})
+  kodyId: "discord-general-chat",
+  exportName: "./handle-discord-message-created",
+  params: { event },
+});
 ```
 
 Use `packages.invokeChecked` for event subscribers, workflow dispatchers,
@@ -137,43 +137,43 @@ Use `packages.check` when the caller wants to inspect the current contract
 before deciding whether to invoke:
 
 ```ts
-import { packages } from 'kody:runtime'
+import { packages } from "kody:runtime";
 
 const check = await packages.check({
-	kodyId: 'discord-general-chat',
-	exportName: './handle-discord-message-created',
-	params: { event, dryRun: true },
-})
+  kodyId: "discord-general-chat",
+  exportName: "./handle-discord-message-created",
+  params: { event, dryRun: true },
+});
 
-if (!check.ok) throw new Error(check.message)
-console.log(check.contract)
+if (!check.ok) throw new Error(check.message);
+console.log(check.contract);
 
-const result = await packages.invoke(check.invoke)
+const result = await packages.invoke(check.invoke);
 ```
 
 For the common check-then-invoke flow, use the combined helper:
 
 ```ts
-import { packages } from 'kody:runtime'
+import { packages } from "kody:runtime";
 
 const result = await packages.invokeChecked({
-	kodyId: 'discord-general-chat',
-	exportName: './handle-discord-message-created',
-	params: { event, dryRun: true },
-})
+  kodyId: "discord-general-chat",
+  exportName: "./handle-discord-message-created",
+  params: { event, dryRun: true },
+});
 ```
 
 Use bare `packages.invoke` only when the caller has already checked the contract
 or intentionally wants the older direct invoke behavior. Use static
 `kody:@scope/package/export` imports for library-like dependencies where
-bundling the currently published dependency with the caller is desired.
+bundling the published dependency snapshot with the caller is desired.
 
 `packages.check` returns `ok: false` with `message` and `problems` when the
 package, export, or params are invalid. On success it returns `contract`
 metadata, including package id/kody id/name, source id, published commit,
 normalized export name, runtime target, available JSDoc/type definition, and
 warnings on `check.contract.warnings`. Those warnings are important: Kody
-currently has JSDoc/type metadata but no machine-readable params schema for
+surfaces JSDoc/type metadata but not a machine-readable params schema for
 package exports, so params are only validated as a JSON object.
 
 `packages.invoke` and `packages.invokeChecked` return the target export's
@@ -309,9 +309,9 @@ edit it with a normal git client without round-tripping each file change through
 
    ```json
    {
-   	"package_id": "pkg_123",
-   	"scope": "write",
-   	"ttl_seconds": 1800
+     "package_id": "pkg_123",
+     "scope": "write",
+     "ttl_seconds": 1800
    }
    ```
 
@@ -341,7 +341,7 @@ edit it with a normal git client without round-tripping each file change through
 
    ```json
    {
-   	"package_id": "pkg_123"
+     "package_id": "pkg_123"
    }
    ```
 
