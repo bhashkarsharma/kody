@@ -3,6 +3,7 @@ import { defineDomainCapability } from '#mcp/capabilities/define-domain-capabili
 import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
 import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
 import { repoSessionRpc } from '#worker/repo/repo-session-do.ts'
+import { getMcpUserPackageScope } from '#worker/package-registry/user-scope.ts'
 import { resolveRepoTargetFromSource } from './repo-resolve-target.ts'
 import { repoRunCommandsCapabilityDescription } from './repo-run-commands-text.ts'
 import {
@@ -79,6 +80,10 @@ export const repoRunCommandsCapability = defineDomainCapability(
 						})
 			const validatedSession = repoOpenSessionOutputSchema.parse(session)
 			const sessionRpc = repoSessionRpc(ctx.env, validatedSession.id)
+			const expectedPackageScope =
+				validatedSession.entity_type === 'package' && args.run_checks === true
+					? await getMcpUserPackageScope(ctx.env.APP_DB, user)
+					: undefined
 			const result = await sessionRpc.runCommands({
 				sessionId: validatedSession.id,
 				userId: user.userId,
@@ -86,6 +91,7 @@ export const repoRunCommandsCapability = defineDomainCapability(
 				dryRun: args.dry_run,
 				runChecks: args.run_checks,
 				publish: false,
+				expectedPackageScope,
 			})
 			let publish = result.publish
 			if (args.publish === true) {
@@ -103,6 +109,7 @@ export const repoRunCommandsCapability = defineDomainCapability(
 						sessionId: validatedSession.id,
 						userId: user.userId,
 						rebuildPackageArtifacts: false,
+						expectedPackageScope,
 					})
 				} else {
 					publish = { status: 'not_requested' as const }
