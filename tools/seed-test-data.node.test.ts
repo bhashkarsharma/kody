@@ -3,11 +3,15 @@ import { expect, test } from 'vitest'
 import { parseArgs, resolveWranglerEnv } from './seed-test-data.ts'
 
 test('seed data arg parsing keeps the default local workflow while honoring overrides', () => {
+	const kentOptions = parseArgs([])
+	expect(kentOptions.email).toBe('me@kentcdodds.com')
+	expect(kentOptions.username).toBe('kentcdodds')
+
 	const defaultOptions = parseArgs(['--email', 'alice@example.com'])
 	expect(defaultOptions.local).toBe(true)
 	expect(defaultOptions.remote).toBe(false)
 	expect(defaultOptions.email).toBe('alice@example.com')
-	expect(defaultOptions.username).toBe('alice@example.com')
+	expect(defaultOptions.username).toBe('alice')
 	expect(defaultOptions.env).toBe('production')
 
 	const explicitUsernameOptions = parseArgs([

@@ -7,16 +7,23 @@ export * from '@playwright/test'
 export const test = base.extend<{
 	insertNewUser(options?: {
 		email?: string
+		username?: string
 		password?: string
-	}): Promise<{ email: string; password: string }>
+	}): Promise<{ email: string; username: string; password: string }>
 	login(options?: {
 		email?: string
+		username?: string
 		password?: string
-	}): Promise<{ email: string; password: string }>
+	}): Promise<{ email: string; username: string; password: string }>
 }>({
 	insertNewUser: async ({ page }, use) => {
 		await use(async (options) => {
 			const email = options?.email ?? primaryTestUser.email
+			const username =
+				options?.username ??
+				(email === primaryTestUser.email
+					? primaryTestUser.username
+					: usernameFromEmail(email))
 			const password = options?.password ?? primaryTestUser.password
 
 			if (
@@ -24,44 +31,75 @@ export const test = base.extend<{
 				password === primaryTestUser.password
 			) {
 				await ensurePrimaryUserExists(page.request)
-				return { email, password }
+				return { email, username: primaryTestUser.username, password }
 			}
 
 			const response = await page.request.post('/auth', {
-				data: { email, password, mode: 'signup' },
+				data: { email, username, password, mode: 'signup' },
 				headers: { 'Content-Type': 'application/json' },
 			})
 
-			if (!response.ok() && response.status() !== 409) {
-				throw new Error(`Failed to seed user (${response.status()}).`)
+			if (response.status() === 409) {
+				const detail = await readResponseDetail(response)
+				if (detail !== 'Email already registered.') {
+					throw new Error(
+						`Failed to seed user (${response.status()}): ${detail}`,
+					)
+				}
+				const loginResponse = await page.request.post('/auth', {
+					data: { email, password, mode: 'login' },
+					headers: { 'Content-Type': 'application/json' },
+				})
+				if (!loginResponse.ok()) {
+					throw new Error(
+						`Failed to seed user (${response.status()}): ${detail}`,
+					)
+				}
+			} else if (!response.ok()) {
+				throw new Error(
+					`Failed to seed user (${response.status()}): ${await readResponseDetail(response)}`,
+				)
 			}
 
-			return { email, password }
+			return { email, username, password }
 		})
 	},
 	login: async ({ page }, use) => {
 		await use(async (options) => {
 			const email = options?.email ?? primaryTestUser.email
+			const username =
+				options?.username ??
+				(email === primaryTestUser.email
+					? primaryTestUser.username
+					: usernameFromEmail(email))
 			const password = options?.password ?? primaryTestUser.password
 
 			let response = await page.request.post('/auth', {
-				data: { email, password, mode: 'signup' },
+				data: { email, username, password, mode: 'signup' },
 				headers: { 'Content-Type': 'application/json' },
 			})
 
-			if (!response.ok() && response.status() !== 409) {
-				throw new Error(`Failed to seed user (${response.status()}).`)
-			}
-
 			if (response.status() === 409) {
+				const detail = await readResponseDetail(response)
+				if (detail !== 'Email already registered.') {
+					throw new Error(
+						`Failed to seed user (${response.status()}): ${detail}`,
+					)
+				}
 				response = await page.request.post('/auth', {
 					data: { email, password, mode: 'login' },
 					headers: { 'Content-Type': 'application/json' },
 				})
 
 				if (!response.ok()) {
-					throw new Error(`Failed to login user (${response.status()}).`)
+					throw new Error(
+						`Failed to login user (${response.status()}): ${await readResponseDetail(response)}`,
+					)
 				}
+			} else if (!response.ok()) {
+				throw new Error(
+					`Failed to seed user (${response.status()}): ${await readResponseDetail(response)}`,
+				)
 			}
 
 			const setCookieHeader = response.headers()['set-cookie']
@@ -79,7 +117,31 @@ export const test = base.extend<{
 				await page.context().addCookies([cookieConfig])
 			}
 
-			return { email, password }
+			return { email, username, password }
 		})
 	},
 })
+
+function usernameFromEmail(email: string) {
+	const localPart = email.split('@')[0] ?? 'user'
+	const normalized = localPart
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, '-')
+		.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+	const truncated = normalized
+		.slice(0, 32)
+		.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+	return truncated.length >= 3 ? truncated : `user-${truncated || 'test'}`
+}
+
+async function readResponseDetail(response: { json(): Promise<unknown> }) {
+	const payload = await response.json().catch(() => null)
+	if (
+		payload &&
+		typeof payload === 'object' &&
+		typeof (payload as Record<string, unknown>).error === 'string'
+	) {
+		return (payload as Record<string, string>).error
+	}
+	return 'Unknown error.'
+}
