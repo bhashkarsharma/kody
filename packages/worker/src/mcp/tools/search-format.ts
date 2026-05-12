@@ -18,6 +18,7 @@ import {
 	escapeMarkdownText,
 	formatMarkdownInlineCode,
 } from './markdown-safety.ts'
+import { buildPackageAppUrl } from '@kody-internal/shared/public-urls.ts'
 
 export type SearchEntityType =
 	| 'capability'
@@ -405,8 +406,12 @@ export type SearchMatch =
 			type: 'retriever_result'
 	  })
 
-function buildPackageHostedUrl(baseUrl: string, kodyId: string) {
-	return `${baseUrl.replace(/\/+$/, '')}/packages/${encodeURIComponent(kodyId)}`
+function buildPackageHostedUrl(
+	baseUrl: string,
+	username: string,
+	kodyId: string,
+) {
+	return buildPackageAppUrl({ origin: baseUrl, username, kodyId })
 }
 
 function buildEntityRef(id: string, type: SearchEntityType) {
@@ -612,6 +617,7 @@ function formatMatchListItem(match: SearchMatch, index: number) {
 export function toSlimStructuredMatches(input: {
 	matches: Array<SearchMatch>
 	baseUrl: string
+	username?: string | null
 }): Array<SlimSearchMatch> {
 	return input.matches.map((match) => {
 		if (match.type === 'capability') {
@@ -682,9 +688,10 @@ export function toSlimStructuredMatches(input: {
 				openGeneratedUiUsage,
 				tags: match.tags,
 				hasApp: match.hasApp,
-				hostedUrl: match.hasApp
-					? buildPackageHostedUrl(input.baseUrl, match.kodyId)
-					: null,
+				hostedUrl:
+					match.hasApp && input.username
+						? buildPackageHostedUrl(input.baseUrl, input.username, match.kodyId)
+						: null,
 				readmeSnippet: match.readmeSnippet
 					? {
 							path: match.readmeSnippet.path,

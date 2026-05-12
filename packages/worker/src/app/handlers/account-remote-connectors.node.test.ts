@@ -4,12 +4,14 @@ const mockModule = vi.hoisted(() => ({
 	readAuthenticatedAppUser: vi.fn(async () => ({
 		sessionUserId: '42',
 		userId: 42,
+		username: 'test-user',
 		email: 'user@example.com',
 		displayName: 'user',
 		artifactOwnerIds: [],
 		mcpUser: {
 			userId: 'stable-user-1',
 			email: 'user@example.com',
+			username: 'test-user',
 			displayName: 'user',
 		},
 	})),
@@ -95,15 +97,14 @@ test('remote connector settings API lists settings with plaintext secrets', asyn
 	expect(JSON.parse(text)).toEqual({
 		ok: true,
 		email: 'user@example.com',
-		userId: 'stable-user-1',
+		username: 'test-user',
 		connectorUrlOrigin: 'wss://example.com',
 		connectors: [
 			{
 				id: 'connector-1',
 				kind: 'lights',
 				instanceId: 'default',
-				connectorUrl:
-					'wss://example.com/connectors/u/stable-user-1/lights/default',
+				connectorUrl: 'wss://example.com/@test-user/connectors/lights/default',
 				enabled: true,
 				attached: true,
 				hasSharedSecret: true,
@@ -145,7 +146,7 @@ test('remote connector settings API passes submitted secret to save service', as
 	expect(await response.json()).toEqual({
 		ok: true,
 		email: 'user@example.com',
-		userId: 'stable-user-1',
+		username: 'test-user',
 		connectorUrlOrigin: 'wss://example.com',
 		selectedConnectorId: 'connector-1',
 		connectors: [
@@ -153,8 +154,7 @@ test('remote connector settings API passes submitted secret to save service', as
 				id: 'connector-1',
 				kind: 'lights',
 				instanceId: 'default',
-				connectorUrl:
-					'wss://example.com/connectors/u/stable-user-1/lights/default',
+				connectorUrl: 'wss://example.com/@test-user/connectors/lights/default',
 				enabled: true,
 				attached: true,
 				hasSharedSecret: true,

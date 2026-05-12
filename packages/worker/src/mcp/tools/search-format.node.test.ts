@@ -322,7 +322,7 @@ test('entity detail formatting includes package app, export, and job metadata', 
 		id: 'observed-package',
 		title: '@kody/observed-package',
 		description: 'Observed package with an app surface.',
-		hostedUrl: 'http://localhost/packages/observed-package',
+		hostedUrl: 'http://localhost/@test-user/packages/observed-package',
 		record: {
 			id: 'package-123',
 			userId: 'user-123',
@@ -387,7 +387,7 @@ export declare function fetch(request: Request): Promise<Response>
 		entityRef: 'observed-package:package',
 		usage: 'open_generated_ui({ kody_id: "observed-package" })',
 		hasApp: true,
-		hostedUrl: 'http://localhost/packages/observed-package',
+		hostedUrl: 'http://localhost/@test-user/packages/observed-package',
 		appEntry: './src/app.ts',
 	})
 	expect(packageDetail.structured).toMatchObject({
@@ -530,6 +530,7 @@ export declare function launch(input: LaunchCursorCloudAgentInput): Promise<Resp
 test('package search formatting keeps runnable package actions in structured output', () => {
 	const [packageMatch] = toSlimStructuredMatches({
 		baseUrl: 'http://localhost',
+		username: 'test-user',
 		matches: [
 			{
 				type: 'package',
@@ -563,7 +564,7 @@ test('package search formatting keeps runnable package actions in structured out
 		openGeneratedUiUsage: 'open_generated_ui({ kody_id: "spotify-playback" })',
 		tags: ['spotify', 'playback'],
 		hasApp: true,
-		hostedUrl: 'http://localhost/packages/spotify-playback',
+		hostedUrl: 'http://localhost/@test-user/packages/spotify-playback',
 		readmeSnippet: {
 			path: 'README.md',
 			snippet:
@@ -572,6 +573,32 @@ test('package search formatting keeps runnable package actions in structured out
 		},
 	})
 	expect(packageMatch?.nextStep).toEqual(expect.any(String))
+})
+
+test('package search formatting omits hosted URLs when username is unavailable', () => {
+	const [packageMatch] = toSlimStructuredMatches({
+		baseUrl: 'http://localhost',
+		matches: [
+			{
+				type: 'package',
+				packageId: 'package-123',
+				kodyId: 'spotify-playback',
+				name: '@kody/spotify-playback',
+				title: '@kody/spotify-playback',
+				description: 'Saved package for Spotify playback controls.',
+				tags: ['spotify', 'playback'],
+				hasApp: true,
+				readmeSnippet: null,
+			},
+		],
+	})
+
+	expect(packageMatch).toMatchObject({
+		type: 'package',
+		hasApp: true,
+		hostedUrl: null,
+		openGeneratedUiUsage: 'open_generated_ui({ kody_id: "spotify-playback" })',
+	})
 })
 
 test('package search formatting surfaces matched action recipes compactly', () => {
@@ -609,6 +636,7 @@ test('package search formatting surfaces matched action recipes compactly', () =
 	})
 	const [packageMatch] = toSlimStructuredMatches({
 		baseUrl: 'http://localhost',
+		username: 'test-user',
 		matches: [
 			{
 				type: 'package',

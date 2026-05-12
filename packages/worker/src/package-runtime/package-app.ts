@@ -628,6 +628,7 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 			user: {
 				userId: this.ctx.props.userId,
 				email: this.ctx.props.email,
+				username: undefined,
 				displayName: this.ctx.props.displayName,
 			},
 			storageContext: {
@@ -1193,6 +1194,7 @@ export async function createPackageAppCallerContext(input: {
 	user: {
 		userId: string
 		email: string
+		username?: string
 		displayName?: string
 	}
 	packageId: string
@@ -1202,6 +1204,7 @@ export async function createPackageAppCallerContext(input: {
 		user: {
 			userId: input.user.userId,
 			email: input.user.email,
+			username: input.user.username,
 			displayName: input.user.displayName ?? `package:${input.packageId}`,
 		},
 		storageContext: {

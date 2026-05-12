@@ -17,6 +17,7 @@ import { createDb, usersTable } from './db.ts'
 import { wantsJson } from './utils.ts'
 import { verifyPassword } from '@kody-internal/shared/password-hash.ts'
 import { invalidClientIdMismatchMessage } from '@kody-internal/shared/oauth-messages.ts'
+import { getUsernameValidationError } from '#app/username.ts'
 
 export const oauthPaths = {
 	authorize: '/oauth/authorize',
@@ -32,6 +33,7 @@ export const oauthScopes: Array<string> = ['profile', 'email']
 type OAuthProps = {
 	userId: string
 	email: string
+	username: string
 	displayName: string
 }
 
@@ -41,6 +43,12 @@ type OAuthEnv = Env & {
 
 type OAuthContext = ExecutionContext & {
 	props?: OAuthProps
+}
+
+function getValidOAuthUsername(value: unknown) {
+	return typeof value === 'string' && !getUsernameValidationError(value.trim())
+		? value.trim()
+		: null
 }
 
 type OAuthClientResetVerification = {
@@ -628,6 +636,7 @@ export async function handleAuthorizeRequest(
 	}
 
 	let approvedEmail = ''
+	let approvedUsername = ''
 	if (hasFormCredentials) {
 		const db = createDb(env.APP_DB)
 		const userRecord = await db.findOne(usersTable, {
@@ -652,15 +661,59 @@ export async function handleAuthorizeRequest(
 			})
 			return respondAuthorizeError(request, 'Invalid email or password.')
 		}
+		const username = getValidOAuthUsername(userRecord.username)
+		if (!username) {
+			void logAuditEvent({
+				category: 'oauth',
+				action: 'authorize',
+				result: 'failure',
+				email: normalizedEmail,
+				ip: requestIp,
+				clientId: authRequest.clientId,
+				reason: 'username_missing',
+			})
+			return respondAuthorizeError(request, 'Username is required.', 401)
+		}
 		approvedEmail = normalizedEmail
+		approvedUsername = username
 	} else if (sessionEmail) {
+		const db = createDb(env.APP_DB)
+		const userRecord = await db.findOne(usersTable, {
+			where: { email: sessionEmail },
+		})
+		if (!userRecord) {
+			void logAuditEvent({
+				category: 'oauth',
+				action: 'authorize',
+				result: 'failure',
+				email: sessionEmail,
+				ip: requestIp,
+				clientId: authRequest.clientId,
+				reason: 'session_user_not_found',
+			})
+			return respondAuthorizeError(request, 'Signed-in user not found.', 401)
+		}
+		const username = getValidOAuthUsername(userRecord.username)
+		if (!username) {
+			void logAuditEvent({
+				category: 'oauth',
+				action: 'authorize',
+				result: 'failure',
+				email: sessionEmail,
+				ip: requestIp,
+				clientId: authRequest.clientId,
+				reason: 'username_missing',
+			})
+			return respondAuthorizeError(request, 'Username is required.', 401)
+		}
 		approvedEmail = sessionEmail
+		approvedUsername = username
 	}
 
 	const resolvedScopes = resolveScopes(authRequest.scope)
 	if (Array.isArray(resolvedScopes)) {
 		const userId = await createStableUserIdFromEmail(approvedEmail)
-		const displayName = approvedEmail.split('@')[0] || 'user'
+		const displayName = approvedUsername
 		const { redirectTo } = await helpers.completeAuthorization({
 			request: authRequest,
 			userId,
@@ -672,6 +725,7 @@ export async function handleAuthorizeRequest(
 			props: {
 				userId,
 				email: approvedEmail,
+				username: approvedUsername,
 				displayName,
 			},
 		})
