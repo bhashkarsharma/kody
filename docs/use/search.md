@@ -26,9 +26,10 @@ response must stay small.
 ## Single-entity detail
 
 To get **full markdown and call shapes for one hit** (for example a capability’s
-`inputTypeDefinition` / `outputTypeDefinition`), call **search** again with
-**`entity`** set to `"{id}:{type}"` where **`type`** is `capability`, `value`,
-`integration`, `package`, or `secret`.
+ready-to-run **execute** snippet plus `inputTypeDefinition` /
+`outputTypeDefinition`), call **search** again with **`entity`** set to
+`"{id}:{type}"` where **`type`** is `capability`, `value`, `integration`,
+`package`, or `secret`.
 
 Examples:
 
@@ -45,6 +46,23 @@ entity uses **`entity`**, not a different mode of the same ranked query.
 Top-level ranked result cards include an explicit entity ref for each hit when
 applicable, using that same `"{id}:{type}"` format, so you can immediately copy
 the ref into a follow-up `entity` lookup when needed.
+
+Capability detail shows the exact runtime pattern for **execute**:
+
+```ts
+import { codemode } from 'kody:runtime'
+
+export default async function main(input = {}) {
+	return await codemode.kody_official_guide(input)
+}
+```
+
+Use the capability id returned by **search** as the `codemode` method name, and
+pass an object matching the displayed input type. Valid JavaScript identifier
+ids use dot notation such as `codemode.kody_official_guide(input)`. If a
+capability id is not a valid JavaScript identifier, use bracket notation such as
+`codemode["capability-id"](input)`. Capability detail emits the exact form to
+copy. Use `{}` when the capability has no required fields.
 
 ## When results look thin
 
