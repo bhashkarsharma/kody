@@ -314,6 +314,18 @@ export async function writeGeneratedWranglerConfig({
 		config.name = workerName
 	}
 
+	const targetAssets = (targetEnv as Record<string, unknown>).assets
+	if (
+		!targetAssets ||
+		typeof targetAssets !== 'object' ||
+		Array.isArray(targetAssets)
+	) {
+		fail(
+			`wrangler config "${baseConfigPath}" is missing "env.${envName}.assets".`,
+		)
+	}
+	config.assets = { ...(targetAssets as Record<string, unknown>) }
+
 	const d1Databases = (targetEnv as Record<string, unknown>).d1_databases
 	if (!Array.isArray(d1Databases)) {
 		fail(
