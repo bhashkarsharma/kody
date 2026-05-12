@@ -10,6 +10,7 @@ import {
 } from '#worker/package-runtime/static-package-dependents.ts'
 import { repoSessionRpc } from '#worker/repo/repo-session-do.ts'
 import { resolveArtifactSourceHead } from '#worker/repo/artifacts.ts'
+import { rebuildPublishedPackageArtifactsViaRepoSession } from '#mcp/capabilities/repo/package-artifact-rebuild.ts'
 import { resolveOwnedPackageSource } from './resolve-package-source.ts'
 
 const inputSchema = z.object({
@@ -255,25 +256,12 @@ export const publishExternalPushCapability = defineDomainCapability(
 						kody_id: args.kody_id,
 					},
 				})
-				const publishedCommit = source.published_commit
 				const head = await resolveArtifactSourceHead(ctx.env, source.repo_id)
 				const newCommit = head.commit
 				if (!newCommit) {
 					throw new Error(
 						`Artifacts repo "${source.repo_id}" has no published HEAD to reconcile.`,
 					)
-				}
-				if (newCommit === publishedCommit) {
-					return {
-						status: 'already_published',
-						published_commit: publishedCommit,
-						static_dependents: await getPublishStaticDependents({
-							db: ctx.env.APP_DB,
-							userId: user.userId,
-							sourceId: source.id,
-							publishedCommit,
-						}),
-					} as const
 				}
 				const sessionId =
 					attemptIndex === 0
@@ -291,8 +279,22 @@ export const publishExternalPushCapability = defineDomainCapability(
 						expectedHead: newCommit,
 						allowForce: args.allow_force,
 						baseUrl: ctx.callerContext.baseUrl,
+						rebuildPackageArtifacts: false,
 					})
 					if (result.status === 'already_published') {
+						if (!result.published_commit) {
+							throw new Error(
+								`Package "${packageId}" is already published, but no published commit is available to rebuild artifacts.`,
+							)
+						}
+						await rebuildPublishedPackageArtifactsViaRepoSession({
+							env: ctx.env,
+							rpcSessionId: sessionId,
+							sourceId: source.id,
+							userId: user.userId,
+							publishedCommit: result.published_commit,
+							baseUrl: ctx.callerContext.baseUrl,
+						})
 						return {
 							...result,
 							static_dependents: await getPublishStaticDependents({
@@ -306,6 +308,14 @@ export const publishExternalPushCapability = defineDomainCapability(
 					if (result.status !== 'published') {
 						return result
 					}
+					await rebuildPublishedPackageArtifactsViaRepoSession({
+						env: ctx.env,
+						rpcSessionId: sessionId,
+						sourceId: source.id,
+						userId: user.userId,
+						publishedCommit: result.published_commit,
+						baseUrl: ctx.callerContext.baseUrl,
+					})
 					return {
 						...result,
 						static_dependents: await getPublishStaticDependents({

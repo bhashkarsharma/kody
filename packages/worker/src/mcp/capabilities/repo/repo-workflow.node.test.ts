@@ -53,6 +53,8 @@ function createRepoRpc(overrides?: Partial<Record<string, unknown>>) {
 		runCommands: vi.fn(),
 		runChecks: vi.fn(),
 		publishSession: vi.fn(),
+		listPublishedPackageArtifactTargets: vi.fn(async () => []),
+		rebuildPublishedPackageArtifact: vi.fn(),
 		...overrides,
 	}
 }
@@ -399,7 +401,7 @@ test('repo_run_commands opens by target and returns failed checks without publis
 		commands,
 		dryRun: undefined,
 		runChecks: true,
-		publish: true,
+		publish: false,
 	})
 	expect(result.checks).toEqual({
 		status: 'failed',
@@ -424,6 +426,12 @@ test('repo_run_commands opens by target and returns failed checks without publis
 	expect(result.publish).toEqual({
 		status: 'blocked_by_checks',
 		message: 'Publishing skipped because repo checks failed.',
+		failed_checks: [
+			{ kind: 'typecheck', ok: false, message: 'Typecheck failed' },
+		],
+		run_id: 'check-1',
+		tree_hash: 'tree-1',
+		checked_at: '2026-04-18T00:02:00.000Z',
 	})
 })
 
@@ -510,13 +518,28 @@ test('repo_run_commands returns published result after checks pass', async () =>
 			treeHash: 'tree-1',
 			checkedAt: '2026-04-18T00:02:00.000Z',
 		},
-		publish: {
-			status: 'ok',
-			sessionId: 'session-existing',
-			publishedCommit: 'commit-published',
-			message: 'Published session.',
-		},
+		publish: { status: 'not_requested' },
 	})
+	rpc.publishSession.mockResolvedValueOnce({
+		status: 'ok',
+		sessionId: 'session-existing',
+		publishedCommit: 'commit-published',
+		message: 'Published session.',
+	})
+	rpc.listPublishedPackageArtifactTargets.mockResolvedValueOnce([
+		{
+			kind: 'module',
+			artifactName: '.',
+			entryPoint: 'src/index.ts',
+			bundleKind: 'module',
+		},
+		{
+			kind: 'importable-module',
+			artifactName: '.',
+			entryPoint: 'src/index.ts',
+			bundleKind: 'importable-module',
+		},
+	])
 	mockModule.repoSessionRpc.mockReturnValue(rpc)
 
 	const result = await repoRunCommandsCapability.handler(
@@ -549,11 +572,31 @@ test('repo_run_commands returns published result after checks pass', async () =>
 		published_commit: 'commit-published',
 		message: 'Published session.',
 	})
+	expect(rpc.rebuildPublishedPackageArtifact).toHaveBeenCalledTimes(2)
 })
 
 test('repo_publish_session returns structured base_moved repair details', async () => {
 	resetMocks()
 	const rpc = createRepoRpc()
+	rpc.getSessionInfo.mockResolvedValueOnce({
+		id: 'session-1',
+		source_id: 'source-package-1',
+		source_root: '/',
+		base_commit: 'commit-old',
+		session_repo_id: 'session-repo-1',
+		session_repo_name: 'repo-package-1-session-1',
+		session_repo_namespace: 'default',
+		conversation_id: null,
+		last_checkpoint_commit: 'commit-old',
+		last_check_run_id: 'check-1',
+		last_check_tree_hash: 'tree-1',
+		expires_at: null,
+		created_at: '2026-04-18T00:01:00.000Z',
+		updated_at: '2026-04-18T00:02:00.000Z',
+		published_commit: 'commit-old',
+		manifest_path: 'package.json',
+		entity_type: 'package',
+	})
 	rpc.publishSession.mockResolvedValueOnce({
 		status: 'base_moved',
 		sessionId: 'session-1',
@@ -583,6 +626,130 @@ test('repo_publish_session returns structured base_moved repair details', async 
 		session_base_commit: 'commit-old',
 		current_published_commit: 'commit-new',
 	})
+})
+
+test('repo_publish_session rebuilds package artifacts after direct publish', async () => {
+	resetMocks()
+	const rpc = createRepoRpc()
+	rpc.getSessionInfo.mockResolvedValueOnce({
+		id: 'session-1',
+		source_id: 'source-package-1',
+		source_root: '/',
+		base_commit: 'commit-old',
+		session_repo_id: 'session-repo-1',
+		session_repo_name: 'repo-package-1-session-1',
+		session_repo_namespace: 'default',
+		conversation_id: null,
+		last_checkpoint_commit: 'commit-old',
+		last_check_run_id: 'check-1',
+		last_check_tree_hash: 'tree-1',
+		expires_at: null,
+		created_at: '2026-04-18T00:01:00.000Z',
+		updated_at: '2026-04-18T00:02:00.000Z',
+		published_commit: 'commit-old',
+		manifest_path: 'package.json',
+		entity_type: 'package',
+	})
+	rpc.publishSession.mockResolvedValueOnce({
+		status: 'ok',
+		sessionId: 'session-1',
+		publishedCommit: 'commit-new',
+		message: 'Published session.',
+	})
+	rpc.listPublishedPackageArtifactTargets.mockResolvedValueOnce([
+		{
+			kind: 'module',
+			artifactName: '.',
+			entryPoint: 'src/index.ts',
+			bundleKind: 'module',
+		},
+	])
+	mockModule.repoSessionRpc.mockReturnValue(rpc)
+
+	const result = await repoPublishSessionCapability.handler(
+		{
+			session_id: 'session-1',
+		},
+		createCapabilityContext(),
+	)
+
+	expect(result).toEqual({
+		status: 'ok',
+		session_id: 'session-1',
+		published_commit: 'commit-new',
+		message: 'Published session.',
+	})
+	expect(rpc.publishSession).toHaveBeenCalledWith({
+		sessionId: 'session-1',
+		userId: 'user-1',
+		rebuildPackageArtifacts: false,
+	})
+	expect(rpc.rebuildPublishedPackageArtifact).toHaveBeenCalledWith({
+		sessionId: 'session-1',
+		sourceId: 'source-package-1',
+		userId: 'user-1',
+		publishedCommit: 'commit-new',
+		target: {
+			kind: 'module',
+			artifactName: '.',
+			entryPoint: 'src/index.ts',
+			bundleKind: 'module',
+		},
+		baseUrl: 'https://heykody.dev',
+	})
+})
+
+test('repo_publish_session annotates post-publish artifact rebuild failures', async () => {
+	resetMocks()
+	const rpc = createRepoRpc()
+	rpc.getSessionInfo.mockResolvedValueOnce({
+		id: 'session-1',
+		source_id: 'source-package-1',
+		source_root: '/',
+		base_commit: 'commit-old',
+		session_repo_id: 'session-repo-1',
+		session_repo_name: 'repo-package-1-session-1',
+		session_repo_namespace: 'default',
+		conversation_id: null,
+		last_checkpoint_commit: 'commit-old',
+		last_check_run_id: 'check-1',
+		last_check_tree_hash: 'tree-1',
+		expires_at: null,
+		created_at: '2026-04-18T00:01:00.000Z',
+		updated_at: '2026-04-18T00:02:00.000Z',
+		published_commit: 'commit-old',
+		manifest_path: 'package.json',
+		entity_type: 'package',
+	})
+	rpc.publishSession.mockResolvedValueOnce({
+		status: 'ok',
+		sessionId: 'session-1',
+		publishedCommit: 'commit-new',
+		message: 'Published session.',
+	})
+	rpc.listPublishedPackageArtifactTargets.mockResolvedValueOnce([
+		{
+			kind: 'module',
+			artifactName: '.',
+			entryPoint: 'src/index.ts',
+			bundleKind: 'module',
+		},
+	])
+	rpc.rebuildPublishedPackageArtifact.mockRejectedValueOnce(
+		new Error('bundle too large'),
+	)
+	mockModule.repoSessionRpc.mockReturnValue(rpc)
+
+	await expect(
+		repoPublishSessionCapability.handler(
+			{
+				session_id: 'session-1',
+			},
+			createCapabilityContext(),
+		),
+	).rejects.toThrow(
+		'Package source publish succeeded, but bundle artifact rebuild failed',
+	)
 })
 
 test('repo_run_commands surfaces line-specific command parse errors', async () => {

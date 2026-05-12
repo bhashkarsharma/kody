@@ -13,6 +13,7 @@ import {
 	repoRunCommandsOutputSchema,
 } from './repo-shared.ts'
 import { repoOpenSessionCapability } from './repo-open-session.ts'
+import { rebuildPublishedPackageArtifactsViaRepoSession } from './package-artifact-rebuild.ts'
 
 type RepoRunCommandsOutput = z.infer<typeof repoRunCommandsOutputSchema>
 
@@ -77,23 +78,64 @@ export const repoRunCommandsCapability = defineDomainCapability(
 							sessionId: args.session_id,
 						})
 			const validatedSession = repoOpenSessionOutputSchema.parse(session)
-			const result = await repoSessionRpc(
-				ctx.env,
-				validatedSession.id,
-			).runCommands({
+			const sessionRpc = repoSessionRpc(ctx.env, validatedSession.id)
+			const result = await sessionRpc.runCommands({
 				sessionId: validatedSession.id,
 				userId: user.userId,
 				commands: args.commands,
 				dryRun: args.dry_run,
 				runChecks: args.run_checks,
-				publish: args.publish,
+				publish: false,
 			})
+			let publish = result.publish
+			if (args.publish === true) {
+				if (result.checks.status === 'failed') {
+					publish = {
+						status: 'blocked_by_checks' as const,
+						message: 'Publishing skipped because repo checks failed.',
+						failedChecks: result.checks.failedChecks,
+						runId: result.checks.runId,
+						treeHash: result.checks.treeHash,
+						checkedAt: result.checks.checkedAt,
+					}
+				} else if (result.checks.status === 'passed') {
+					publish = await sessionRpc.publishSession({
+						sessionId: validatedSession.id,
+						userId: user.userId,
+						rebuildPackageArtifacts: false,
+					})
+				} else {
+					publish = { status: 'not_requested' as const }
+				}
+			}
+			if (
+				args.publish === true &&
+				publish.status === 'ok' &&
+				validatedSession.entity_type === 'package'
+			) {
+				await rebuildPublishedPackageArtifactsViaRepoSession({
+					env: ctx.env,
+					rpcSessionId: validatedSession.id,
+					repoSessionId: validatedSession.id,
+					sourceId: validatedSession.source_id,
+					userId: user.userId,
+					publishedCommit: publish.publishedCommit,
+					baseUrl: ctx.callerContext.baseUrl,
+				})
+			}
+			const responseSession =
+				args.publish === true && publish.status === 'ok'
+					? await sessionRpc.getSessionInfo({
+							sessionId: validatedSession.id,
+							userId: user.userId,
+						})
+					: result.session
 			return {
-				session: result.session,
+				session: responseSession,
 				resolved_target: validatedSession.resolved_target,
 				commands: result.commands,
 				checks: normalizeRepoCommandChecks(result.checks),
-				publish: normalizeRepoCommandPublish(result.publish),
+				publish: normalizeRepoCommandPublish(publish),
 			}
 		},
 	},
