@@ -108,6 +108,30 @@ function toDbRowInput(input: {
 	}
 }
 
+function matchesPublishedBundleArtifactIdentity(input: {
+	artifact: PublishedBundleArtifact
+	sourceId: string
+	publishedCommit: string
+	kind: BundleArtifactKind
+	artifactName: string | null
+	entryPoint: string
+}) {
+	let artifactEntryPoint: string
+	try {
+		artifactEntryPoint = normalizeEntryPoint(input.artifact.entryPoint)
+	} catch {
+		return false
+	}
+	return (
+		input.artifact.sourceId === input.sourceId &&
+		input.artifact.publishedCommit === input.publishedCommit &&
+		input.artifact.kind === input.kind &&
+		normalizeArtifactName(input.artifact.artifactName) === input.artifactName &&
+		artifactEntryPoint === input.entryPoint &&
+		input.artifact.modules[input.artifact.mainModule] != null
+	)
+}
+
 export async function persistPublishedBundleArtifact(
 	input: PersistPublishedBundleArtifactInput,
 ) {
@@ -195,12 +219,14 @@ export async function loadPublishedBundleArtifactByIdentity(input: {
 	artifactName?: string | null
 	entryPoint: string
 }) {
+	const artifactName = normalizeArtifactName(input.artifactName)
+	const entryPoint = normalizeEntryPoint(input.entryPoint)
 	const row = await getPublishedBundleArtifactByIdentity(input.env.APP_DB, {
 		userId: input.userId,
 		sourceId: input.sourceId,
 		artifactKind: input.kind,
-		artifactName: normalizeArtifactName(input.artifactName),
-		entryPoint: normalizeEntryPoint(input.entryPoint),
+		artifactName,
+		entryPoint,
 	})
 	if (!row) return null
 	const artifact = await readPublishedBundleArtifact({
@@ -208,6 +234,21 @@ export async function loadPublishedBundleArtifactByIdentity(input: {
 		kvKey: row.kvKey,
 	})
 	if (!artifact) {
+		return {
+			row,
+			artifact: null,
+		}
+	}
+	if (
+		!matchesPublishedBundleArtifactIdentity({
+			artifact,
+			sourceId: row.sourceId,
+			publishedCommit: row.publishedCommit,
+			kind: input.kind,
+			artifactName,
+			entryPoint,
+		})
+	) {
 		return {
 			row,
 			artifact: null,
