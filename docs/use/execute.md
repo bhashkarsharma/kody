@@ -36,12 +36,11 @@ helpers are runtime exports:
   [Workflows](./workflows.md)
 - use **`import { packageContext } from 'kody:runtime'`** inside saved package
   code when you need package metadata; it is **`null`** for ad hoc execute calls
-- use **`import { packages } from 'kody:runtime'`** only inside saved package
-  runtime contexts when you need dynamic current-version invocation through
-  `packages.check(...)`, `packages.invoke(...)`, or
-  `packages.invokeChecked(...)`; it is **`null`** for ad hoc execute calls.
-  Prefer `invokeChecked` unless you already called `check` and are passing
-  `check.invoke` to `invoke`
+- use **`import { packages } from 'kody:runtime'`** inside saved package runtime
+  contexts or authenticated execute calls when you need dynamic current-version
+  invocation through `packages.check(...)`, `packages.invoke(...)`, or
+  `packages.invokeChecked(...)`. Prefer `invokeChecked` unless you already
+  called `check` and are passing `check.invoke` to `invoke`
 - use **`import { serviceContext } from 'kody:runtime'`** inside package service
   code when you need the current service identity; it is **`null`** outside
   package service runs
@@ -138,9 +137,12 @@ module-oriented runtime model:
 
 Static saved-package imports from ad hoc **execute** run under the ad hoc
 execute runtime. That means imported package modules can share exported helpers,
-but `packageContext` and `packages` remain **`null`** unless the module is
-entered through a true saved-package runtime surface such as package invocation,
-a package job, a package service, a package app, or a package subscription.
+but `packageContext` remains **`null`** because the imported module has not been
+entered as its own package runtime. Authenticated execute calls can still import
+`packages` from `kody:runtime` and use `packages.check`, `packages.invoke`, or
+`packages.invokeChecked`; prefer `packages.invokeChecked` when execute needs to
+enter a saved package export so that target code receives its package runtime
+context.
 
 When you need to edit saved source, prefer the repo-backed workflow in
 [Repo-backed editing sessions](./repo-sessions.md). Open by package identity
