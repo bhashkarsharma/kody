@@ -567,14 +567,26 @@ test('saved package execution exposes packages.invoke when package invoke tools 
 		sourceFiles: {
 			'package.json': packageJson,
 			'src/index.ts': [
-				"import { packageContext, packages } from 'kody:runtime'",
+				"import { codemode, packageContext, packages } from 'kody:runtime'",
 				'',
 				'export default async function main(input = {}) {',
+				'\t// Direct codemode.package_invoke_checked should reject; packages.invokeChecked is the public API.',
+				'\tlet directCodemodeInvokeChecked;',
+				'\ttry {',
+				'\t\tawait codemode.package_invoke_checked({',
+				"\t\t\tkodyId: 'target-package',",
+				"\t\t\texportName: './run',",
+				'\t\t});',
+				"\t\tdirectCodemodeInvokeChecked = 'resolved';",
+				'\t} catch (error) {',
+				'\t\tdirectCodemodeInvokeChecked = String(error?.message ?? error);',
+				'\t}',
 				'\treturn {',
 				'\t\tpackageId: packageContext?.packageId ?? null,',
 				"\t\thasCheck: typeof packages?.check === 'function',",
 				"\t\thasInvoke: typeof packages?.invoke === 'function',",
 				"\t\thasInvokeChecked: typeof packages?.invokeChecked === 'function',",
+				'\t\tdirectCodemodeInvokeChecked,',
 				'\t\tinvoked: await packages?.invoke({',
 				"\t\t\tkodyId: 'target-package',",
 				"\t\t\texportName: './run',",
@@ -646,6 +658,9 @@ test('saved package execution exposes packages.invoke when package invoke tools 
 		hasCheck: true,
 		hasInvoke: true,
 		hasInvokeChecked: true,
+		directCodemodeInvokeChecked: expect.stringContaining(
+			'package_invoke_checked',
+		),
 		invoked: {
 			ok: true,
 			input: {
@@ -655,6 +670,10 @@ test('saved package execution exposes packages.invoke when package invoke tools 
 			},
 		},
 	})
+	expect(
+		(result.result as { directCodemodeInvokeChecked: unknown })
+			.directCodemodeInvokeChecked,
+	).not.toBe('resolved')
 	expect(invokedInputs).toEqual([
 		{
 			kodyId: 'target-package',
@@ -671,12 +690,24 @@ test('ad hoc execute runtime exposes packages.invoke when package invoke tools a
 		userId: 'user-workers-test',
 		sourceFiles: {
 			'entry.ts': [
-				"import { packageContext, packages } from 'kody:runtime'",
+				"import { codemode, packageContext, packages } from 'kody:runtime'",
 				'',
 				'export default async function main(input = {}) {',
+				'\t// Direct codemode.package_invoke_checked should reject; packages.invokeChecked is the public API.',
+				'\tlet directCodemodeInvokeChecked;',
+				'\ttry {',
+				'\t\tawait codemode.package_invoke_checked({',
+				"\t\t\tkodyId: 'target-package',",
+				"\t\t\texportName: './run',",
+				'\t\t});',
+				"\t\tdirectCodemodeInvokeChecked = 'resolved';",
+				'\t} catch (error) {',
+				'\t\tdirectCodemodeInvokeChecked = String(error?.message ?? error);',
+				'\t}',
 				'\treturn {',
 				'\t\tpackageContextIsNull: packageContext === null,',
 				"\t\thasInvokeChecked: typeof packages?.invokeChecked === 'function',",
+				'\t\tdirectCodemodeInvokeChecked,',
 				'\t\tinvoked: await packages?.invokeChecked({',
 				"\t\t\tkodyId: 'target-package',",
 				"\t\t\texportName: './run',",
@@ -742,6 +773,9 @@ test('ad hoc execute runtime exposes packages.invoke when package invoke tools a
 	expect(result.result).toEqual({
 		packageContextIsNull: true,
 		hasInvokeChecked: true,
+		directCodemodeInvokeChecked: expect.stringContaining(
+			'package_invoke_checked',
+		),
 		invoked: {
 			ok: true,
 			input: {
@@ -751,6 +785,10 @@ test('ad hoc execute runtime exposes packages.invoke when package invoke tools a
 			},
 		},
 	})
+	expect(
+		(result.result as { directCodemodeInvokeChecked: unknown })
+			.directCodemodeInvokeChecked,
+	).not.toBe('resolved')
 	expect(invokedInputs).toEqual([
 		{
 			kodyId: 'target-package',
