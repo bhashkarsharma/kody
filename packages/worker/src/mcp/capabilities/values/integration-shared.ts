@@ -3,6 +3,26 @@ import { normalizeAllowedHosts } from '#mcp/secrets/allowed-hosts.ts'
 
 export const integrationFlowValues = ['pkce', 'confidential'] as const
 
+const defaultIntegrationScopeSeparator = ' '
+
+export const integrationAuthorizationSchema = z
+	.object({
+		authorizeUrl: z.string().url().refine(isHttpUrl, {
+			message: 'Authorize URL must use http or https.',
+		}),
+		scopes: z.array(
+			z
+				.string()
+				.min(1)
+				.refine((scope) => scope.trim().length > 0, {
+					message: 'Scope cannot be whitespace-only.',
+				}),
+		),
+		scopeSeparator: z.string().min(1).optional().nullable(),
+		extraAuthorizeParams: z.record(z.string(), z.string()).optional(),
+	})
+	.strict()
+
 export const integrationConfigSchema = z.object({
 	name: z.string().min(1),
 	tokenUrl: z.string().url(),
@@ -13,9 +33,11 @@ export const integrationConfigSchema = z.object({
 	accessTokenSecretName: z.string().min(1),
 	refreshTokenSecretName: z.string().min(1).optional().nullable(),
 	requiredHosts: z.array(z.string()).optional(),
+	authorization: integrationAuthorizationSchema.optional().nullable(),
 })
 
 export type IntegrationConfig = z.infer<typeof integrationConfigSchema>
+type IntegrationAuthorization = z.infer<typeof integrationAuthorizationSchema>
 
 export const integrationSaveSchema = z
 	.object({
@@ -28,6 +50,7 @@ export const integrationSaveSchema = z
 		accessTokenSecretName: z.string().min(1).optional(),
 		refreshTokenSecretName: z.string().min(1).nullable().optional(),
 		requiredHosts: z.array(z.string()).optional(),
+		authorization: integrationAuthorizationSchema.nullable().optional(),
 	})
 	.strict()
 
@@ -36,6 +59,9 @@ export type IntegrationSaveInput = z.infer<typeof integrationSaveSchema>
 export function normalizeIntegrationConfig(
 	value: IntegrationConfig,
 ): IntegrationConfig {
+	const authorization = value.authorization
+		? normalizeIntegrationAuthorization(value.authorization)
+		: null
 	return {
 		...value,
 		name: value.name.trim(),
@@ -46,6 +72,34 @@ export function normalizeIntegrationConfig(
 		accessTokenSecretName: value.accessTokenSecretName.trim(),
 		refreshTokenSecretName: value.refreshTokenSecretName?.trim() || null,
 		requiredHosts: normalizeAllowedHosts(value.requiredHosts ?? []),
+		...(authorization ? { authorization } : {}),
+	}
+}
+
+function normalizeIntegrationAuthorization(
+	value: IntegrationAuthorization,
+): IntegrationAuthorization {
+	const scopeSeparator =
+		value.scopeSeparator == null ||
+		value.scopeSeparator === defaultIntegrationScopeSeparator
+			? null
+			: value.scopeSeparator
+	const extraAuthorizeParams: Record<string, string> = {}
+	for (const [rawKey, paramValue] of Object.entries(
+		value.extraAuthorizeParams ?? {},
+	)) {
+		const key = rawKey.trim()
+		if (key) extraAuthorizeParams[key] = paramValue
+	}
+	return {
+		authorizeUrl: value.authorizeUrl.trim(),
+		scopes: value.scopes.map((scope) => scope.trim()).filter(Boolean),
+		scopeSeparator,
+		extraAuthorizeParams: Object.fromEntries(
+			Object.keys(extraAuthorizeParams)
+				.sort((left, right) => left.localeCompare(right))
+				.map((key) => [key, extraAuthorizeParams[key] ?? '']),
+		),
 	}
 }
 
@@ -85,7 +139,21 @@ export function parseIntegrationConfig(
 				? { ...record, name: fallbackName }
 				: record
 	const parsed = integrationConfigSchema.safeParse(configCandidate)
-	return parsed.success ? normalizeIntegrationConfig(parsed.data) : null
+	if (parsed.success) return normalizeIntegrationConfig(parsed.data)
+	if (
+		configCandidate &&
+		typeof configCandidate === 'object' &&
+		'authorization' in configCandidate
+	) {
+		const fallbackParsed = integrationConfigSchema.safeParse({
+			...configCandidate,
+			authorization: null,
+		})
+		if (fallbackParsed.success) {
+			return normalizeIntegrationConfig(fallbackParsed.data)
+		}
+	}
+	return null
 }
 
 export function parseIntegrationJson(raw: string) {
@@ -93,5 +161,14 @@ export function parseIntegrationJson(raw: string) {
 		return JSON.parse(raw)
 	} catch {
 		return null
+	}
+}
+
+function isHttpUrl(raw: string) {
+	try {
+		const url = new URL(raw)
+		return url.protocol === 'http:' || url.protocol === 'https:'
+	} catch {
+		return false
 	}
 }

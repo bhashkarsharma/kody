@@ -30,7 +30,7 @@ import { normalizeAllowedHosts } from '#mcp/secrets/allowed-hosts.ts'
 import { getValue, saveValue } from '#mcp/values/service.ts'
 import {
 	buildIntegrationValueName,
-	normalizeIntegrationConfig,
+	parseIntegrationConfig,
 } from '#mcp/capabilities/values/integration-shared.ts'
 
 type AccountEditableSecretScope = Extract<SecretScope, 'app' | 'user'>
@@ -265,6 +265,7 @@ async function handleConnectOauthAction(input: {
 	const provider = readString(input.body, 'provider')
 	const tokenUrl = readOptionalString(input.body, 'tokenUrl')
 	const apiBaseUrl = readOptionalString(input.body, 'apiBaseUrl')
+	const authorizeUrl = readOptionalString(input.body, 'authorizeUrl')
 	const flow = readOptionalString(input.body, 'flow')
 	const clientIdValueName = readOptionalString(input.body, 'clientIdValueName')
 	const clientSecretSecretName = readOptionalString(
@@ -278,6 +279,12 @@ async function handleConnectOauthAction(input: {
 	)
 	const allowedHosts = normalizeAllowedHosts(
 		readStringArray(input.body, 'allowedHosts'),
+	)
+	const scopes = readStringArray(input.body, 'scopes')
+	const scopeSeparator = readRawOptionalString(input.body, 'scopeSeparator')
+	const extraAuthorizeParams = readStringRecord(
+		input.body,
+		'extraAuthorizeParams',
 	)
 	const tokenPayload =
 		(input.body as Record<string, unknown>)['tokenPayload'] ?? null
@@ -375,6 +382,14 @@ async function handleConnectOauthAction(input: {
 		refreshTokenSecretName,
 		tokenPayload: tokenRecord,
 		allowedHosts,
+		authorization: authorizeUrl
+			? {
+					authorizeUrl,
+					scopes,
+					scopeSeparator,
+					extraAuthorizeParams,
+				}
+			: null,
 	})
 	const approvalSecretNames = [
 		accessTokenSecretName,
@@ -564,27 +579,43 @@ async function saveIntegrationConfig(input: {
 	refreshTokenSecretName: string | null
 	tokenPayload: Record<string, unknown>
 	allowedHosts: Array<string>
+	authorization: {
+		authorizeUrl: string
+		scopes: Array<string>
+		scopeSeparator: string | null
+		extraAuthorizeParams: Record<string, string>
+	} | null
 }) {
 	const providerKey = normalizeProviderKey(input.provider)
 	if (!providerKey) {
 		throw new Error('Provider must contain letters or numbers.')
 	}
-	const integration = normalizeIntegrationConfig({
-		name: input.provider,
-		tokenUrl: input.tokenUrl,
-		apiBaseUrl: input.apiBaseUrl,
-		flow: input.flow,
-		clientIdValueName: input.clientIdValueName,
-		clientSecretSecretName:
-			input.flow === 'confidential'
-				? (input.clientSecretSecretName ?? `${providerKey}ClientSecret`)
+	const integration = parseIntegrationConfig(
+		{
+			name: input.provider,
+			tokenUrl: input.tokenUrl,
+			apiBaseUrl: input.apiBaseUrl,
+			flow: input.flow,
+			clientIdValueName: input.clientIdValueName,
+			clientSecretSecretName:
+				input.flow === 'confidential'
+					? (input.clientSecretSecretName ?? `${providerKey}ClientSecret`)
+					: null,
+			accessTokenSecretName: input.accessTokenSecretName,
+			refreshTokenSecretName: readTokenField(
+				input.tokenPayload,
+				'refresh_token',
+			)
+				? input.refreshTokenSecretName
 				: null,
-		accessTokenSecretName: input.accessTokenSecretName,
-		refreshTokenSecretName: readTokenField(input.tokenPayload, 'refresh_token')
-			? input.refreshTokenSecretName
-			: null,
-		requiredHosts: input.allowedHosts,
-	})
+			requiredHosts: input.allowedHosts,
+			...(input.authorization ? { authorization: input.authorization } : {}),
+		},
+		input.provider,
+	)
+	if (!integration) {
+		throw new Error('OAuth integration configuration is invalid.')
+	}
 	await saveValue({
 		env: input.env,
 		userId: input.userId,
@@ -1247,6 +1278,11 @@ function readOptionalString(body: object, key: string) {
 	return typeof value === 'string' ? value.trim() : null
 }
 
+function readRawOptionalString(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	return typeof value === 'string' ? value : null
+}
+
 function safeParseHost(raw: string) {
 	try {
 		return new URL(raw).hostname
@@ -1259,6 +1295,18 @@ function readStringArray(body: object, key: string) {
 	const value = (body as Record<string, unknown>)[key]
 	if (!Array.isArray(value)) return []
 	return value.filter((item): item is string => typeof item === 'string')
+}
+
+function readStringRecord(body: object, key: string) {
+	const value = (body as Record<string, unknown>)[key]
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+	return Object.fromEntries(
+		Object.entries(value)
+			.filter(
+				(entry): entry is [string, string] => typeof entry[1] === 'string',
+			)
+			.map(([recordKey, recordValue]) => [recordKey, recordValue]),
+	)
 }
 
 function readAccountSecretScope(
