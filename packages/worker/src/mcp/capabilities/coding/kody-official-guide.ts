@@ -58,6 +58,12 @@ export const kodyOfficialGuideCatalog = {
 		summary:
 			'Build a package-native long-lived service using kody.services, package app realtime fanout, service-owned storage, background lifecycle helpers, and scheduled wake-ups.',
 	},
+	package_subscriptions: {
+		file: 'package-subscriptions.md',
+		title: 'Package subscription guide',
+		summary:
+			'Use package.json#kody.subscriptions for package-owned event handlers; discover subscribers with package_subscription_list and follow metadata-first email.message.received payload guidance.',
+	},
 } as const
 
 const guideIds = Object.keys(kodyOfficialGuideCatalog) as Array<
@@ -127,6 +133,8 @@ function buildCapabilityDescription(): string {
 		'For API keys/PATs, use `connect_secret` for secret collection.',
 		'For package-native long-lived service work built on `kody.services`,',
 		'use `package_service_pattern`.',
+		'For package-owned event subscriptions such as `email.message.received`,',
+		'use `package_subscriptions`.',
 		'If you are unsure, **call this capability** with the right `guide` instead of guessing.',
 	].join(' ')
 	return [
@@ -151,6 +159,7 @@ const guideFieldSchema = z
 			'`generated_ui_oauth`: edge case—OAuth in a hosted package app.',
 			'`connect_secret`: /connect/secret for API keys, PATs, and other secret collection steps.',
 			'`package_service_pattern`: package-native long-lived service architecture built on package services and package app realtime.',
+			'`package_subscriptions`: package-owned event subscriptions, package_subscription_list discovery, and email.message.received metadata-first handler payloads.',
 		].join(' '),
 	)
 
@@ -198,6 +207,14 @@ const allKeywords = [
 		'connect secret',
 		'package service',
 		'service package',
+		'package subscription',
+		'package subscriptions',
+		'package_subscription_list',
+		'package.json#kody.subscriptions',
+		'email.message.received',
+		'email message received',
+		'metadata-first payload',
+		'event handler',
 		'background service',
 		'long-lived service',
 		'outbound websocket',
