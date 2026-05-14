@@ -245,6 +245,7 @@ type PublishedJobSourceResolution = {
 	files: Record<string, string>
 	artifactName: string
 	entryPoint: string
+	emittedEventTopics: Array<string>
 	packageContext: {
 		packageId: string
 		kodyId: string
@@ -291,6 +292,7 @@ async function resolvePublishedJobSource(input: {
 			files: published.files,
 			artifactName,
 			entryPoint: getManifestEntrypointPath(manifest),
+			emittedEventTopics: [],
 			packageContext: null,
 		}
 	}
@@ -310,6 +312,7 @@ async function resolvePublishedJobSource(input: {
 		files: published.files,
 		artifactName,
 		entryPoint: normalizePackageWorkspacePath(jobDefinition.entry),
+		emittedEventTopics: Object.keys(manifest.kody.emits ?? {}),
 		packageContext: {
 			packageId: publishedSource.entity_id,
 			kodyId: manifest.kody.id,
@@ -372,6 +375,7 @@ async function ensurePublishedBundleArtifactForJob(input: {
 					includeStorage: true,
 				},
 			],
+			emittedEventTopics: resolved.emittedEventTopics,
 		})
 		if (!typecheckResult.ok) {
 			throw new Error(typecheckResult.message)
@@ -520,20 +524,24 @@ async function executePublishedJobArtifact(input: {
 				jobId: input.job.id,
 			}
 		: null
-	const packageInvokeTools = packageContext
+	const packageRuntimeTools = packageContext
 		? await (async () => {
 				// Avoid a top-level jobs -> package-invocations cycle during capability
 				// registry initialization.
-				const { createPackageRuntimeInvokeTools } =
+				const { createPackageEventTools, createPackageRuntimeInvokeTools } =
 					await import('#worker/package-invocations/service.ts')
-				return createPackageRuntimeInvokeTools({
+				const sharedInput = {
 					env: input.env,
 					baseUrl: input.callerContext.baseUrl,
 					callerContext,
 					packageContext,
 					parentRuntimeDebug: runtimeDebug,
 					packageInvokeDepth: 0,
-				})
+				}
+				return {
+					packageInvokeTools: createPackageRuntimeInvokeTools(sharedInput),
+					packageEventTools: createPackageEventTools(sharedInput),
+				}
 			})()
 		: null
 	return await runBundledModuleWithRegistry(
@@ -552,11 +560,7 @@ async function executePublishedJobArtifact(input: {
 			},
 			...(packageContext ? { packageContext } : {}),
 			runtimeDebug,
-			...(packageContext && packageInvokeTools
-				? {
-						packageInvokeTools,
-					}
-				: {}),
+			...(packageRuntimeTools ?? {}),
 		},
 	).then((result) => ({
 		...result,
