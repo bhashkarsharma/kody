@@ -41,6 +41,7 @@ import { SecretEditorFields } from './secret-editor-fields.tsx'
 import {
 	normalizeAllowedCapabilities,
 	normalizeAllowedHosts,
+	normalizeAllowedPackages,
 } from './secret-normalization.ts'
 
 type SecretScope = 'app' | 'user'
@@ -147,6 +148,94 @@ function createEmptyEditorState(apps: Array<PackageAppOption>): EditorState {
 		allowedCapabilities: [''],
 		allowedPackages: [createAllowedPackageRow()],
 	}
+}
+
+function readTrimmedParam(params: URLSearchParams, key: string) {
+	const value = params.get(key)
+	return value?.trim() ? value.trim() : null
+}
+
+function readCommaListParams(params: URLSearchParams, keys: Array<string>) {
+	return keys.flatMap((key) =>
+		params
+			.getAll(key)
+			.flatMap((value) => value.split(','))
+			.map((entry) => entry.trim())
+			.filter((entry) => entry.length > 0),
+	)
+}
+
+function readNewSecretScope(value: string | null): SecretScope | null {
+	return value === 'app' || value === 'user' ? value : null
+}
+
+function createEditorStateFromNewSecretQuery(
+	apps: Array<PackageAppOption>,
+	href: string,
+): EditorState {
+	const params = new URL(href, 'http://localhost').searchParams
+	const state = createEmptyEditorState(apps)
+	const requestedScope = readNewSecretScope(readTrimmedParam(params, 'scope'))
+	const requestedAppId = readTrimmedParam(params, 'appId')
+	const appId =
+		apps.find((app) => app.id === requestedAppId)?.id ?? apps[0]?.id ?? ''
+	const scope: SecretScope =
+		requestedScope === 'app'
+			? appId
+				? 'app'
+				: 'user'
+			: requestedScope === 'user'
+				? 'user'
+				: requestedAppId && appId
+					? 'app'
+					: 'user'
+	const allowedHosts = normalizeAllowedHosts(
+		readCommaListParams(params, ['allowedHosts', 'allowed-host']),
+	)
+	const allowedCapabilities = normalizeAllowedCapabilities(
+		readCommaListParams(params, ['allowedCapabilities', 'capability']),
+	)
+	const allowedPackages = normalizeAllowedPackages(
+		readCommaListParams(params, ['allowedPackages', 'package_id', 'package']),
+	)
+
+	return {
+		...state,
+		name: readTrimmedParam(params, 'name') ?? state.name,
+		scope,
+		appId: scope === 'app' ? appId : '',
+		description: readTrimmedParam(params, 'description') ?? state.description,
+		allowedHosts: allowedHosts.length > 0 ? allowedHosts : state.allowedHosts,
+		allowedCapabilities:
+			allowedCapabilities.length > 0
+				? allowedCapabilities
+				: state.allowedCapabilities,
+		allowedPackages:
+			allowedPackages.length > 0
+				? allowedPackages.map((value) => createAllowedPackageRow(value))
+				: state.allowedPackages,
+	}
+}
+
+function getNewSecretQueryKey(href: string) {
+	const url = new URL(href, 'http://localhost')
+	if (url.pathname !== `${secretsBasePath}/new`) return ''
+	const keys = [
+		'name',
+		'description',
+		'scope',
+		'appId',
+		'allowedHosts',
+		'allowed-host',
+		'allowedCapabilities',
+		'capability',
+		'allowedPackages',
+		'package_id',
+		'package',
+	]
+	return keys
+		.map((key) => `${key}=${url.searchParams.getAll(key).join('\u0000')}`)
+		.join('&')
 }
 
 function coerceStringRows(list: Array<unknown>): Array<string> {
@@ -348,17 +437,21 @@ function applyCapabilityPrefill(state: EditorState, capability: string | null) {
 	}
 }
 
-function buildSecretHref(secret: {
-	name: string
-	scope: SecretScope
-	appId: string | null
-}) {
+function buildSecretHref(
+	secret: {
+		name: string
+		scope: SecretScope
+		appId: string | null
+	},
+	search = getCurrentSearch(),
+) {
 	return buildSecretsHref(
 		buildAccountSecretPath({
 			name: secret.name,
 			scope: secret.scope,
 			appId: secret.appId,
 		}),
+		search,
 	)
 }
 
@@ -385,7 +478,8 @@ function getDataRefreshKey(href: string) {
 	const requestedHost = url.searchParams.get('allowed-host') ?? ''
 	const requestedCapability = url.searchParams.get('capability') ?? ''
 	const requestedPackageId = url.searchParams.get('package_id') ?? ''
-	return `${url.pathname}?allowed-host=${requestedHost}&capability=${requestedCapability}&package_id=${requestedPackageId}`
+	const newSecretQuery = getNewSecretQueryKey(href)
+	return `${url.pathname}?allowed-host=${requestedHost}&capability=${requestedCapability}&package_id=${requestedPackageId}&new-secret=${newSecretQuery}`
 }
 
 function readFilterState(
@@ -503,7 +597,7 @@ export function AccountSecretsRoute(handle: Handle) {
 		const capabilityPrefill = readCapabilityPrefill(getCurrentHref())
 		if (selection.isCreating) {
 			editorState = applyCapabilityPrefill(
-				createEmptyEditorState(apps),
+				createEditorStateFromNewSecretQuery(apps, getCurrentHref()),
 				capabilityPrefill,
 			)
 			return
@@ -746,6 +840,7 @@ export function AccountSecretsRoute(handle: Handle) {
 				throw new Error(payload?.error || 'Unable to save secret.')
 			}
 
+			const wasCreating = !editorState.currentId
 			const nextSelection: SelectionState = {
 				selectedSecretId: payload.selectedSecret?.id ?? null,
 				isCreating: false,
@@ -758,7 +853,12 @@ export function AccountSecretsRoute(handle: Handle) {
 			handle.update()
 
 			if (payload.selectedSecret) {
-				navigate(buildSecretHref(payload.selectedSecret))
+				navigate(
+					buildSecretHref(
+						payload.selectedSecret,
+						wasCreating ? '' : getCurrentSearch(),
+					),
+				)
 			}
 		} catch (error) {
 			saveState = 'idle'
