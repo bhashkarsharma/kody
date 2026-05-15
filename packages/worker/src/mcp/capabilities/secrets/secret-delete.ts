@@ -11,7 +11,7 @@ export const secretDeleteCapability = defineDomainCapability(
 	{
 		name: 'secret_delete',
 		description:
-			'Delete an existing secret reference for the signed-in user without revealing its plaintext value. Never ask the user to paste a secret, token, API key, password, or credential into chat; use generated UI to collect missing user-provided secrets safely. Use this when a secret should no longer be available to execute-time code.',
+			'Delete an existing secret reference for the signed-in user. Plaintext values stay hidden. Use `/connect/secret` for user-provided API key, token, and credential entry or rotation. Use this to remove execute-time access to a secret.',
 		keywords: ['secret', 'delete', 'remove', 'revoke', 'credential'],
 		readOnly: false,
 		idempotent: false,
