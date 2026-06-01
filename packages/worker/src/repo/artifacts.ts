@@ -27,6 +27,14 @@ export type ArtifactBootstrapAccess = {
 	expiresAt: string
 }
 
+export type ArtifactRepoReadyResult =
+	| { recreated: false; repo: ArtifactRepoHandle }
+	| {
+			recreated: true
+			bootstrapAccess: ArtifactBootstrapAccess
+			repo: ArtifactRepoHandle
+	  }
+
 export type ArtifactRepoInfo = {
 	id: string
 	name: string
@@ -407,8 +415,9 @@ async function requestArtifactsEnvelope<T>(
 		})
 		const envelope = response.body as ArtifactApiEnvelope<T> | null
 		if (!envelope?.success) {
+			const primaryError = envelope?.errors?.[0]
 			const message =
-				envelope?.errors?.[0]?.message ??
+				primaryError?.message ??
 				`Artifacts API request failed (${response.status}).`
 			if (input.treat404AsNull && response.status === 404) {
 				return {
@@ -418,7 +427,10 @@ async function requestArtifactsEnvelope<T>(
 					messages: [],
 				} satisfies ArtifactApiEnvelope<T>
 			}
-			throw new Error(message)
+			throw new Error(
+				message,
+				primaryError ? { cause: primaryError } : undefined,
+			)
 		}
 		return envelope
 	} catch (error) {
@@ -632,16 +644,107 @@ export async function readMockArtifactSnapshot(input: {
 	return envelope.result
 }
 
-export async function resolveArtifactSourceRepo(env: Env, repoId: string) {
-	const binding = getArtifactsBinding(env)
-	const result = await binding.get(repoId)
-	if (result.status !== 'ready') {
+function isArtifactRepoAlreadyExistsError(error: unknown) {
+	if (!(error instanceof Error)) {
+		return false
+	}
+	const text = error.message
+	const cause = error.cause
+	const causeMessage =
+		cause && typeof cause === 'object' && 'message' in cause
+			? String(cause.message)
+			: ''
+	const causeCode =
+		cause && typeof cause === 'object' && 'code' in cause
+			? Number(cause.code)
+			: null
+	return (
+		causeCode === 10201 ||
+		/already[\s_-]*exists|already_exists/i.test(`${text} ${causeMessage}`)
+	)
+}
+
+function waitForArtifactRepoCheck(delayMs: number) {
+	return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+async function waitForArtifactRepoReadyAfterCreateConflict(input: {
+	binding: ArtifactNamespaceBinding
+	repoId: string
+	maxAttempts?: number
+	delayMs?: number
+}): Promise<ArtifactRepoReadyResult> {
+	const maxAttempts = input.maxAttempts ?? 5
+	const delayMs = input.delayMs ?? 50
+	let lastStatus = 'not_found'
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		const result = await input.binding.get(input.repoId)
+		if (result.status === 'ready') {
+			return { recreated: false, repo: result.repo }
+		}
+		lastStatus = result.status
+		if (result.status === 'importing' || result.status === 'forking') {
+			throw new Error(
+				`Artifacts repo "${input.repoId}" is ${result.status}. Retry after ${result.retryAfter}s.`,
+			)
+		}
+		if (attempt < maxAttempts) {
+			await waitForArtifactRepoCheck(delayMs)
+		}
+	}
+	throw new Error(
+		`Artifacts repo "${input.repoId}" is ${lastStatus} after create conflict.`,
+	)
+}
+
+export async function ensureArtifactRepoReady(
+	env: Env,
+	repoId: string,
+	binding: ArtifactNamespaceBinding = getArtifactsBinding(env),
+): Promise<ArtifactRepoReadyResult> {
+	const existing = await binding.get(repoId)
+	if (existing.status === 'ready') {
+		return { recreated: false, repo: existing.repo }
+	}
+	if (existing.status === 'importing' || existing.status === 'forking') {
 		throw new Error(
-			`Artifacts repo "${repoId}" is ${result.status}${
-				'retryAfter' in result ? ` (retry after ${result.retryAfter}s)` : ''
-			}.`,
+			`Artifacts repo "${repoId}" is ${existing.status}. Retry after ${existing.retryAfter}s.`,
 		)
 	}
+	let created: Awaited<ReturnType<ArtifactNamespaceBinding['create']>>
+	try {
+		created = await binding.create(repoId, { readOnly: false })
+	} catch (error) {
+		if (isArtifactRepoAlreadyExistsError(error)) {
+			return await waitForArtifactRepoReadyAfterCreateConflict({
+				binding,
+				repoId,
+			})
+		}
+		throw error
+	}
+	const getResult = await binding.get(created.name)
+	if (getResult.status !== 'ready') {
+		throw new Error(
+			`Artifacts repo "${created.name}" is ${getResult.status} after create.`,
+		)
+	}
+	const bootstrapAccess = {
+		defaultBranch: created.defaultBranch,
+		remote: created.remote,
+		token: created.token,
+		expiresAt: created.expiresAt,
+	}
+	return {
+		recreated: true,
+		bootstrapAccess,
+		repo: getResult.repo,
+	}
+}
+
+export async function resolveArtifactSourceRepo(env: Env, repoId: string) {
+	const binding = getArtifactsBinding(env)
+	const result = await ensureArtifactRepoReady(env, repoId, binding)
 	return result.repo
 }
 
