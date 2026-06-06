@@ -4,6 +4,12 @@ import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
 import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
 import { ensureEntitySource } from '#worker/repo/source-service.ts'
 import { syncArtifactSourceSnapshot } from '#worker/repo/source-sync.ts'
+import { getEntitySourceByEntity } from '#worker/repo/entity-sources.ts'
+import {
+	assertPackageSourceOverwriteAllowed,
+	destructiveOverwriteConfirmationDescription,
+	productionPackageSourceSafetyPolicy,
+} from '#worker/repo/source-safety-policy.ts'
 import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
@@ -31,6 +37,11 @@ const inputSchema = z
 			.describe(
 				'Full package file set to write. Must include package.json at the repo root.',
 			),
+		confirm_destructive_overwrite: z
+			.boolean()
+			.optional()
+			.default(false)
+			.describe(destructiveOverwriteConfirmationDescription),
 	})
 	.superRefine((value, ctx) => {
 		const hasPackageJson = value.files.some(
@@ -58,8 +69,7 @@ export const savePackageCapability = defineDomainCapability(
 	capabilityDomainNames.packages,
 	{
 		name: 'package_save',
-		description:
-			'Create or replace a saved package by writing a complete package file set. Prefer package_get_git_remote or repo sessions for iterative edits. The package repo is rooted at package.json and package.json#kody is the Kody-specific metadata block. When creating or materially changing a package, include or maintain README.md with a concise Intent section that captures the user-defined goal; ask the user if intent is unclear.',
+		description: `Create or replace a saved package by writing a complete package file set. Prefer package_get_git_remote or repo sessions for iterative edits. The package repo is rooted at package.json and package.json#kody is the Kody-specific metadata block. When creating or materially changing a package, include or maintain README.md with a concise Intent section that captures the user-defined goal; ask the user if intent is unclear. ${productionPackageSourceSafetyPolicy}`,
 		keywords: [
 			'package',
 			'save',
@@ -72,7 +82,7 @@ export const savePackageCapability = defineDomainCapability(
 		],
 		readOnly: false,
 		idempotent: false,
-		destructive: false,
+		destructive: true,
 		inputSchema,
 		outputSchema: packageSummarySchema,
 		async handler(args, ctx) {
@@ -102,6 +112,14 @@ export const savePackageCapability = defineDomainCapability(
 							kodyId: manifest.kody.id,
 						})
 			const packageId = existing?.id ?? args.package_id ?? crypto.randomUUID()
+			const canonicalExistingSource =
+				existing == null
+					? null
+					: await getEntitySourceByEntity(ctx.env.APP_DB, {
+							userId: user.userId,
+							entityKind: 'package',
+							entityId: packageId,
+						})
 			const ensuredSource = await ensureEntitySource({
 				db: ctx.env.APP_DB,
 				env: ctx.env,
@@ -112,6 +130,18 @@ export const savePackageCapability = defineDomainCapability(
 				manifestPath: 'package.json',
 				requirePersistence: true,
 			})
+			if (existing) {
+				await assertPackageSourceOverwriteAllowed({
+					env: ctx.env,
+					userId: user.userId,
+					source:
+						canonicalExistingSource?.id === ensuredSource.id
+							? canonicalExistingSource
+							: ensuredSource,
+					operation: 'package_save',
+					confirmed: args.confirm_destructive_overwrite,
+				})
+			}
 			await syncArtifactSourceSnapshot({
 				env: ctx.env,
 				userId: user.userId,
@@ -119,6 +149,7 @@ export const savePackageCapability = defineDomainCapability(
 				sourceId: ensuredSource.id,
 				bootstrapAccess: ensuredSource.bootstrapAccess ?? null,
 				files,
+				destructiveOverwriteConfirmed: args.confirm_destructive_overwrite,
 			})
 			if (!existing) {
 				const now = new Date().toISOString()

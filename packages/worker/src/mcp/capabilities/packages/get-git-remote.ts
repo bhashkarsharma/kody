@@ -8,6 +8,7 @@ import {
 	parseArtifactTokenSecret,
 	resolveArtifactSourceRepo,
 } from '#worker/repo/artifacts.ts'
+import { assertRestorablePackageSourceSnapshot } from '#worker/repo/source-safety-policy.ts'
 import { resolveOwnedPackageSource } from './resolve-package-source.ts'
 
 const getGitRemoteInputSchema = z.object({
@@ -40,7 +41,7 @@ export const getGitRemoteCapability = defineDomainCapability(
 	{
 		name: 'package_get_git_remote',
 		description:
-			'Mint a short-lived Cloudflare Artifacts git remote for coding agents with local filesystem/git access to clone a saved package into a temporary directory, edit normally, push, and publish with package_publish_external_push.',
+			'Mint a short-lived Cloudflare Artifacts git remote for coding agents with local filesystem/git access to clone a saved package into a temporary directory, edit normally, push, and publish with package_publish_external_push. Write access verifies the current package source has a restorable backup snapshot before clone/edit/publish.',
 		keywords: [
 			'package',
 			'git',
@@ -66,6 +67,14 @@ export const getGitRemoteCapability = defineDomainCapability(
 					kody_id: args.kody_id,
 				},
 			})
+			if (args.scope === 'write') {
+				await assertRestorablePackageSourceSnapshot({
+					env: ctx.env,
+					userId: user.userId,
+					source,
+					operation: 'package_get_git_remote write access',
+				})
+			}
 			const repo = await resolveArtifactSourceRepo(ctx.env, source.repo_id)
 			const info = await repo.info()
 			if (!info?.remote) {

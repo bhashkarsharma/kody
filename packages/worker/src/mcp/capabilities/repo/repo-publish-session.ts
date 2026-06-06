@@ -18,7 +18,7 @@ export const repoPublishSessionCapability = defineDomainCapability(
 		keywords: ['repo', 'publish', 'session', 'checks', 'artifact'],
 		readOnly: false,
 		idempotent: false,
-		destructive: false,
+		destructive: true,
 		inputSchema: repoSessionIdSchema,
 		outputSchema: repoPublishSessionOutputSchema,
 		async handler(args, ctx) {

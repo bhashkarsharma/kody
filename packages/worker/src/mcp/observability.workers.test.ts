@@ -244,6 +244,25 @@ test('package_save capability logs success for valid invocation', async () => {
 	const originalInfo = console.info
 	const payloads: Array<string> = []
 	resetRepoPersistenceMocks()
+	repoMockModule.ensureEntitySource.mockResolvedValue({
+		id: 'package-package-1',
+		user_id: 'user-1',
+		entity_kind: 'package',
+		entity_id: 'package-1',
+		repo_id: 'package-package-1',
+		published_commit: null,
+		indexed_commit: null,
+		manifest_path: 'package.json',
+		source_root: '/',
+		created_at: '2026-04-13T00:00:00.000Z',
+		updated_at: '2026-04-13T00:00:00.000Z',
+		bootstrapAccess: {
+			defaultBranch: 'main',
+			remote: 'https://example.com/artifacts/package-package-1.git',
+			token: 'art_v1_bootstrap?expires=1760000000',
+			expiresAt: '2026-06-06T00:00:00.000Z',
+		},
+	})
 	console.info = ((tag: unknown, json?: unknown) => {
 		if (tag === 'mcp-event' && typeof json === 'string') {
 			payloads.push(json)
@@ -253,6 +272,7 @@ test('package_save capability logs success for valid invocation', async () => {
 		const handler = capabilityMap['package_save'].handler
 		const result = await handler(
 			{
+				confirm_destructive_overwrite: true,
 				files: [
 					{
 						path: 'package.json',
@@ -448,6 +468,15 @@ test('package_save capability logs success for valid invocation', async () => {
 		)
 		expect((result as { package_id: string }).package_id).toBeTruthy()
 		expect((result as { has_app: boolean }).has_app).toBe(true)
+		expect(repoMockModule.syncArtifactSourceSnapshot).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sourceId: 'package-package-1',
+				destructiveOverwriteConfirmed: true,
+				bootstrapAccess: expect.objectContaining({
+					remote: 'https://example.com/artifacts/package-package-1.git',
+				}),
+			}),
+		)
 	} finally {
 		console.info = originalInfo
 	}
