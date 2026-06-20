@@ -74,13 +74,9 @@ function getPasswordResetEmailConfig(appEnv: Pick<AppEnv, 'APP_BASE_URL'>) {
 	const configuredBaseUrl = appEnv.APP_BASE_URL?.trim()
 	if (!configuredBaseUrl) return null
 
-	try {
-		const appBaseUrl = new URL(configuredBaseUrl).origin
-		const fromEmail = `kody@${new URL(configuredBaseUrl).hostname}`
-		return { appBaseUrl, fromEmail }
-	} catch {
-		return null
-	}
+	const appBaseUrl = new URL(configuredBaseUrl).origin
+	const fromEmail = `kody@${new URL(configuredBaseUrl).hostname}`
+	return { appBaseUrl, fromEmail }
 }
 
 export function createPasswordResetRequestHandler(appEnv: AppEnv) {
@@ -120,6 +116,9 @@ export function createPasswordResetRequestHandler(appEnv: AppEnv) {
 			const userRecord = await db.findOne(usersTable, {
 				where: { email: normalizedEmail },
 			})
+			const emailConfig = userRecord
+				? getPasswordResetEmailConfig(appEnv)
+				: null
 
 			const token = generateResetToken()
 			const tokenHash = await hashResetToken(token)
@@ -137,7 +136,6 @@ export function createPasswordResetRequestHandler(appEnv: AppEnv) {
 			}
 
 			if (userRecord) {
-				const emailConfig = getPasswordResetEmailConfig(appEnv)
 				const resetUrl = new URL(
 					'/reset-password',
 					emailConfig?.appBaseUrl ?? url,

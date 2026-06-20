@@ -11,7 +11,7 @@ import {
 	getSavedPackageById,
 	getSavedPackageByKodyId,
 } from '#worker/package-registry/repo.ts'
-import { safelyListAttachedRemoteConnectorRefs } from '#worker/remote-connector/settings-service.ts'
+import { listAttachedRemoteConnectorRefs } from '#worker/remote-connector/settings-service.ts'
 import { buildSentryOptions } from '#worker/sentry-options.ts'
 
 export type PackageWorkflowParams = Record<string, unknown>
@@ -417,7 +417,7 @@ function validateDynamicCallableWorkflowPayload(
 async function readWorkflowInstanceSummary(
 	instance: WorkflowInstance,
 ): Promise<{ id: string; status?: string }> {
-	const status = await instance.status().catch(() => null)
+	const status = await instance.status()
 	return {
 		id: instance.id,
 		status: typeof status?.status === 'string' ? status.status : undefined,
@@ -432,14 +432,24 @@ async function getExistingWorkflowInstance(
 		const instance = await workflow.get(id)
 		return await readWorkflowInstanceSummary(instance)
 	} catch (error) {
-		if (
-			error instanceof Error &&
-			/does not exist|not found|not_found|404/i.test(error.message)
-		) {
+		if (isMissingWorkflowInstanceError(error)) {
 			return null
 		}
 		throw error
 	}
+}
+
+function isMissingWorkflowInstanceError(error: unknown) {
+	if (!error || typeof error !== 'object') return false
+	const workflowError = error as { code?: unknown; message?: unknown }
+	if (workflowError.code === 404) return true
+	const message =
+		error instanceof Error
+			? error.message
+			: typeof workflowError.message === 'string'
+				? workflowError.message
+				: ''
+	return /does not exist|not found|not_found|404/i.test(message)
 }
 
 function isDuplicateWorkflowInstanceError(error: unknown) {
@@ -829,13 +839,21 @@ export async function createDynamicCallableWorkflow(input: {
 		}
 		throw error
 	}
-	const summary = await readWorkflowInstanceSummary(instance)
 	if (input.env.APP_DB) {
 		await recordWorkflowRun({
 			db: input.env.APP_DB,
 			id,
 			payload,
-			status: summary.status ?? 'queued',
+			status: 'queued',
+		})
+	}
+	const summary = await readWorkflowInstanceSummary(instance)
+	if (input.env.APP_DB && summary.status) {
+		await recordWorkflowRun({
+			db: input.env.APP_DB,
+			id,
+			payload,
+			status: summary.status,
 		})
 	}
 	return createWorkflowCreateResult({ summary, payload })
@@ -870,10 +888,13 @@ export async function listWorkflowRunsForUser(input: {
 			) {
 				return
 			}
-			const instance = await input.env.DYNAMIC_CALLABLE_WORKFLOWS.get(
-				row.id,
-			).catch(() => null)
-			if (!instance) return
+			let instance: WorkflowInstance
+			try {
+				instance = await input.env.DYNAMIC_CALLABLE_WORKFLOWS.get(row.id)
+			} catch (error) {
+				if (isMissingWorkflowInstanceError(error)) return
+				throw error
+			}
 			const summary = await readWorkflowInstanceSummary(instance)
 			if (!summary.status || !knownWorkflowStatuses.has(summary.status)) return
 			if (summary.status === row.status) return
@@ -980,7 +1001,7 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 	private async invokePackageWorkflowExport(
 		payload: Extract<DynamicCallableWorkflowPayload, { sourceType: 'package' }>,
 	): Promise<JsonValue> {
-		const remoteConnectors = await safelyListAttachedRemoteConnectorRefs({
+		const remoteConnectors = await listAttachedRemoteConnectorRefs({
 			env: this.env,
 			userId: payload.userId,
 		})
@@ -1027,7 +1048,7 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 				import('#mcp/run-codemode-registry.ts'),
 				import('#mcp/context.ts'),
 			])
-		const remoteConnectors = await safelyListAttachedRemoteConnectorRefs({
+		const remoteConnectors = await listAttachedRemoteConnectorRefs({
 			env: this.env,
 			userId: payload.userId,
 		})

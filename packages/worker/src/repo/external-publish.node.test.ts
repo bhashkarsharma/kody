@@ -5,6 +5,7 @@ const mockModule = vi.hoisted(() => ({
 	updateEntitySource: vi.fn(async () => true),
 	runRepoChecks: vi.fn(),
 	writePublishedSourceSnapshot: vi.fn(async () => 'snapshot-key'),
+	deletePublishedSourceSnapshot: vi.fn(async () => undefined),
 	loadPublishedSourceSnapshot: vi.fn(),
 	refreshSavedPackageProjection: vi.fn(),
 	hasPublishedRuntimeArtifacts: vi.fn(() => false),
@@ -28,6 +29,8 @@ vi.mock('#worker/package-runtime/published-runtime-artifacts.ts', () => ({
 		mockModule.loadPublishedSourceSnapshot(...args),
 	writePublishedSourceSnapshot: (...args: Array<unknown>) =>
 		mockModule.writePublishedSourceSnapshot(...args),
+	deletePublishedSourceSnapshot: (...args: Array<unknown>) =>
+		mockModule.deletePublishedSourceSnapshot(...args),
 }))
 
 vi.mock('#worker/package-registry/service.ts', () => ({
@@ -65,6 +68,7 @@ function workspace() {
 // eslint-disable-next-line epic-web/prefer-dispose-in-tests -- restores shared default mock behavior after global mockReset.
 beforeEach(() => {
 	mockModule.writePublishedSourceSnapshot.mockResolvedValue('snapshot-key')
+	mockModule.deletePublishedSourceSnapshot.mockResolvedValue(undefined)
 	mockModule.loadPublishedSourceSnapshot.mockResolvedValue({
 		files: { 'package.json': '{}' },
 	})
@@ -320,7 +324,7 @@ test('check failure leaves D1 untouched', async () => {
 	expect(mockModule.updateEntitySource).not.toHaveBeenCalled()
 })
 
-test('publishFromExternalRef succeeds when projection refresh fails after commit', async () => {
+test('publishFromExternalRef fails when projection refresh fails after commit', async () => {
 	mockModule.getEntitySourceById.mockResolvedValue(source())
 	mockModule.runRepoChecks.mockResolvedValue({
 		ok: true,
@@ -335,22 +339,28 @@ test('publishFromExternalRef succeeds when projection refresh fails after commit
 		new Error('projection failed'),
 	)
 
-	const withoutSnapshot = await publishFromExternalRef({
-		env: { APP_DB: {} } as Env,
-		sourceId: 'source-1',
-		userId: 'user-1',
-		newCommit: 'commit-new',
-		isFastForward: async () => true,
-		workspace: workspace(),
-		files: { 'package.json': '{}' },
-		baseUrl: 'https://kody.test',
-	})
-
-	expect(withoutSnapshot.status).toBe('published')
+	await expect(
+		publishFromExternalRef({
+			env: { APP_DB: {} } as Env,
+			sourceId: 'source-1',
+			userId: 'user-1',
+			newCommit: 'commit-new',
+			isFastForward: async () => true,
+			workspace: workspace(),
+			files: { 'package.json': '{}' },
+			baseUrl: 'https://kody.test',
+		}),
+	).rejects.toThrow('projection failed')
 	expect(mockModule.updateEntitySource).toHaveBeenCalledWith(
 		expect.anything(),
 		expect.objectContaining({
 			publishedCommit: 'commit-new',
+		}),
+	)
+	expect(mockModule.updateEntitySource).toHaveBeenCalledWith(
+		expect.anything(),
+		expect.objectContaining({
+			publishedCommit: 'commit-old',
 		}),
 	)
 
@@ -369,17 +379,22 @@ test('publishFromExternalRef succeeds when projection refresh fails after commit
 		new Error('projection unavailable'),
 	)
 
-	const withSnapshot = await publishFromExternalRef({
-		env: { APP_DB: {}, BUNDLE_ARTIFACTS_KV: {} as KVNamespace } as Env,
-		sourceId: 'source-1',
-		userId: 'user-1',
-		newCommit: 'commit-new',
-		isFastForward: async () => true,
-		workspace: workspace(),
-		files: { 'package.json': '{}' },
-		baseUrl: 'https://kody.test',
-	})
-
-	expect(withSnapshot.status).toBe('published')
+	await expect(
+		publishFromExternalRef({
+			env: { APP_DB: {}, BUNDLE_ARTIFACTS_KV: {} as KVNamespace } as Env,
+			sourceId: 'source-1',
+			userId: 'user-1',
+			newCommit: 'commit-new',
+			isFastForward: async () => true,
+			workspace: workspace(),
+			files: { 'package.json': '{}' },
+			baseUrl: 'https://kody.test',
+		}),
+	).rejects.toThrow('projection unavailable')
 	expect(mockModule.writePublishedSourceSnapshot).toHaveBeenCalled()
+	expect(mockModule.deletePublishedSourceSnapshot).toHaveBeenCalledWith({
+		env: { APP_DB: {}, BUNDLE_ARTIFACTS_KV: {} },
+		sourceId: 'source-1',
+		publishedCommit: 'commit-new',
+	})
 })

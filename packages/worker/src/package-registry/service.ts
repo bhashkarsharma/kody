@@ -272,6 +272,24 @@ export async function deleteSavedPackageProjection(input: {
 		packageId: input.packageId,
 	})
 	if (savedPackage) {
+		const listedServices = await listSavedPackageServices({
+			env: input.env,
+			userId: input.userId,
+			baseUrl: 'https://package-service.invalid',
+			packageId: input.packageId,
+			savedPackage,
+		})
+		for (const service of listedServices.services) {
+			await packageServiceRpc({
+				env: input.env,
+				userId: input.userId,
+				packageId: savedPackage.id,
+				kodyId: savedPackage.kodyId,
+				sourceId: savedPackage.sourceId,
+				baseUrl: 'https://package-service.invalid',
+				serviceName: service.name,
+			}).stop()
+		}
 		await cleanupArtifactReposForPackage({
 			env: input.env,
 			userId: input.userId,
@@ -301,30 +319,6 @@ export async function deleteSavedPackageProjection(input: {
 				}),
 			)
 		})
-		const listedServices = await listSavedPackageServices({
-			env: input.env,
-			userId: input.userId,
-			baseUrl: 'https://package-service.invalid',
-			packageId: input.packageId,
-			savedPackage,
-		}).catch(() => null)
-		if (listedServices) {
-			for (const service of listedServices.services) {
-				try {
-					await packageServiceRpc({
-						env: input.env,
-						userId: input.userId,
-						packageId: savedPackage.id,
-						kodyId: savedPackage.kodyId,
-						sourceId: savedPackage.sourceId,
-						baseUrl: 'https://package-service.invalid',
-						serviceName: service.name,
-					}).stop()
-				} catch {
-					// Best-effort shutdown of orphaned services during package deletion.
-				}
-			}
-		}
 		const existingRows = await listJobRowsByUserId(
 			input.env.APP_DB,
 			input.userId,

@@ -173,7 +173,11 @@ export function isCapabilitySearchOffline(env: Env): boolean {
 	const runtime = env as unknown as Record<string, string | undefined>
 	if (runtime['SENTRY_ENVIRONMENT'] === 'test') return true
 	if (runtime['WRANGLER_IS_LOCAL_DEV'] === 'true') return true
-	if (!getCapabilityVectorIndex(env)) return true
+	if (
+		!getCapabilityVectorIndex(env) &&
+		runtime['SENTRY_ENVIRONMENT'] !== 'production'
+	)
+		return true
 	return false
 }
 
@@ -230,13 +234,19 @@ export async function searchCapabilities(input: {
 		)
 		vectorOrder = sortIdsByScore(ids, (id) => vectorScoreById[id]!)
 	} else {
-		const index = getCapabilityVectorIndex(input.env)!
+		const index = getCapabilityVectorIndex(input.env)
+		if (!index) {
+			throw new Error(
+				'CAPABILITY_VECTOR_INDEX binding is required for capability search outside offline mode.',
+			)
+		}
+		const vectorIndex = index
 		const qVec = await embedTextForVectorize(input.env, q)
 		const topK = Math.min(Math.max(ids.length, input.limit * 5), 100)
 		const vectorScoreMap = new Map<string, number>()
 
 		async function queryVectorize(filter?: VectorizeVectorMetadataFilter) {
-			return index.query(qVec, {
+			return vectorIndex.query(qVec, {
 				topK,
 				returnMetadata: 'none',
 				...(filter ? { filter } : {}),

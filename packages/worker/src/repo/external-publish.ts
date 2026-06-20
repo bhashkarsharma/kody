@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/cloudflare'
 import { refreshSavedPackageProjection } from '#worker/package-registry/service.ts'
 import {
+	deletePublishedSourceSnapshot,
 	hasPublishedRuntimeArtifacts,
 	writePublishedSourceSnapshot,
 } from '#worker/package-runtime/published-runtime-artifacts.ts'
@@ -30,6 +31,7 @@ export async function finalizePublishedEntitySource(
 	input: FinalizePublishedSourceInput,
 ) {
 	const previousPublishedCommit = input.source.published_commit
+	let wrotePublishedSnapshot = false
 	await updateEntitySource(input.env.APP_DB, {
 		id: input.source.id,
 		userId: input.source.user_id,
@@ -47,6 +49,7 @@ export async function finalizePublishedEntitySource(
 				},
 				files: input.files,
 			})
+			wrotePublishedSnapshot = true
 		} catch (snapshotError) {
 			try {
 				await updateEntitySource(input.env.APP_DB, {
@@ -82,25 +85,35 @@ export async function finalizePublishedEntitySource(
 				rebuildArtifacts: input.rebuildPackageArtifacts ?? true,
 			})
 		} catch (projectionError) {
-			Sentry.captureException(projectionError, {
-				tags: {
-					scope: 'repo.publishFromExternalRef.refresh-package-projection',
-				},
-				extra: {
-					sourceId: input.source.id,
-					packageId: input.source.entity_id,
-					publishedCommit: input.publishedCommit,
-				},
-			})
-			console.warn('publish_from_external_ref projection refresh failed', {
-				sourceId: input.source.id,
-				packageId: input.source.entity_id,
-				publishedCommit: input.publishedCommit,
-				error:
-					projectionError instanceof Error
-						? projectionError.message
-						: String(projectionError),
-			})
+			try {
+				await updateEntitySource(input.env.APP_DB, {
+					id: input.source.id,
+					userId: input.source.user_id,
+					publishedCommit: previousPublishedCommit,
+					manifestPath: input.source.manifest_path,
+					sourceRoot: input.source.source_root,
+				})
+				if (wrotePublishedSnapshot) {
+					await deletePublishedSourceSnapshot({
+						env: input.env,
+						sourceId: input.source.id,
+						publishedCommit: input.publishedCommit,
+					})
+				}
+			} catch (revertError) {
+				Sentry.captureException(revertError, {
+					tags: {
+						scope:
+							'repo.publishFromExternalRef.revert-after-projection-failure',
+					},
+					extra: {
+						sourceId: input.source.id,
+						previousPublishedCommit,
+						attemptedPublishedCommit: input.publishedCommit,
+					},
+				})
+			}
+			throw projectionError
 		}
 	}
 }

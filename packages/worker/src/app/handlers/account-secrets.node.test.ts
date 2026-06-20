@@ -329,44 +329,39 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 			'fleet-auth.prd.vn.cloud.tesla.com',
 		]),
 	)
+})
 
+test('connect oauth rejects invalid authorization metadata', async () => {
 	mockModule.saveValue.mockClear()
-	const invalidAuthorizeResponse = await handler.handler({
-		request: new Request('https://example.com/account/secrets.json', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				action: 'connect_oauth',
-				provider: 'GitHub',
-				authorizeUrl: 'ftp://github.com/login/oauth/authorize',
-				tokenUrl: 'https://github.com/login/oauth/access_token',
-				apiBaseUrl: 'https://api.github.com',
-				scopes: ['repo'],
-				flow: 'pkce',
-				clientIdValueName: 'github-client-id',
-				accessTokenSecretName: 'githubAccessToken',
-				refreshTokenSecretName: 'githubRefreshToken',
-				allowedHosts: ['api.github.com'],
-				tokenPayload: {
-					access_token: 'access-token',
-					refresh_token: 'refresh-token',
-				},
-			}),
-		}),
-		params: {},
-	} as never)
 
-	expect(invalidAuthorizeResponse.status).toBe(200)
-	await expect(invalidAuthorizeResponse.json()).resolves.toMatchObject({
-		ok: true,
-		integrationName: 'GitHub',
-	})
-	expect(mockModule.saveValue).toHaveBeenCalledWith(
-		expect.objectContaining({
-			name: '_integration:GitHub',
-			value: expect.not.stringContaining('ftp://'),
-		}),
-	)
+	const handler = createAccountSecretsApiHandler(createEnv())
+	await expect(
+		handler.handler({
+			request: new Request('https://example.com/account/secrets.json', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					action: 'connect_oauth',
+					provider: 'GitHub',
+					authorizeUrl: 'ftp://github.com/login/oauth/authorize',
+					tokenUrl: 'https://github.com/login/oauth/access_token',
+					apiBaseUrl: 'https://api.github.com',
+					scopes: ['repo'],
+					flow: 'pkce',
+					clientIdValueName: 'github-client-id',
+					accessTokenSecretName: 'githubAccessToken',
+					refreshTokenSecretName: 'githubRefreshToken',
+					allowedHosts: ['api.github.com'],
+					tokenPayload: {
+						access_token: 'access-token',
+						refresh_token: 'refresh-token',
+					},
+				}),
+			}),
+			params: {},
+		} as never),
+	).rejects.toThrow('OAuth integration configuration is invalid.')
+	expect(mockModule.saveValue).not.toHaveBeenCalled()
 })
 
 test('host approval view and approve persist normalized hosts for the selected secret', async () => {
