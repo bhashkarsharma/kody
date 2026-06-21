@@ -1,14 +1,17 @@
+import { FetchInterceptor } from '@mswjs/interceptors/fetch'
 import { expect, test } from 'vitest'
+import { http, HttpResponse } from 'msw'
 import {
 	type CapabilityArgs,
 	type CodemodeNamespace,
 	type ExecuteRequestInput,
 	createAuthenticatedFetch,
 	createExecuteHelperPrelude,
-	oauthClientCredentials,
+	type oauthClientCredentials,
 	refreshAccessToken,
 	type secretHeaders,
 } from './codemode-utils.ts'
+import { createMswNodeServer } from '#worker/test-support/msw-node-server.ts'
 
 type SecretSetCall = {
 	name: string
@@ -44,16 +47,8 @@ const spotifyIntegration = {
 	requiredHosts: ['api.spotify.test'],
 }
 
-function createCodemode(
-	payload: Record<string, unknown>,
-	options: {
-		apiErrors?: Array<Error>
-		apiResponses?: Array<ApiResponseSpec>
-	} = {},
-) {
+function createCodemode() {
 	const secretSetCalls: Array<SecretSetCall> = []
-	const apiErrors = [...(options.apiErrors ?? [])]
-	const apiResponses = [...(options.apiResponses ?? [])]
 	const codemode = {
 		async integration_get(args: CapabilityArgs) {
 			const name = args.name
@@ -75,61 +70,116 @@ function createCodemode(
 		},
 	} satisfies CodemodeNamespace
 
-	const fetchCalls: Array<Request> = []
-	const fetchStub: typeof globalThis.fetch = async (
-		input: ExecuteRequestInput,
-		init?: RequestInit,
-	) => {
-		const request = new Request(input, init)
-		fetchCalls.push(request)
-		if (request.url === spotifyIntegration.tokenUrl) {
-			return new Response(JSON.stringify(payload), {
-				status: 200,
-				headers: { 'content-type': 'application/json' },
-			})
-		}
-		const apiError = apiErrors.shift()
-		if (apiError) throw apiError
-		const apiResponse = apiResponses.shift()
-		if (apiResponse) {
-			return new Response(JSON.stringify(apiResponse.body), {
-				status: apiResponse.status,
-				headers: { 'content-type': 'application/json' },
-			})
-		}
-		return new Response(JSON.stringify({ ok: true }), {
-			status: 200,
-			headers: { 'content-type': 'application/json' },
-		})
-	}
-
-	return { codemode, secretSetCalls, fetchCalls, fetchStub }
+	return { codemode, secretSetCalls }
 }
 
-async function withPatchedFetch<T>(
-	fetchImpl: typeof globalThis.fetch,
-	callback: () => Promise<T>,
+function createSpotifyHandlers(options: {
+	tokenPayload: Record<string, unknown>
+	fetchCalls: Array<Request>
+	apiResponses?: Array<ApiResponseSpec>
+}) {
+	const apiResponses = [...(options.apiResponses ?? [])]
+	return [
+		http.post(spotifyIntegration.tokenUrl, async ({ request }) => {
+			options.fetchCalls.push(request.clone())
+			return HttpResponse.json(options.tokenPayload)
+		}),
+		http.all('https://api.spotify.test/v1/*', async ({ request }) => {
+			options.fetchCalls.push(request.clone())
+			const apiResponse = apiResponses.shift()
+			if (apiResponse) {
+				return HttpResponse.json(apiResponse.body, {
+					status: apiResponse.status,
+				})
+			}
+			return HttpResponse.json({ ok: true })
+		}),
+	]
+}
+
+type SpotifyFetchInterceptorOptions = {
+	tokenPayload: Record<string, unknown>
+	fetchCalls: Array<Request>
+	apiErrors?: Array<Error>
+	apiResponses?: Array<ApiResponseSpec>
+}
+
+function createSpotifyFetchInterceptor(
+	options: SpotifyFetchInterceptorOptions,
 ) {
-	const originalFetch = globalThis.fetch
-	globalThis.fetch = fetchImpl
-	try {
-		return await callback()
-	} finally {
-		globalThis.fetch = originalFetch
+	// MSW HttpResponse bodies hang on response.body.cancel(), which
+	// createAuthenticatedFetch uses during 401 retry. Native Response
+	// objects from FetchInterceptor avoid that Node/Vitest issue.
+	const apiErrors = [...(options.apiErrors ?? [])]
+	const apiResponses = [...(options.apiResponses ?? [])]
+	const interceptor = new FetchInterceptor()
+	interceptor.on('request', ({ request, controller }) => {
+		void (async () => {
+			try {
+				options.fetchCalls.push(request.clone())
+				if (request.url === spotifyIntegration.tokenUrl) {
+					await controller.respondWith(
+						Response.json(options.tokenPayload, {
+							headers: { 'content-type': 'application/json' },
+						}),
+					)
+					return
+				}
+				const apiError = apiErrors.shift()
+				if (apiError) {
+					controller.errorWith(apiError)
+					return
+				}
+				const apiResponse = apiResponses.shift()
+				if (apiResponse) {
+					await controller.respondWith(
+						Response.json(apiResponse.body, {
+							status: apiResponse.status,
+							headers: { 'content-type': 'application/json' },
+						}),
+					)
+					return
+				}
+				await controller.respondWith(
+					Response.json(
+						{ ok: true },
+						{ headers: { 'content-type': 'application/json' } },
+					),
+				)
+			} catch (error) {
+				controller.errorWith(error)
+			}
+		})()
+	})
+	interceptor.apply()
+	return {
+		[Symbol.dispose]() {
+			interceptor.dispose()
+		},
 	}
 }
 
 test('codemode oauth helpers refresh tokens, retry on missing or expired access tokens, and persist rotations', async () => {
-	const rotatedRefresh = createCodemode({
-		access_token: 'new-access-token',
-		refresh_token: 'new-refresh-token',
-	})
-	const rotatedAccessToken = await withPatchedFetch(
-		rotatedRefresh.fetchStub,
-		() => refreshAccessToken(rotatedRefresh.codemode, 'spotify'),
-	)
-	expect(rotatedAccessToken).toBe('new-access-token')
-	expect(rotatedRefresh.secretSetCalls).toEqual([
+	const rotatedRefreshFetchCalls: Array<Request> = []
+	const { codemode: rotatedCodemode, secretSetCalls: rotatedSecretSetCalls } =
+		createCodemode()
+	{
+		using _server = createMswNodeServer(
+			createSpotifyHandlers({
+				tokenPayload: {
+					access_token: 'new-access-token',
+					refresh_token: 'new-refresh-token',
+				},
+				fetchCalls: rotatedRefreshFetchCalls,
+			}),
+		)
+		const rotatedAccessToken = await refreshAccessToken(
+			rotatedCodemode,
+			'spotify',
+		)
+		expect(rotatedAccessToken).toBe('new-access-token')
+	}
+	expect(rotatedSecretSetCalls).toEqual([
 		{
 			name: 'spotifyRefreshToken',
 			value: 'new-refresh-token',
@@ -141,105 +191,116 @@ test('codemode oauth helpers refresh tokens, retry on missing or expired access 
 			scope: 'user',
 		},
 	])
-	expect(rotatedRefresh.fetchCalls).toHaveLength(1)
-	expect(rotatedRefresh.fetchCalls[0]?.method).toBe('POST')
-	expect(await rotatedRefresh.fetchCalls[0]?.text()).toContain(
+	expect(rotatedRefreshFetchCalls).toHaveLength(1)
+	expect(rotatedRefreshFetchCalls[0]?.method).toBe('POST')
+	expect(await rotatedRefreshFetchCalls[0]?.text()).toContain(
 		'refresh_token=%7B%7Bsecret%3AspotifyRefreshToken%7Cscope%3Duser%7D%7D',
 	)
 
-	const storedToken = createCodemode({
-		access_token: 'refreshed-access-token',
-	})
-	const authenticatedFetch = await createAuthenticatedFetch(
-		storedToken.codemode,
-		'spotify',
-	)
-	const storedTokenResponse = await withPatchedFetch(
-		storedToken.fetchStub,
-		() => authenticatedFetch('/me/playlists', { method: 'POST' }),
-	)
-	expect(storedToken.secretSetCalls).toEqual([])
-	expect(storedToken.fetchCalls).toHaveLength(1)
-	expect(storedToken.fetchCalls[0]?.url).toBe(
+	const storedTokenFetchCalls: Array<Request> = []
+	const {
+		codemode: storedTokenCodemode,
+		secretSetCalls: storedSecretSetCalls,
+	} = createCodemode()
+	{
+		using _server = createMswNodeServer(
+			createSpotifyHandlers({
+				tokenPayload: { access_token: 'refreshed-access-token' },
+				fetchCalls: storedTokenFetchCalls,
+			}),
+		)
+		const authenticatedFetch = await createAuthenticatedFetch(
+			storedTokenCodemode,
+			'spotify',
+		)
+		const storedTokenResponse = await authenticatedFetch('/me/playlists', {
+			method: 'POST',
+		})
+		expect(await storedTokenResponse.json()).toEqual({ ok: true })
+	}
+	expect(storedTokenFetchCalls).toHaveLength(1)
+	expect(storedTokenFetchCalls[0]?.url).toBe(
 		'https://api.spotify.test/v1/me/playlists',
 	)
-	expect(storedToken.fetchCalls[0]?.headers.get('authorization')).toBe(
+	expect(storedTokenFetchCalls[0]?.headers.get('authorization')).toBe(
 		'Bearer {{secret:spotifyAccessToken|scope=user}}',
 	)
-	expect(await storedTokenResponse.json()).toEqual({ ok: true })
+	expect(storedSecretSetCalls).toEqual([])
 
-	const missingToken = createCodemode(
-		{
-			access_token: 'new-access-token',
-		},
-		{
+	const missingTokenFetchCalls: Array<Request> = []
+	const {
+		codemode: missingTokenCodemode,
+		secretSetCalls: missingSecretSetCalls,
+	} = createCodemode()
+	{
+		using _spotifyFetch = createSpotifyFetchInterceptor({
+			tokenPayload: { access_token: 'new-access-token' },
+			fetchCalls: missingTokenFetchCalls,
 			apiErrors: [new Error('Secret "spotifyAccessToken" was not found.')],
-		},
-	)
-	const missingTokenFetch = await createAuthenticatedFetch(
-		missingToken.codemode,
-		'spotify',
-	)
-	const missingTokenResponse = await withPatchedFetch(
-		missingToken.fetchStub,
-		() => missingTokenFetch('/me?market=US'),
-	)
-	expect(missingToken.secretSetCalls).toEqual([
+		})
+		const missingTokenFetch = await createAuthenticatedFetch(
+			missingTokenCodemode,
+			'spotify',
+		)
+		const missingTokenResponse = await missingTokenFetch('/me?market=US')
+		expect(await missingTokenResponse.json()).toEqual({ ok: true })
+	}
+	expect(missingSecretSetCalls).toEqual([
 		{
 			name: 'spotifyAccessToken',
 			value: 'new-access-token',
 			scope: 'user',
 		},
 	])
-	expect(missingToken.fetchCalls).toHaveLength(3)
-	expect(missingToken.fetchCalls[0]?.headers.get('authorization')).toBe(
+	expect(missingTokenFetchCalls).toHaveLength(3)
+	expect(missingTokenFetchCalls[0]?.headers.get('authorization')).toBe(
 		'Bearer {{secret:spotifyAccessToken|scope=user}}',
 	)
-	expect(missingToken.fetchCalls[1]?.url).toBe(
+	expect(missingTokenFetchCalls[1]?.url).toBe(
 		'https://accounts.spotify.test/api/token',
 	)
-	expect(missingToken.fetchCalls[2]?.headers.get('authorization')).toBe(
+	expect(missingTokenFetchCalls[2]?.headers.get('authorization')).toBe(
 		'Bearer new-access-token',
 	)
-	expect(await missingTokenResponse.json()).toEqual({ ok: true })
 
-	const expiredToken = createCodemode(
-		{
-			access_token: 'new-access-token',
-		},
-		{
+	const expiredTokenFetchCalls: Array<Request> = []
+	const {
+		codemode: expiredTokenCodemode,
+		secretSetCalls: expiredSecretSetCalls,
+	} = createCodemode()
+	{
+		using _spotifyFetch = createSpotifyFetchInterceptor({
+			tokenPayload: { access_token: 'new-access-token' },
+			fetchCalls: expiredTokenFetchCalls,
 			apiResponses: [
 				{ status: 401, body: { error: 'expired' } },
 				{ status: 200, body: { ok: true } },
 			],
-		},
-	)
-	const expiredTokenFetch = await createAuthenticatedFetch(
-		expiredToken.codemode,
-		'spotify',
-	)
-	const expiredTokenResponse = await withPatchedFetch(
-		expiredToken.fetchStub,
-		() => expiredTokenFetch('/me?market=US'),
-	)
-	expect(expiredToken.secretSetCalls).toEqual([
+		})
+		const expiredTokenFetch = await createAuthenticatedFetch(
+			expiredTokenCodemode,
+			'spotify',
+		)
+		const expiredTokenResponse = await expiredTokenFetch('/me?market=US')
+		expect(await expiredTokenResponse.json()).toEqual({ ok: true })
+	}
+	expect(expiredSecretSetCalls).toEqual([
 		{
 			name: 'spotifyAccessToken',
 			value: 'new-access-token',
 			scope: 'user',
 		},
 	])
-	expect(expiredToken.fetchCalls).toHaveLength(3)
-	expect(expiredToken.fetchCalls[0]?.url).toBe(
+	expect(expiredTokenFetchCalls).toHaveLength(3)
+	expect(expiredTokenFetchCalls[0]?.url).toBe(
 		'https://api.spotify.test/v1/me?market=US',
 	)
-	expect(expiredToken.fetchCalls[1]?.url).toBe(
+	expect(expiredTokenFetchCalls[1]?.url).toBe(
 		'https://accounts.spotify.test/api/token',
 	)
-	expect(expiredToken.fetchCalls[2]?.headers.get('authorization')).toBe(
+	expect(expiredTokenFetchCalls[2]?.headers.get('authorization')).toBe(
 		'Bearer new-access-token',
 	)
-	expect(await expiredTokenResponse.json()).toEqual({ ok: true })
 })
 
 test('createExecuteHelperPrelude exposes sandbox helpers for token refresh, authenticated fetch, secrets, and client credentials', async () => {
@@ -249,20 +310,24 @@ test('createExecuteHelperPrelude exposes sandbox helpers for token refresh, auth
 		`${prelude}; return { refreshAccessToken, createAuthenticatedFetch, secretHeaders, oauthClientCredentials };`,
 	) as (codemodeNamespace: CodemodeNamespace) => SandboxHelpers
 
-	const { codemode, secretSetCalls, fetchStub, fetchCalls } = createCodemode({
-		access_token: 'new-access-token',
-		refresh_token: 'new-refresh-token',
-	})
-	const helpers = createSandboxHelpers(codemode)
-	const accessToken = await withPatchedFetch(fetchStub, () =>
-		helpers.refreshAccessToken('spotify'),
-	)
-	const authenticatedFetch = await withPatchedFetch(fetchStub, () =>
-		helpers.createAuthenticatedFetch('spotify'),
-	)
-	await withPatchedFetch(fetchStub, () => authenticatedFetch('/me'))
-
-	expect(accessToken).toBe('new-access-token')
+	const fetchCalls: Array<Request> = []
+	const { codemode, secretSetCalls } = createCodemode()
+	{
+		using _server = createMswNodeServer(
+			createSpotifyHandlers({
+				tokenPayload: {
+					access_token: 'new-access-token',
+					refresh_token: 'new-refresh-token',
+				},
+				fetchCalls,
+			}),
+		)
+		const helpers = createSandboxHelpers(codemode)
+		const accessToken = await helpers.refreshAccessToken('spotify')
+		const authenticatedFetch = await helpers.createAuthenticatedFetch('spotify')
+		await authenticatedFetch('/me')
+		expect(accessToken).toBe('new-access-token')
+	}
 	expect(secretSetCalls).toEqual([
 		{
 			name: 'spotifyRefreshToken',
@@ -280,6 +345,7 @@ test('createExecuteHelperPrelude exposes sandbox helpers for token refresh, auth
 		'Bearer {{secret:spotifyAccessToken|scope=user}}',
 	)
 
+	const helpers = createSandboxHelpers(createCodemode().codemode)
 	expect(
 		helpers.secretHeaders.basic({
 			usernameSecret: 'paypalClientId',
@@ -291,25 +357,20 @@ test('createExecuteHelperPrelude exposes sandbox helpers for token refresh, auth
 	)
 
 	const clientCredentialsCalls: Array<Request> = []
-	const clientCredentialsStub: typeof globalThis.fetch = async (
-		input: ExecuteRequestInput,
-		init?: RequestInit,
-	) => {
-		const request = new Request(input, init)
-		clientCredentialsCalls.push(request)
-		return new Response(
-			JSON.stringify({
-				access_token: 'paypal-access-token',
-				token_type: 'Bearer',
-			}),
-			{
-				status: 200,
-				headers: { 'content-type': 'application/json' },
-			},
-		)
-	}
-	const tokenResponse = await withPatchedFetch(clientCredentialsStub, () =>
-		helpers.oauthClientCredentials({
+	{
+		using _server = createMswNodeServer([
+			http.post(
+				'https://api-m.paypal.com/v1/oauth2/token',
+				async ({ request }) => {
+					clientCredentialsCalls.push(request.clone())
+					return HttpResponse.json({
+						access_token: 'paypal-access-token',
+						token_type: 'Bearer',
+					})
+				},
+			),
+		])
+		const tokenResponse = await helpers.oauthClientCredentials({
 			tokenUrl: 'https://api-m.paypal.com/v1/oauth2/token',
 			clientIdSecret: 'paypalClientId',
 			clientSecretSecret: 'paypalClientSecret',
@@ -317,12 +378,12 @@ test('createExecuteHelperPrelude exposes sandbox helpers for token refresh, auth
 			body: {
 				scope: 'openid',
 			},
-		}),
-	)
-	expect(tokenResponse).toEqual({
-		access_token: 'paypal-access-token',
-		token_type: 'Bearer',
-	})
+		})
+		expect(tokenResponse).toEqual({
+			access_token: 'paypal-access-token',
+			token_type: 'Bearer',
+		})
+	}
 	expect(clientCredentialsCalls).toHaveLength(1)
 	expect(clientCredentialsCalls[0]?.method).toBe('POST')
 	expect(clientCredentialsCalls[0]?.headers.get('authorization')).toBe(
