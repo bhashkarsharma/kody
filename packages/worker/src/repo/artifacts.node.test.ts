@@ -10,7 +10,6 @@ const {
 	resolveArtifactSourceHead,
 	resolveArtifactSourceRepo,
 	resolveExistingArtifactSourceRepo,
-	resolveSessionRepo,
 } = await import('./artifacts.ts')
 
 test('artifacts REST client scopes API paths to configured or stored namespaces', async () => {
@@ -65,66 +64,13 @@ test('artifacts REST client scopes API paths to configured or stored namespaces'
 	expect(bindingFetch).toHaveBeenCalledTimes(1)
 	bindingFetch.mockRestore()
 
-	const envSession = {
-		CLOUDFLARE_ACCOUNT_ID: 'acct',
-		CLOUDFLARE_API_TOKEN: 'token-123',
-		CLOUDFLARE_API_BASE_URL: 'https://api.example.com',
-		ARTIFACTS_NAMESPACE: 'production',
-	} as Env
-	const sessionFetch = vi
-		.spyOn(globalThis, 'fetch')
-		.mockImplementation(async (input, init) => {
-			const url = new URL(String(input))
-			const method = init?.method ?? 'GET'
-			expect(url.pathname).toContain(
-				'/artifacts/namespaces/legacy-default/repos/session-repo',
-			)
-			if (method === 'GET' && url.pathname.endsWith('/repos/session-repo')) {
-				return new Response(
-					JSON.stringify({
-						success: true,
-						result: {
-							id: 'repo_session',
-							name: 'session-repo',
-							description: null,
-							default_branch: 'main',
-							created_at: '2026-04-17T00:00:00.000Z',
-							updated_at: '2026-04-17T00:00:00.000Z',
-							last_push_at: null,
-							source: null,
-							read_only: false,
-							remote:
-								'https://acct.artifacts.cloudflare.net/git/legacy-default/session-repo.git',
-						},
-						errors: [],
-						messages: [],
-					}),
-					{
-						status: 200,
-						headers: { 'content-type': 'application/json' },
-					},
-				)
-			}
-			throw new Error(`Unexpected fetch: ${method} ${url.pathname}`)
-		})
-
-	await expect(
-		resolveSessionRepo(envSession, {
-			namespace: 'legacy-default',
-			name: 'session-repo',
-		}),
-	).resolves.toMatchObject({
-		info: expect.any(Function),
-	})
-	expect(sessionFetch).toHaveBeenCalledTimes(1)
-
 	expect(getArtifactsNamespace({} as Env)).toBe('default')
 	expect(
 		getArtifactsNamespace({ ARTIFACTS_NAMESPACE: ' preview ' } as Env),
 	).toBe('preview')
 })
 
-test('artifacts REST client supports get, create, token, and fork operations', async () => {
+test('artifacts REST client supports get, create, token, and delete operations', async () => {
 	let getRepo1Count = 0
 	const fetchMock = vi
 		.spyOn(globalThis, 'fetch')
@@ -213,28 +159,6 @@ test('artifacts REST client supports get, create, token, and fork operations', a
 					},
 				)
 			}
-			if (method === 'POST' && url.pathname.endsWith('/repos/repo-1/fork')) {
-				return new Response(
-					JSON.stringify({
-						success: true,
-						result: {
-							id: 'repo_2',
-							name: 'repo-copy',
-							description: null,
-							default_branch: 'main',
-							remote:
-								'https://acct.artifacts.cloudflare.net/git/default/repo-copy.git',
-							token: 'art_v1_fork?expires=1760000200',
-						},
-						errors: [],
-						messages: [],
-					}),
-					{
-						status: 200,
-						headers: { 'content-type': 'application/json' },
-					},
-				)
-			}
 			if (method === 'DELETE' && url.pathname.endsWith('/repos/repo-1')) {
 				return new Response(
 					JSON.stringify({
@@ -283,21 +207,12 @@ test('artifacts REST client supports get, create, token, and fork operations', a
 		scope: 'read',
 		expiresAt: '2026-10-09T08:55:00.000Z',
 	})
-	await expect(
-		repo.fork({ name: 'repo-copy', readOnly: false }),
-	).resolves.toMatchObject({
-		id: 'repo_2',
-		name: 'repo-copy',
-		defaultBranch: 'main',
-		remote: 'https://acct.artifacts.cloudflare.net/git/default/repo-copy.git',
-		token: 'art_v1_fork?expires=1760000200',
-	})
 	await expect(binding.delete('repo-1')).resolves.toEqual({
 		id: 'repo_1',
 		alreadyDeleted: false,
 	})
 
-	expect(fetchMock).toHaveBeenCalledTimes(7)
+	expect(fetchMock).toHaveBeenCalledTimes(6)
 
 	expect(parseArtifactTokenSecret('art_v1_secret?expires=1760000100')).toBe(
 		'art_v1_secret',

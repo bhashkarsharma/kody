@@ -56,6 +56,9 @@ import {
 	deleteEntitySource,
 	getEntitySourceById,
 } from '#worker/repo/entity-sources.ts'
+import { cleanupArtifactReposForSource } from '#worker/repo/artifact-repo-cleanup.ts'
+import { repoSessionRpc } from '#worker/repo/repo-session-do.ts'
+import { listRepoSessionsBySource } from '#worker/repo/repo-sessions.ts'
 import {
 	loadPublishedEntitySource,
 	type PublishedEntitySource,
@@ -501,7 +504,6 @@ async function executePublishedJobArtifact(input: {
 					sourceId: source.id,
 					repoId: source.repo_id,
 					sessionId: null,
-					sessionRepoId: null,
 					baseCommit: source.published_commit,
 					manifestPath: source.manifest_path,
 					sourceRoot: source.source_root,
@@ -614,7 +616,33 @@ async function cleanupArchivedJobArtifacts(input: { env: Env; now?: Date }) {
 				input.env.APP_DB,
 				artifact.sourceId,
 			)
-			if (source) {
+			if (
+				source &&
+				source.user_id === artifact.userId &&
+				source.entity_kind === 'job' &&
+				source.entity_id === artifact.jobId
+			) {
+				const sessions = await listRepoSessionsBySource(input.env.APP_DB, {
+					userId: artifact.userId,
+					sourceId: source.id,
+				})
+				for (const session of sessions) {
+					await repoSessionRpc(input.env, session.id).cleanupSessionBranch({
+						sessionId: session.id,
+						userId: artifact.userId,
+						reason: 'source_deleted',
+					})
+				}
+				const deletedRepoCount = await cleanupArtifactReposForSource({
+					env: input.env,
+					userId: artifact.userId,
+					sourceId: source.id,
+				})
+				if (source.repo_id.trim() && deletedRepoCount === 0) {
+					throw new Error(
+						`Artifact repo cleanup failed for source ${source.id}.`,
+					)
+				}
 				await deletePublishedArtifactsForSource({
 					env: input.env,
 					userId: artifact.userId,
@@ -654,6 +682,59 @@ async function cleanupArchivedJobArtifacts(input: { env: Env; now?: Date }) {
 			})
 		}
 	}
+}
+
+async function cleanupAdHocJobSource(input: {
+	env: Env
+	userId: string
+	jobId: string
+	sourceId: string | null | undefined
+}) {
+	if (!input.sourceId) {
+		return
+	}
+	const source = await getEntitySourceById(input.env.APP_DB, input.sourceId)
+	if (
+		!source ||
+		source.user_id !== input.userId ||
+		source.entity_kind !== 'job' ||
+		source.entity_id !== input.jobId
+	) {
+		return
+	}
+	const sessions = await listRepoSessionsBySource(input.env.APP_DB, {
+		userId: input.userId,
+		sourceId: source.id,
+	})
+	for (const session of sessions) {
+		await repoSessionRpc(input.env, session.id).cleanupSessionBranch({
+			sessionId: session.id,
+			userId: input.userId,
+			reason: 'source_deleted',
+		})
+	}
+	const deletedRepoCount = await cleanupArtifactReposForSource({
+		env: input.env,
+		userId: input.userId,
+		sourceId: source.id,
+	})
+	if (source.repo_id.trim() && deletedRepoCount === 0) {
+		throw new Error(`Artifact repo cleanup failed for source ${source.id}.`)
+	}
+	await deletePublishedArtifactsForSource({
+		env: input.env,
+		userId: input.userId,
+		sourceId: source.id,
+	})
+	await deletePublishedSourceSnapshot({
+		env: input.env,
+		sourceId: source.id,
+		publishedCommit: source.published_commit,
+	})
+	await deleteEntitySource(input.env.APP_DB, {
+		id: source.id,
+		userId: input.userId,
+	})
 }
 
 function createPackageJobCallerContext(input: {
@@ -1097,6 +1178,12 @@ export async function deleteJob(input: {
 	await syncJobManagerAlarm({
 		env: input.env,
 		userId: input.userId,
+	})
+	await cleanupAdHocJobSource({
+		env: input.env,
+		userId: input.userId,
+		jobId: input.jobId,
+		sourceId: row.record.sourceId,
 	})
 	return {
 		id: input.jobId,

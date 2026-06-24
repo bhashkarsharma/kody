@@ -40,6 +40,7 @@ import { handleCapabilityReindexRequest } from './capability-maintenance.ts'
 import { handleJobReindexRequest } from './job-maintenance.ts'
 import { handleMemoryReindexRequest } from './memory-maintenance.ts'
 import { reconcileArtifactsPushes } from './jobs/reconcile-artifacts-pushes.ts'
+import { cleanupRepoSessionBranches } from './repo/repo-session-cleanup.ts'
 import { CodemodeFetchGateway } from '#mcp/fetch-gateway.ts'
 import {
 	parseUserScopedConnectorRoutePath,
@@ -410,11 +411,20 @@ const workerHandler = {
 		_ctx: ExecutionContext,
 	) {
 		const baseUrl = env.APP_BASE_URL ?? 'https://kody.local'
-		await reconcileArtifactsPushes({
-			env,
-			baseUrl,
-			now: new Date(controller.scheduledTime),
-		})
+		const scheduledAt = new Date(controller.scheduledTime)
+		const [pushesResult, cleanupResult] = await Promise.allSettled([
+			reconcileArtifactsPushes({
+				env,
+				baseUrl,
+				now: scheduledAt,
+			}),
+			cleanupRepoSessionBranches({
+				env,
+				now: scheduledAt,
+			}),
+		])
+		if (pushesResult.status === 'rejected') throw pushesResult.reason
+		if (cleanupResult.status === 'rejected') throw cleanupResult.reason
 	},
 } satisfies ExportedHandler<Env>
 

@@ -66,6 +66,7 @@ const mockModule = vi.hoisted(() => {
 	return {
 		git,
 		gitState,
+		rawPush: vi.fn(async () => ({ ok: true, refs: {} })),
 		workspaceExists: vi.fn(
 			async (path: string) => path === '/session/.git/config',
 		),
@@ -90,7 +91,6 @@ const mockModule = vi.hoisted(() => {
 		getEntitySourceById: vi.fn(),
 		updateRepoSession: vi.fn(async () => undefined),
 		updateEntitySource: vi.fn(async () => undefined),
-		resolveSessionRepo: vi.fn(),
 		resolveArtifactSourceRepo: vi.fn(),
 		resolveExistingArtifactSourceRepo: vi.fn(),
 		resolveArtifactDefaultBranchHead: vi.fn(async () => ({
@@ -140,19 +140,24 @@ function restoreRepoSessionMockBaseline() {
 	mockModule.updateRepoSession.mockResolvedValue(undefined)
 	mockModule.updateEntitySource.mockResolvedValue(undefined)
 	mockModule.resolveExistingArtifactSourceRepo.mockResolvedValue({
-		fork: vi.fn(async ({ name }: { name: string }) => ({
-			id: 'session-repo-1',
-			name,
+		info: vi.fn(async () => ({
+			id: 'source-repo-id',
+			name: 'source-repo',
 			description: null,
 			defaultBranch: 'main',
-			remote: `https://acct.artifacts.cloudflare.net/git/default/${name}.git`,
-			token: 'art_session_secret?expires=1760000200',
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote:
+				'https://acct.artifacts.cloudflare.net/git/default/source-repo.git',
+		})),
+		createToken: vi.fn(async () => ({
+			id: 'token-source',
+			plaintext: 'art_source_secret?expires=1760000200',
+			scope: 'write',
 			expiresAt: '2026-10-09T08:16:40.000Z',
-			repo: {
-				info: vi.fn(),
-				createToken: vi.fn(),
-				fork: vi.fn(),
-			},
 		})),
 	})
 	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValue({
@@ -175,6 +180,8 @@ function restoreRepoSessionMockBaseline() {
 		},
 	})
 	mockModule.writePublishedSourceSnapshot.mockResolvedValue('snapshot-key')
+	mockModule.rawPush.mockResolvedValue({ ok: true, refs: {} })
+	mockModule.rawPush.mockClear()
 
 	git.clone.mockResolvedValue({ cloned: 'ok', dir: '/session' })
 	git.remote.mockImplementation(
@@ -279,6 +286,16 @@ vi.mock('@cloudflare/shell/git', () => ({
 	createGit: vi.fn(() => mockModule.git),
 }))
 
+vi.mock('isomorphic-git', () => ({
+	default: {
+		push: (...args: Array<unknown>) => mockModule.rawPush(...args),
+	},
+}))
+
+vi.mock('isomorphic-git/http/web', () => ({
+	default: {},
+}))
+
 vi.mock('./repo-sessions.ts', () => ({
 	getRepoSessionById: (...args: Array<unknown>) =>
 		mockModule.getRepoSessionById(...args),
@@ -299,8 +316,6 @@ vi.mock('./artifacts.ts', async () => {
 	const actual = await vi.importActual<Artifacts>('./artifacts.ts')
 	return {
 		...actual,
-		resolveSessionRepo: (...args: Array<unknown>) =>
-			mockModule.resolveSessionRepo(...args),
 		resolveArtifactSourceRepo: (...args: Array<unknown>) =>
 			mockModule.resolveArtifactSourceRepo(...args),
 		resolveExistingArtifactSourceRepo: (...args: Array<unknown>) =>
@@ -360,9 +375,11 @@ function setCommonSessionFixtures() {
 		id: 'session-1',
 		user_id: 'user-1',
 		source_id: 'source-1',
-		session_repo_namespace: 'default',
-		session_repo_name: 'session-repo',
+		source_repo_id: 'source-repo',
+		session_branch: 'sessions/session1',
+		source_branch: 'main',
 		base_commit: 'commit-base',
+		status: 'active',
 		last_checkpoint_commit: 'commit-base',
 	})
 	mockModule.getEntitySourceById.mockResolvedValue({
@@ -373,17 +390,10 @@ function setCommonSessionFixtures() {
 		manifest_path: 'kody.json',
 		source_root: '/',
 	})
-	mockModule.resolveSessionRepo.mockResolvedValue({
-		info: vi.fn(async () => ({
-			remote:
-				'https://acct.artifacts.cloudflare.net/git/default/session-repo.git',
-		})),
-		createToken: vi.fn(async () => ({
-			plaintext: 'art_session_secret?expires=1760000200',
-		})),
-	})
 	mockModule.resolveArtifactSourceRepo.mockResolvedValue({
 		info: vi.fn(async () => ({
+			id: 'source-repo-id',
+			name: 'source-repo',
 			defaultBranch: 'main',
 			remote:
 				'https://acct.artifacts.cloudflare.net/git/default/source-repo.git',
@@ -398,7 +408,7 @@ function setCommonSessionFixtures() {
 	mockModule.gitState.remotes = [
 		{
 			remote: 'origin',
-			url: 'https://acct.artifacts.cloudflare.net/git/default/session-repo.git',
+			url: 'https://acct.artifacts.cloudflare.net/git/default/source-repo.git',
 		},
 	]
 	mockModule.git.pull.mockClear()
@@ -418,7 +428,7 @@ test('rebaseSession and publishSession use Artifacts username/password auth with
 	})
 	expect(mockModule.git.pull).toHaveBeenCalledWith(
 		expect.objectContaining({
-			remote: 'source',
+			remote: 'origin',
 			ref: 'main',
 			username: 'x',
 			password: 'art_source_secret',
@@ -430,9 +440,9 @@ test('rebaseSession and publishSession use Artifacts username/password auth with
 	expect(mockModule.git.push).toHaveBeenCalledWith(
 		expect.objectContaining({
 			remote: 'origin',
-			ref: 'main',
+			ref: 'sessions/session1',
 			username: 'x',
-			password: 'art_session_secret',
+			password: 'art_source_secret',
 		}),
 	)
 	expect(mockModule.git.push).toHaveBeenCalledWith(
@@ -441,28 +451,26 @@ test('rebaseSession and publishSession use Artifacts username/password auth with
 
 	mockModule.git.pull.mockClear()
 	mockModule.git.push.mockClear()
+	mockModule.rawPush.mockClear()
 	await repoSession.publishSession({
 		sessionId: 'session-1',
 		userId: 'user-1',
 		force: true,
 	})
-	expect(mockModule.git.push).toHaveBeenCalledTimes(2)
-	expect(mockModule.git.push).toHaveBeenNthCalledWith(
-		1,
+	expect(mockModule.git.push).toHaveBeenCalledTimes(1)
+	expect(mockModule.git.push).toHaveBeenCalledWith(
 		expect.objectContaining({
 			remote: 'origin',
-			ref: 'main',
-			username: 'x',
-			password: 'art_session_secret',
-		}),
-	)
-	expect(mockModule.git.push).toHaveBeenNthCalledWith(
-		2,
-		expect.objectContaining({
-			remote: 'source',
-			ref: 'main',
+			ref: 'sessions/session1',
 			username: 'x',
 			password: 'art_source_secret',
+		}),
+	)
+	expect(mockModule.rawPush).toHaveBeenCalledWith(
+		expect.objectContaining({
+			remote: 'origin',
+			ref: 'sessions/session1',
+			remoteRef: 'main',
 		}),
 	)
 	for (const call of mockModule.git.push.mock.calls) {
@@ -609,9 +617,11 @@ test('runCommands fetches session metadata after publish side effects', async ()
 		id: 'session-1',
 		user_id: 'user-1',
 		source_id: 'source-1',
-		session_repo_namespace: 'default',
-		session_repo_name: 'session-repo',
+		source_repo_id: 'source-repo',
+		session_branch: 'sessions/session1',
+		source_branch: 'main',
 		base_commit: 'commit-base',
+		status: 'active',
 		last_checkpoint_commit: 'commit-base',
 	})
 	let source = {
@@ -810,42 +820,44 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 	mockModule.getEntitySourceById.mockResolvedValue({
 		id: 'source-1',
 		user_id: 'user-1',
+		entity_kind: 'package',
+		entity_id: 'package-1',
 		repo_id: 'package-event-runner',
 		published_commit: 'commit-base',
+		indexed_commit: 'commit-base',
 		manifest_path: 'package.json',
 		source_root: '/',
+		last_external_check_at: null,
+		created_at: '2026-04-16T00:00:00.000Z',
+		updated_at: '2026-04-16T00:00:00.000Z',
 	})
-	const fork = vi.fn(async ({ name }: { name: string }) => ({
-		id: 'session-repo-1',
-		name,
-		description: null,
+	mockModule.resolveExistingArtifactSourceRepo.mockResolvedValue({
+		info: vi.fn(async () => ({
+			id: 'source-repo-1',
+			name: 'package-event-runner',
+			description: null,
+			defaultBranch: 'main',
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote:
+				'https://acct.artifacts.cloudflare.net/git/default/package-event-runner.git',
+		})),
+		createToken: vi.fn(async () => ({
+			id: 'token-1',
+			plaintext: 'art_source_secret?expires=1760000200',
+			scope: 'write',
+			expiresAt: '2026-10-09T08:16:40.000Z',
+		})),
+	})
+	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValueOnce({
 		defaultBranch: 'main',
-		remote: `https://acct.artifacts.cloudflare.net/git/default/${name}.git`,
-		token: 'art_session_secret?expires=1760000200',
-		expiresAt: '2026-10-09T08:16:40.000Z',
-		repo: {
-			info: vi.fn(async () => ({
-				id: 'session-repo-1',
-				name,
-				description: null,
-				defaultBranch: 'main',
-				createdAt: '2026-04-16T00:00:00.000Z',
-				updatedAt: '2026-04-16T00:00:00.000Z',
-				lastPushAt: null,
-				source: null,
-				readOnly: false,
-				remote: `https://acct.artifacts.cloudflare.net/git/default/${name}.git`,
-			})),
-			createToken: vi.fn(async () => ({
-				id: 'token-1',
-				plaintext: 'art_session_secret?expires=1760000200',
-				scope: 'write',
-				expiresAt: '2026-10-09T08:16:40.000Z',
-			})),
-			fork: vi.fn(),
-		},
-	}))
-	mockModule.resolveArtifactSourceRepo.mockResolvedValue({ fork })
+		commit: 'commit-base',
+		remote:
+			'https://acct.artifacts.cloudflare.net/git/default/package-event-runner.git',
+	})
 	mockModule.git.clone.mockClear()
 
 	const repoSession = new RepoSession(createDurableObjectState(), createEnv())
@@ -857,14 +869,17 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 		baseUrl: 'https://example.com',
 		sourceRoot: '/',
 	})
-	const forkName = fork.mock.calls[0]?.[0]?.name
-	expect(forkName).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
-	expect(forkName).not.toContain(':')
-	expect(forkName.length).toBeLessThanOrEqual(63)
-	expect(opened.session_repo_name).toBe(forkName)
+	expect(opened.session_branch).toMatch(/^sessions\/[a-z0-9]+-[a-f0-9]{32}$/)
+	expect(opened.session_branch).not.toContain(':')
 	expect(mockModule.git.clone).toHaveBeenCalledWith(
 		expect.objectContaining({
-			url: `https://acct.artifacts.cloudflare.net/git/default/${forkName}.git`,
+			url: 'https://acct.artifacts.cloudflare.net/git/default/package-event-runner.git',
+		}),
+	)
+	expect(mockModule.git.push).toHaveBeenCalledWith(
+		expect.objectContaining({
+			remote: 'origin',
+			ref: opened.session_branch,
 		}),
 	)
 
@@ -873,26 +888,43 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 	mockModule.getEntitySourceById.mockResolvedValue({
 		id: 'source-1',
 		user_id: 'user-1',
+		entity_kind: 'package',
+		entity_id: 'package-1',
 		repo_id: 'package-event-runner',
 		published_commit: 'commit-base',
+		indexed_commit: 'commit-base',
 		manifest_path: 'package.json',
 		source_root: '/',
+		last_external_check_at: null,
+		created_at: '2026-04-16T00:00:00.000Z',
+		updated_at: '2026-04-16T00:00:00.000Z',
 	})
-	mockModule.resolveArtifactSourceRepo.mockResolvedValue({
-		fork: vi.fn(async ({ name }: { name: string }) => ({
-			id: 'session-repo-1',
-			name,
+	mockModule.resolveExistingArtifactSourceRepo.mockResolvedValue({
+		info: vi.fn(async () => ({
+			id: 'source-repo-1',
+			name: 'package-event-runner',
 			description: null,
 			defaultBranch: 'main',
-			remote: `https://acct.artifacts.cloudflare.net/git/preview/${name}.git`,
-			token: 'art_session_secret?expires=1760000200',
-			expiresAt: '2026-10-09T08:16:40.000Z',
-			repo: {
-				info: vi.fn(),
-				createToken: vi.fn(),
-				fork: vi.fn(),
-			},
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote:
+				'https://acct.artifacts.cloudflare.net/git/preview/package-event-runner.git',
 		})),
+		createToken: vi.fn(async () => ({
+			id: 'token-1',
+			plaintext: 'art_source_secret?expires=1760000200',
+			scope: 'write',
+			expiresAt: '2026-10-09T08:16:40.000Z',
+		})),
+	})
+	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValueOnce({
+		defaultBranch: 'main',
+		commit: 'commit-base',
+		remote:
+			'https://acct.artifacts.cloudflare.net/git/preview/package-event-runner.git',
 	})
 	vi.mocked(insertRepoSession).mockClear()
 	await new RepoSession(createDurableObjectState(), {
@@ -908,9 +940,30 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 	expect(insertRepoSession).toHaveBeenCalledWith(
 		expect.anything(),
 		expect.objectContaining({
-			session_repo_namespace: 'preview',
+			session_branch: expect.stringMatching(/^sessions\//),
+			source_branch: 'main',
 		}),
 	)
+
+	restoreRepoSessionMockBaseline()
+	mockModule.getRepoSessionById.mockResolvedValue({
+		id: 'discarded-session',
+		user_id: 'user-1',
+		source_id: 'source-1',
+		source_repo_id: 'source-repo',
+		session_branch: 'sessions/discarded',
+		source_branch: 'main',
+		status: 'discarded',
+	})
+	await expect(
+		new RepoSession(createDurableObjectState(), createEnv()).openSession({
+			sessionId: 'discarded-session',
+			sourceId: 'source-1',
+			userId: 'user-1',
+			baseUrl: 'https://example.com',
+			sourceRoot: '/',
+		}),
+	).rejects.toThrow(/is discarded/)
 
 	const packageSource = {
 		id: 'source-1',
@@ -929,9 +982,21 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 	restoreRepoSessionMockBaseline()
 	mockModule.getRepoSessionById.mockResolvedValue(null)
 	mockModule.getEntitySourceById.mockResolvedValue(packageSource)
-	const blockedFork = vi.fn()
 	mockModule.resolveExistingArtifactSourceRepo.mockResolvedValue({
-		fork: blockedFork,
+		info: vi.fn(async () => ({
+			id: 'source-repo-1',
+			name: 'package-package-1',
+			description: null,
+			defaultBranch: 'main',
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote:
+				'https://acct.artifacts.cloudflare.net/git/default/package-package-1.git',
+		})),
+		createToken: vi.fn(),
 	})
 	mockModule.resolveArtifactSourceRepo.mockClear()
 	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValueOnce(null)
@@ -944,7 +1009,6 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 			sourceRoot: '/',
 		}),
 	).rejects.toThrow(/default branch has no HEAD/)
-	expect(blockedFork).not.toHaveBeenCalled()
 	expect(mockModule.resolveArtifactSourceRepo).not.toHaveBeenCalled()
 
 	restoreRepoSessionMockBaseline()
@@ -955,7 +1019,20 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 		indexed_commit: 'commit-published',
 	})
 	mockModule.resolveExistingArtifactSourceRepo.mockResolvedValue({
-		fork: blockedFork,
+		info: vi.fn(async () => ({
+			id: 'source-repo-1',
+			name: 'package-package-1',
+			description: null,
+			defaultBranch: 'main',
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote:
+				'https://acct.artifacts.cloudflare.net/git/default/package-package-1.git',
+		})),
+		createToken: vi.fn(),
 	})
 	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValueOnce({
 		defaultBranch: 'main',
@@ -972,7 +1049,6 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 			sourceRoot: '/',
 		}),
 	).rejects.toThrow(/does not match published commit/)
-	expect(blockedFork).not.toHaveBeenCalled()
 })
 
 test('readFile retries the D1 lookup when the persisted cache is missing and the row is not yet readable', async () => {
@@ -985,9 +1061,9 @@ test('readFile retries the D1 lookup when the persisted cache is missing and the
 		id: 'job-runtime-session-replica-lag',
 		user_id: 'user-1',
 		source_id: 'source-1',
-		session_repo_id: 'session-repo-1',
-		session_repo_name: 'session-repo-name',
-		session_repo_namespace: 'default',
+		source_repo_id: 'source-repo',
+		session_branch: 'sessions/jobruntimesessionreplicalag',
+		source_branch: 'main',
 		base_commit: 'commit-base',
 		source_root: '/',
 		conversation_id: null,
@@ -1020,13 +1096,12 @@ test('readFile retries the D1 lookup when the persisted cache is missing and the
 	mockModule.getEntitySourceById
 		.mockResolvedValueOnce(null)
 		.mockResolvedValueOnce(source)
-	mockModule.resolveSessionRepo.mockResolvedValue({
+	mockModule.resolveArtifactSourceRepo.mockResolvedValue({
 		info: vi.fn(async () => ({
-			remote:
-				'https://acct.artifacts.cloudflare.net/git/default/session-repo-name.git',
+			remote: 'https://acct.artifacts.cloudflare.net/git/default/job-job-1.git',
 		})),
 		createToken: vi.fn(async () => ({
-			plaintext: 'art_session_secret?expires=1760000200',
+			plaintext: 'art_source_secret?expires=1760000200',
 		})),
 	})
 	mockModule.workspaceReadFile.mockResolvedValue('{"version":1,"kind":"job"}')
@@ -1136,9 +1211,11 @@ test('readFile re-reads D1 for updated session rows and falls back when rows are
 		id: 'session-1',
 		user_id: 'user-1',
 		source_id: 'source-1',
-		session_repo_namespace: 'default',
-		session_repo_name: 'session-repo',
+		source_repo_id: 'source-repo',
+		session_branch: 'sessions/session1',
+		source_branch: 'main',
 		base_commit: 'commit-initial',
+		status: 'active',
 		last_checkpoint_commit: 'commit-initial',
 	}
 	const movedSession = {
@@ -1204,19 +1281,23 @@ test('readFile re-reads D1 for updated session rows and falls back when rows are
 		.mockResolvedValueOnce(source)
 		.mockResolvedValueOnce(null)
 	mockModule.resolveArtifactSourceRepo.mockResolvedValue({
-		fork: vi.fn(async ({ name }: { name: string }) => ({
-			id: 'session-repo-1',
-			name,
+		info: vi.fn(async () => ({
+			id: 'job-repo-1',
+			name: 'job-job-1',
 			description: null,
 			defaultBranch: 'main',
-			remote: `https://acct.artifacts.cloudflare.net/git/default/${name}.git`,
-			token: 'art_session_secret?expires=1760000200',
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote: 'https://acct.artifacts.cloudflare.net/git/default/job-job-1.git',
+		})),
+		createToken: vi.fn(async () => ({
+			id: 'token-1',
+			plaintext: 'art_source_secret?expires=1760000200',
+			scope: 'write',
 			expiresAt: '2026-10-09T08:16:40.000Z',
-			repo: {
-				info: vi.fn(),
-				createToken: vi.fn(),
-				fork: vi.fn(),
-			},
 		})),
 	})
 	mockModule.workspaceExists.mockResolvedValue(false)
