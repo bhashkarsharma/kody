@@ -2,7 +2,10 @@ import * as Sentry from '@sentry/cloudflare'
 import { z } from 'zod'
 import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
 import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
-import { getErrorMessage } from '#mcp/capabilities/error-message.ts'
+import {
+	errorCauseChainIncludes,
+	getErrorMessage,
+} from '#mcp/capabilities/error-message.ts'
 import { requireMcpUser } from '#mcp/capabilities/meta/require-user.ts'
 import {
 	getStaticPackageDependentsSummary,
@@ -29,11 +32,12 @@ const inputSchema = z.object({
 const externalPublishRetryDelaysMs = [100, 500] as const
 
 function isTransientDurableObjectResetError(error: unknown) {
-	const message = getErrorMessage(error)
-	return (
-		message.includes('Durable Object exceeded its CPU time limit') ||
-		message.includes("Durable Object's isolate exceeded its memory limit") ||
-		message.includes('Durable Object was reset')
+	return errorCauseChainIncludes(
+		error,
+		(message) =>
+			message.includes('Durable Object exceeded its CPU time limit') ||
+			message.includes("Durable Object's isolate exceeded its memory limit") ||
+			message.includes('Durable Object was reset'),
 	)
 }
 
