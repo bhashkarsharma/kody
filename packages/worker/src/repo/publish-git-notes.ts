@@ -7,7 +7,7 @@ import {
 	buildAuthenticatedArtifactsRemote,
 	resolveArtifactSourceRepo,
 } from './artifacts.ts'
-import { type EntityKind } from './types.ts'
+import { entityKindValues, type EntityKind } from './types.ts'
 
 export const kodyPublishGitNoteVersion = 1 as const
 
@@ -44,6 +44,15 @@ export type KodyPublishGitNote = {
 	checks?: KodyPublishGitNoteChecks | null
 }
 
+type LegacyPublishEntityKind = 'skill' | 'app'
+
+export type ParsedKodyPublishGitNote = Omit<
+	KodyPublishGitNote,
+	'entityKind'
+> & {
+	entityKind: EntityKind | LegacyPublishEntityKind
+}
+
 export const kodyPublishGitNotesRef = 'refs/notes/commits'
 
 export const kodyPublishGitNoteSchema = z.object({
@@ -51,7 +60,7 @@ export const kodyPublishGitNoteSchema = z.object({
 	publishedAt: z.string(),
 	publishedBy: z.enum(['repo_session', 'source_bootstrap', 'external_push']),
 	sourceId: z.string(),
-	entityKind: z.enum(['skill', 'app', 'job', 'package']),
+	entityKind: z.enum(entityKindValues),
 	entityId: z.string(),
 	repoId: z.string(),
 	commit: z.string(),
@@ -75,6 +84,10 @@ export const kodyPublishGitNoteSchema = z.object({
 		})
 		.nullable()
 		.optional(),
+})
+
+export const legacyKodyPublishGitNoteSchema = kodyPublishGitNoteSchema.extend({
+	entityKind: z.enum(['skill', 'app', ...entityKindValues]),
 })
 
 const kodyNoteAuthor = {
@@ -472,11 +485,13 @@ function isMissingPublishGitNoteError(error: unknown) {
 	)
 }
 
-export function parsePublishGitNote(raw: string): KodyPublishGitNote | null {
+export function parsePublishGitNote(
+	raw: string,
+): ParsedKodyPublishGitNote | null {
 	const trimmed = raw.trim()
 	if (!trimmed) return null
 	try {
-		return kodyPublishGitNoteSchema.parse(JSON.parse(trimmed))
+		return legacyKodyPublishGitNoteSchema.parse(JSON.parse(trimmed))
 	} catch {
 		return null
 	}
@@ -490,7 +505,7 @@ export async function readPublishGitNoteFromArtifactsRepo(input: {
 	found: boolean
 	commit: string
 	rawNote: string | null
-	note: KodyPublishGitNote | null
+	note: ParsedKodyPublishGitNote | null
 }> {
 	const repo = await resolveArtifactSourceRepo(input.env, input.repoId)
 	const info = await repo.info()

@@ -633,12 +633,16 @@ async function cleanupArchivedJobArtifacts(input: { env: Env; now?: Date }) {
 						reason: 'source_deleted',
 					})
 				}
-				const deletedRepoCount = await cleanupArtifactReposForSource({
+				const artifactCleanup = await cleanupArtifactReposForSource({
 					env: input.env,
 					userId: artifact.userId,
 					sourceId: source.id,
 				})
-				if (source.repo_id.trim() && deletedRepoCount === 0) {
+				if (
+					source.repo_id.trim() &&
+					artifactCleanup.deleted === 0 &&
+					!artifactCleanup.artifactAccessUnavailable
+				) {
 					throw new Error(
 						`Artifact repo cleanup failed for source ${source.id}.`,
 					)
@@ -713,12 +717,16 @@ async function cleanupAdHocJobSource(input: {
 			reason: 'source_deleted',
 		})
 	}
-	const deletedRepoCount = await cleanupArtifactReposForSource({
+	const artifactCleanup = await cleanupArtifactReposForSource({
 		env: input.env,
 		userId: input.userId,
 		sourceId: source.id,
 	})
-	if (source.repo_id.trim() && deletedRepoCount === 0) {
+	if (
+		source.repo_id.trim() &&
+		artifactCleanup.deleted === 0 &&
+		!artifactCleanup.artifactAccessUnavailable
+	) {
 		throw new Error(`Artifact repo cleanup failed for source ${source.id}.`)
 	}
 	await deletePublishedArtifactsForSource({
@@ -1173,17 +1181,17 @@ export async function deleteJob(input: {
 	if (!row) {
 		throw new Error(`Job "${input.jobId}" was not found.`)
 	}
-	await deleteJobRow(input.env.APP_DB, input.userId, input.jobId)
-	await deleteJobVector(input.env, input.jobId)
-	await syncJobManagerAlarm({
-		env: input.env,
-		userId: input.userId,
-	})
 	await cleanupAdHocJobSource({
 		env: input.env,
 		userId: input.userId,
 		jobId: input.jobId,
 		sourceId: row.record.sourceId,
+	})
+	await deleteJobRow(input.env.APP_DB, input.userId, input.jobId)
+	await deleteJobVector(input.env, input.jobId)
+	await syncJobManagerAlarm({
+		env: input.env,
+		userId: input.userId,
 	})
 	return {
 		id: input.jobId,

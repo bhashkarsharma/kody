@@ -73,7 +73,8 @@ const mockModule = vi.hoisted(() => {
 		workspaceFiles: new Map<string, string>(),
 		workspaceReadFile: vi.fn(
 			async (path: string) =>
-				mockModule.workspaceFiles.get(path) ?? '{"version":1,"kind":"app"}',
+				mockModule.workspaceFiles.get(path) ??
+				'{"version":1,"kind":"job","entrypoint":"src/job.ts"}',
 		),
 		workspaceWriteFile: vi.fn(async () => undefined),
 		workspaceMkdir: vi.fn(async () => undefined),
@@ -123,7 +124,8 @@ function restoreRepoSessionMockBaseline() {
 	mockModule.workspaceExists.mockResolvedValue(false)
 	mockModule.workspaceReadFile.mockImplementation(
 		async (path: string) =>
-			mockModule.workspaceFiles.get(path) ?? '{"version":1,"kind":"app"}',
+			mockModule.workspaceFiles.get(path) ??
+			'{"version":1,"kind":"job","entrypoint":"src/job.ts"}',
 	)
 	mockModule.workspaceWriteFile.mockResolvedValue(undefined)
 	mockModule.workspaceMkdir.mockResolvedValue(undefined)
@@ -628,7 +630,7 @@ test('runCommands fetches session metadata after publish side effects', async ()
 		id: 'source-1',
 		user_id: 'user-1',
 		repo_id: 'source-repo',
-		entity_kind: 'app',
+		entity_kind: 'job',
 		published_commit: 'commit-base',
 		manifest_path: 'kody.json',
 		source_root: '/',
@@ -678,7 +680,7 @@ test('publishSession persists the workspace snapshot to BUNDLE_ARTIFACTS_KV so d
 	] as unknown as Array<{ type: 'file'; path: string }>)
 	mockModule.workspaceReadFile.mockImplementation(async (path: string) => {
 		if (path === '/session/kody.json') {
-			return '{"version":1,"kind":"app"}'
+			return '{"version":1,"kind":"job","entrypoint":"src/job.ts"}'
 		}
 		if (path === '/session/package.json') {
 			return '{"name":"demo","kody":{"id":"demo"}}'
@@ -706,7 +708,7 @@ test('publishSession persists the workspace snapshot to BUNDLE_ARTIFACTS_KV so d
 	expect(snapshotCall.source.id).toBe('source-1')
 	expect(snapshotCall.source.published_commit).toBe('commit-published-new')
 	expect(snapshotCall.files).toEqual({
-		'kody.json': '{"version":1,"kind":"app"}',
+		'kody.json': '{"version":1,"kind":"job","entrypoint":"src/job.ts"}',
 		'package.json': '{"name":"demo","kody":{"id":"demo"}}',
 		'src/index.ts': 'export default {}',
 	})
@@ -736,7 +738,9 @@ test('publishSession handles snapshot collection and persistence failures withou
 	mockModule.workspaceGlob.mockResolvedValue([
 		{ type: 'file', path: '/session/kody.json' },
 	] as unknown as Array<{ type: 'file'; path: string }>)
-	mockModule.workspaceReadFile.mockResolvedValue('{"version":1,"kind":"app"}')
+	mockModule.workspaceReadFile.mockResolvedValue(
+		'{"version":1,"kind":"job","entrypoint":"src/job.ts"}',
+	)
 
 	await expect(
 		new RepoSession(createDurableObjectState(), env).publishSession({
@@ -776,7 +780,9 @@ test('publishSession handles snapshot collection and persistence failures withou
 	mockModule.workspaceGlob.mockResolvedValue([
 		{ type: 'file', path: '/session/kody.json' },
 	] as unknown as Array<{ type: 'file'; path: string }>)
-	mockModule.workspaceReadFile.mockResolvedValue('{"version":1,"kind":"app"}')
+	mockModule.workspaceReadFile.mockResolvedValue(
+		'{"version":1,"kind":"job","entrypoint":"src/job.ts"}',
+	)
 
 	await expect(
 		new RepoSession(createDurableObjectState(), env).publishSession({
@@ -798,7 +804,7 @@ test('publishSession handles snapshot collection and persistence failures withou
 	] as unknown as Array<{ type: 'file'; path: string }>)
 	mockModule.workspaceReadFile.mockImplementation(async (path: string) => {
 		if (path === '/session/kody.json') {
-			return '{"version":1,"kind":"app"}'
+			return '{"version":1,"kind":"job","entrypoint":"src/job.ts"}'
 		}
 		return null
 	})
@@ -882,6 +888,80 @@ test('openSession sanitizes repo names, persists namespace metadata, and rejects
 			ref: opened.session_branch,
 		}),
 	)
+
+	restoreRepoSessionMockBaseline()
+	mockModule.getRepoSessionById.mockResolvedValue(null)
+	mockModule.getEntitySourceById.mockResolvedValue({
+		id: 'source-1',
+		user_id: 'user-1',
+		entity_kind: 'package',
+		entity_id: 'package-1',
+		repo_id: 'package-event-runner',
+		published_commit: 'commit-release',
+		indexed_commit: 'commit-release',
+		manifest_path: 'package.json',
+		source_root: '/',
+		last_external_check_at: null,
+		created_at: '2026-04-16T00:00:00.000Z',
+		updated_at: '2026-04-16T00:00:00.000Z',
+	})
+	mockModule.resolveExistingArtifactSourceRepo.mockResolvedValue({
+		info: vi.fn(async () => ({
+			id: 'source-repo-1',
+			name: 'package-event-runner',
+			description: null,
+			defaultBranch: 'main',
+			createdAt: '2026-04-16T00:00:00.000Z',
+			updatedAt: '2026-04-16T00:00:00.000Z',
+			lastPushAt: null,
+			source: null,
+			readOnly: false,
+			remote:
+				'https://acct.artifacts.cloudflare.net/git/default/package-event-runner.git',
+		})),
+		createToken: vi.fn(async () => ({
+			id: 'token-1',
+			plaintext: 'art_source_secret?expires=1760000200',
+			scope: 'write',
+			expiresAt: '2026-10-09T08:16:40.000Z',
+		})),
+	})
+	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValueOnce({
+		defaultBranch: 'release',
+		commit: 'commit-release',
+		remote:
+			'https://acct.artifacts.cloudflare.net/git/default/package-event-runner.git',
+	})
+	mockModule.resolveArtifactDefaultBranchHead.mockResolvedValueOnce({
+		defaultBranch: 'release',
+		commit: 'commit-release',
+		remote:
+			'https://acct.artifacts.cloudflare.net/git/default/package-event-runner.git',
+	})
+	vi.mocked(insertRepoSession).mockClear()
+	await new RepoSession(createDurableObjectState(), createEnv()).openSession({
+		sessionId: 'session-release-branch',
+		sourceId: 'source-1',
+		userId: 'user-1',
+		baseUrl: 'https://example.com',
+		sourceRoot: '/',
+	})
+	expect(insertRepoSession).toHaveBeenCalledWith(
+		expect.anything(),
+		expect.objectContaining({
+			source_branch: 'release',
+		}),
+	)
+	await expect(
+		new RepoSession(createDurableObjectState(), createEnv()).openSession({
+			sessionId: 'session-conflicting-branch',
+			sourceId: 'source-1',
+			userId: 'user-1',
+			baseUrl: 'https://example.com',
+			sourceRoot: '/',
+			defaultBranch: 'main',
+		}),
+	).rejects.toThrow(/published from "release"/)
 
 	restoreRepoSessionMockBaseline()
 	mockModule.getRepoSessionById.mockResolvedValue(null)
@@ -1153,8 +1233,8 @@ test('publishFromExternalRef checks fast-forward ancestry through shell git adap
 		published_commit: 'commit-old',
 		manifest_path: 'package.json',
 		source_root: '/',
-		entity_kind: 'app',
-		entity_id: 'app-1',
+		entity_kind: 'job',
+		entity_id: 'job-1',
 	})
 	mockModule.git.log.mockResolvedValueOnce([
 		{ oid: 'commit-new' },
