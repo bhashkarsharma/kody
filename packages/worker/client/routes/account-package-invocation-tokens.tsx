@@ -309,7 +309,7 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 		| 'creating'
 		| 'updating'
 		| 'revoking'
-		| 'unrevoking'
+		| 'reinstating'
 		| 'deleting' = 'idle'
 	let email = ''
 	let username = ''
@@ -776,10 +776,10 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 		}
 	}
 
-	async function unrevokeSelectedToken() {
+	async function reinstateSelectedToken() {
 		const tokenId = getCurrentSelectedTokenId()
 		if (!tokenId || saveState !== 'idle') return
-		saveState = 'unrevoking'
+		saveState = 'reinstating'
 		message = null
 		messageTone = 'info'
 		handle.update()
@@ -792,7 +792,7 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 				},
 				credentials: 'include',
 				body: JSON.stringify({
-					action: 'unrevoke',
+					action: 'reinstate',
 					id: tokenId,
 				}),
 			})
@@ -804,12 +804,12 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 				AccountPackageInvocationTokensPayload & { error?: string; ok?: boolean }
 			>(response)
 			if (!response.ok || !payload?.ok) {
-				throw new Error(payload?.error || 'Unable to un-revoke token.')
+				throw new Error(payload?.error || 'Unable to reinstate token.')
 			}
 			mutationVersion += 1
 			applyPayload(payload, buildTokenDetailPath(tokenId))
 			saveState = 'idle'
-			message = 'Un-revoked token.'
+			message = 'Reinstated token.'
 			messageTone = 'info'
 			if (typeof window !== 'undefined') {
 				window.history.pushState(null, '', buildTokenDetailPath(tokenId))
@@ -819,7 +819,7 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 		} catch (error) {
 			saveState = 'idle'
 			message =
-				error instanceof Error ? error.message : 'Unable to un-revoke token.'
+				error instanceof Error ? error.message : 'Unable to reinstate token.'
 			messageTone = 'error'
 			handle.update()
 		}
@@ -1267,62 +1267,81 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 										/>
 									</label>
 
-									<label mix={css(fieldCss)}>
-										<span mix={css(fieldLabelCss)}>Replace raw token</span>
-										<div
-											mix={css({
-												display: 'grid',
-												gridTemplateColumns: 'minmax(0, 1fr) auto auto',
-												gap: spacing.sm,
-												[mq.mobile]: {
-													gridTemplateColumns: '1fr',
-												},
-											})}
-										>
-											<input
-												name="rawToken"
-												type="password"
-												value={editorState.rawToken}
-												placeholder="Leave blank to keep the current token value"
-												autoComplete="off"
-												disabled={isMutating}
-												mix={[
-													on('input', (event) => {
-														setEditorField(
-															'rawToken',
-															event.currentTarget.value,
-														)
-														handle.update()
-													}),
-													css(inputCss),
-												]}
-											/>
-											<button
-												type="button"
-												disabled={isMutating}
-												mix={[
-													on('click', generateEditorRawToken),
-													css(secondaryButtonCss),
-												]}
-											>
-												Generate
-											</button>
-											<button
-												type="button"
-												disabled={isMutating || !editorState.rawToken}
-												mix={[
-													on('click', () => void copyEditorRawToken()),
-													css(secondaryButtonCss),
-												]}
-											>
-												Copy
-											</button>
+									<div
+										mix={css({
+											display: 'grid',
+											gap: spacing.sm,
+											padding: spacing.md,
+											borderRadius: radius.md,
+											border: `1px solid ${colors.border}`,
+											backgroundColor: colors.background,
+										})}
+									>
+										<div mix={css({ display: 'grid', gap: spacing.xs })}>
+											<span mix={css(fieldLabelCss)}>Token value</span>
+											<p mix={css(descriptionCss)}>
+												The current token value is hidden and cannot be
+												recovered. To edit it, enter or generate a new raw token
+												value here, then save.
+											</p>
 										</div>
-										<span mix={css(descriptionCss)}>
-											Paste or generate a new raw token only when rotating this
-											credential. Kody stores only its hash.
-										</span>
-									</label>
+										<label mix={css(fieldCss)}>
+											<span mix={css(fieldLabelCss)}>New raw token value</span>
+											<div
+												mix={css({
+													display: 'grid',
+													gridTemplateColumns: 'minmax(0, 1fr) auto auto',
+													gap: spacing.sm,
+													[mq.mobile]: {
+														gridTemplateColumns: '1fr',
+													},
+												})}
+											>
+												<input
+													name="rawToken"
+													type="password"
+													value={editorState.rawToken}
+													placeholder="Leave blank to keep the current token value"
+													autoComplete="off"
+													disabled={isMutating}
+													mix={[
+														on('input', (event) => {
+															setEditorField(
+																'rawToken',
+																event.currentTarget.value,
+															)
+															handle.update()
+														}),
+														css(inputCss),
+													]}
+												/>
+												<button
+													type="button"
+													disabled={isMutating}
+													mix={[
+														on('click', generateEditorRawToken),
+														css(secondaryButtonCss),
+													]}
+												>
+													Generate
+												</button>
+												<button
+													type="button"
+													disabled={isMutating || !editorState.rawToken}
+													mix={[
+														on('click', () => void copyEditorRawToken()),
+														css(secondaryButtonCss),
+													]}
+												>
+													Copy
+												</button>
+											</div>
+											<span mix={css(descriptionCss)}>
+												Leave this blank to keep the current token value. Kody
+												stores only the hash of any new value.
+											</span>
+										</label>
+									</div>
 
 									<div
 										mix={css({
@@ -1575,14 +1594,14 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 												disabled={isMutating}
 												mix={[
 													on('click', () => {
-														void unrevokeSelectedToken()
+														void reinstateSelectedToken()
 													}),
 													css(secondaryButtonCss),
 												]}
 											>
-												{saveState === 'unrevoking'
-													? 'Un-revoking...'
-													: 'Un-revoke token'}
+												{saveState === 'reinstating'
+													? 'Reinstating...'
+													: 'Reinstate token'}
 											</button>
 										) : (
 											<>
