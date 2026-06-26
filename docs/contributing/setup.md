@@ -148,10 +148,12 @@ Use this script to ensure a known test login exists in any deployed environment:
   - `node tools/seed-test-data.ts --remote --config <wrangler-config-path>`
   - Add `--env <name>` when the config uses environment-scoped bindings and the
     environment is not already set via `CLOUDFLARE_ENV`.
-- Default credentials:
-  - email: `me@kentcdodds.com`
+- Default fixture credentials:
+  - email: `kody@example.com`
   - password: `iliketwix`
-- Override credentials when needed:
+- These credentials are a test fixture only. They are not privileged at runtime
+  and should not be used to describe product behavior.
+- Choose explicit fixture credentials when needed:
   - `node tools/seed-test-data.ts --email <email> --password <password>`
 - When changing DB schema/model definitions or migrations, review
   `tools/seed-test-data.ts` and update it so seeded data matches the new model
