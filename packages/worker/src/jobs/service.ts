@@ -55,6 +55,7 @@ import { runBundledModuleWithRegistry } from '#mcp/run-codemode-registry.ts'
 import {
 	deleteEntitySource,
 	getEntitySourceById,
+	getEntitySourceByIdForUser,
 } from '#worker/repo/entity-sources.ts'
 import { cleanupArtifactReposForSource } from '#worker/repo/artifact-repo-cleanup.ts'
 import { repoSessionRpc } from '#worker/repo/repo-session-do.ts'
@@ -697,10 +698,12 @@ async function cleanupAdHocJobSource(input: {
 	if (!input.sourceId) {
 		return
 	}
-	const source = await getEntitySourceById(input.env.APP_DB, input.sourceId)
+	const source = await getEntitySourceByIdForUser(input.env.APP_DB, {
+		id: input.sourceId,
+		userId: input.userId,
+	})
 	if (
 		!source ||
-		source.user_id !== input.userId ||
 		source.entity_kind !== 'job' ||
 		source.entity_id !== input.jobId
 	) {
@@ -922,6 +925,17 @@ function resolveUpdatedShape(input: {
 	}
 }
 
+function shouldSyncJobSourceForUpdate(body: JobUpdateInput) {
+	return (
+		body.code !== undefined ||
+		body.name !== undefined ||
+		body.schedule !== undefined ||
+		body.timezone !== undefined ||
+		body.sourceId !== undefined ||
+		body.publishedCommit !== undefined
+	)
+}
+
 export async function createJob(input: {
 	env: Env
 	callerContext: McpCallerContext
@@ -1131,19 +1145,21 @@ export async function updateJob(input: {
 				})
 			: existing.nextRunAt,
 	}
-	const syncedPublishedCommit = await syncArtifactSourceSnapshot({
-		env: input.env,
-		userId: callerContext.user.userId,
-		baseUrl: callerContext.baseUrl,
-		sourceId: updated.sourceId,
-		bootstrapAccess: null,
-		files: buildJobSourceFiles({
-			job: toJobView(updated),
-			moduleSource: shape.moduleSource ?? null,
-		}),
-	})
-	if (syncedPublishedCommit) {
-		updated.publishedCommit = syncedPublishedCommit
+	if (shouldSyncJobSourceForUpdate(input.body)) {
+		const syncedPublishedCommit = await syncArtifactSourceSnapshot({
+			env: input.env,
+			userId: callerContext.user.userId,
+			baseUrl: callerContext.baseUrl,
+			sourceId: updated.sourceId,
+			bootstrapAccess: null,
+			files: buildJobSourceFiles({
+				job: toJobView(updated),
+				moduleSource: shape.moduleSource ?? null,
+			}),
+		})
+		if (syncedPublishedCommit) {
+			updated.publishedCommit = syncedPublishedCommit
+		}
 	}
 	const nextCallerContextJson = serializeCallerContext(callerContext)
 	const didUpdate = await updateJobRow({

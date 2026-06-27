@@ -376,6 +376,17 @@ function createDatabase() {
 										row['id'] === params[0] && row['user_id'] === params[1],
 								) as T | null
 							}
+							if (
+								query.includes(
+									'SELECT * FROM entity_sources WHERE id = ? AND user_id = ?',
+								)
+							) {
+								return selectOne(
+									'entity_sources',
+									(row) =>
+										row['id'] === params[0] && row['user_id'] === params[1],
+								) as T | null
+							}
 							if (query.includes('SELECT * FROM entity_sources WHERE id = ?')) {
 								return selectOne(
 									'entity_sources',
@@ -1622,6 +1633,7 @@ test('getJobInspection returns persisted params after a job update', async () =>
 		},
 	})
 
+	repoMockModule.syncArtifactSourceSnapshot.mockClear()
 	const updated = await updateJob({
 		env,
 		callerContext,
@@ -1640,6 +1652,7 @@ test('getJobInspection returns persisted params after a job update', async () =>
 
 	expect(updated.params).toEqual({ bridgeId: 'ZPGI01117' })
 	expect(inspected.job.params).toEqual({ bridgeId: 'ZPGI01117' })
+	expect(repoMockModule.syncArtifactSourceSnapshot).not.toHaveBeenCalled()
 })
 
 test('executeJobOnce binds scheduled jobs to writable storage', async () => {
