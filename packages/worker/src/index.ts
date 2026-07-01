@@ -34,6 +34,7 @@ import {
 	isPackageInvocationApiRequest,
 } from './package-invocations/http.ts'
 import { withCors } from './utils.ts'
+import { isNonProductionRuntime } from '#app/deployment-env.ts'
 import { checkRateLimit, authRateLimitConfig } from '#app/rate-limit.ts'
 import { getRequestIp } from '#app/audit-log.ts'
 import { handleCapabilityReindexRequest } from './capability-maintenance.ts'
@@ -68,6 +69,16 @@ export {
 }
 
 const claudeWidgetDomainSuffix = '.claudemcpcontent.com'
+
+// Credential-accepting POST endpoints share one per-IP auth rate-limit bucket
+// so brute-force attempts cannot fan out across parallel paths (password login,
+// OAuth inline login, password-reset request, and password-reset confirm).
+const rateLimitedAuthPaths = new Set([
+	'/auth',
+	'/oauth/authorize',
+	'/password-reset',
+	'/password-reset/confirm',
+])
 
 function isNamespacedPackageInvocationEndpointPath(pathname: string) {
 	const parts = pathname.split('/').filter(Boolean)
@@ -159,10 +170,7 @@ const appHandler = withCors({
 	async handler(request, env, ctx) {
 		const url = new URL(request.url)
 
-		if (
-			request.method === 'POST' &&
-			(url.pathname === '/auth' || url.pathname === '/password-reset')
-		) {
+		if (request.method === 'POST' && rateLimitedAuthPaths.has(url.pathname)) {
 			const ip = getRequestIp(request) ?? 'unknown'
 			const rateLimitKey = `auth:ip:${ip}`
 			const result = await checkRateLimit(
@@ -275,10 +283,17 @@ const appHandler = withCors({
 		}
 
 		// Dev route: serve generated UI runtime HTML entry for iframe testing.
-		if (
-			url.pathname === '/dev/generated-ui' &&
-			(request.method === 'GET' || request.method === 'HEAD')
-		) {
+		// This runtime executes attacker-authored HTML/JS delivered via
+		// postMessage, so it must never be reachable in production. Return 404
+		// immediately outside non-production so the path can never fall through
+		// to assets or the app router.
+		if (url.pathname === '/dev/generated-ui') {
+			if (
+				!isNonProductionRuntime(env) ||
+				(request.method !== 'GET' && request.method !== 'HEAD')
+			) {
+				return new Response('Not Found', { status: 404 })
+			}
 			const { renderGeneratedUiRuntimeHtmlEntry } =
 				await import('./mcp/apps/generated-ui-runtime-html-entry.ts')
 			const baseUrl = new URL('/', url.origin)
@@ -315,6 +330,11 @@ const oauthProvider = new OAuthProvider({
 	tokenEndpoint: oauthPaths.token,
 	clientRegistrationEndpoint: oauthPaths.register,
 	scopesSupported: oauthScopes,
+	// NOTE: we intentionally do NOT set `allowPlainPKCE: false`. In this provider
+	// version that option rejects EVERY authorize request whose
+	// `code_challenge_method` is absent or `plain` — including confidential
+	// clients that legitimately use no PKCE — which breaks real MCP clients. See
+	// the OAuth section of docs/contributing/security.md before changing this.
 })
 
 /**
