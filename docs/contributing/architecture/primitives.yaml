@@ -1,0 +1,370 @@
+# Kody system primitives map
+#
+# Machine-readable baseline for the visual-recap skill
+# (.agents/skills/visual-recap/SKILL.md). Plan and recap blocks in PR
+# descriptions classify every change against this map:
+#
+#   composes - wires existing primitives together without changing them
+#   extends  - changes the behavior, shape, or contract of a primitive
+#   adds     - introduces a new primitive (update this file in the same PR)
+#
+# Keep this map coarse: one entry per primitive, not per capability or per
+# file. `code` paths are starting points, not exhaustive listings. When a PR
+# adds, removes, or materially reshapes a primitive, update this file as part
+# of that PR so the map never drifts from reality.
+
+version: 1
+
+groups:
+  - id: surfaces
+    name: Entry points
+  - id: auth
+    name: Identity & auth
+  - id: assistant
+    name: User-facing assistant primitives
+  - id: runtime
+    name: Execution runtimes
+  - id: storage
+    name: Storage & infrastructure
+
+primitives:
+  # --- Entry points -------------------------------------------------------
+  - id: app-ui
+    group: surfaces
+    name: Browser app (Remix 3)
+    summary:
+      Server-first Remix 3 UI and app routes (home, auth, account, session,
+      health) served by the Worker.
+    code:
+      - packages/worker/src/app/
+    docs:
+      - docs/contributing/architecture/request-lifecycle.md
+
+  - id: mcp-server
+    group: surfaces
+    name: MCP endpoint (/mcp)
+    summary:
+      OAuth-protected MCP server with a deliberately compact tool surface
+      (search, execute, open_generated_ui, plus package/job/meta tools) hosted
+      in the MCP Durable Object.
+    code:
+      - packages/worker/src/mcp/
+    docs:
+      - docs/contributing/project-intent.md
+      - docs/contributing/adding-capabilities.md
+
+  - id: connector-ingress
+    group: surfaces
+    name: Remote connector ingress
+    summary:
+      Username-scoped WebSocket route /@{username}/connectors/{kind}/{id} that
+      terminates outbound connector sockets in a session Durable Object.
+    code:
+      - packages/worker/src/remote-connector/
+    docs:
+      - docs/contributing/architecture/remote-connectors.md
+
+  - id: scheduled-cron
+    group: surfaces
+    name: Scheduled handler
+    summary:
+      Worker cron entry point (Artifacts push reconcile every five minutes,
+      daily stale-token cleanup, maintenance tasks).
+    code:
+      - packages/worker/src/jobs/reconcile-artifacts-pushes.ts
+      - packages/worker/src/maintenance-handler.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  # --- Identity & auth ----------------------------------------------------
+  - id: app-sessions
+    group: auth
+    name: Browser sessions
+    summary:
+      Signed kody_session cookie auth for browser users; signup gated to
+      non-production runtimes.
+    code:
+      - packages/worker/src/app/auth-session.ts
+      - packages/worker/src/app/handlers/auth.ts
+    docs:
+      - docs/contributing/architecture/authentication.md
+
+  - id: mcp-oauth
+    group: auth
+    name: MCP OAuth
+    summary:
+      '@cloudflare/workers-oauth-provider integration issuing bearer tokens for
+      /mcp; caller identity travels as McpCallerContext props.'
+    code:
+      - packages/worker/src/oauth-handlers.ts
+      - packages/worker/src/mcp-auth.ts
+    docs:
+      - docs/contributing/architecture/authentication.md
+
+  # --- User-facing assistant primitives -----------------------------------
+  - id: capability-registry
+    group: assistant
+    name: Capability registry
+    summary:
+      Builtin capability domains (apps, coding, email, jobs, meta, packages,
+      repo, secrets, services, storage, values) merged with synthesized
+      remote-connector domains behind search/execute.
+    code:
+      - packages/worker/src/mcp/capabilities/
+    docs:
+      - docs/contributing/adding-capabilities.md
+
+  - id: saved-packages
+    group: assistant
+    name: Saved packages
+    summary:
+      Repo-backed packages rooted at package.json; the only top-level persisted
+      primitive. Exports, tags, and surfaces declared under package.json#kody.
+    code:
+      - packages/worker/src/mcp/capabilities/packages/
+      - packages/worker/src/package-registry/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: package-apps
+    group: assistant
+    name: Package apps
+    summary:
+      Optional package-declared UI surfaces opened through open_generated_ui.
+    code:
+      - packages/worker/src/package-runtime/package-app.ts
+    docs:
+      - docs/contributing/mcp-apps-spec-notes.md
+
+  - id: package-services
+    group: assistant
+    name: Package services
+    summary:
+      Long-lived headless package-owned runtimes hosted in the
+      PackageServiceInstance Durable Object.
+    code:
+      - packages/worker/src/package-runtime/package-service.ts
+    docs:
+      - docs/contributing/architecture/request-lifecycle.md
+
+  - id: jobs
+    group: assistant
+    name: Scheduled jobs
+    summary:
+      Repo-backed one-off, interval, and cron jobs; JobManager Durable Object
+      (one per user) dispatches due jobs from D1 metadata.
+    code:
+      - packages/worker/src/jobs/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: workflows
+    group: assistant
+    name: Workflows
+    summary:
+      Shared DynamicCallableWorkflow hub queuing inline-code or saved-package
+      export invocations from every runtime context.
+    code:
+      - packages/worker/src/package-runtime/package-workflows.ts
+    docs:
+      - docs/contributing/architecture/request-lifecycle.md
+
+  - id: values
+    group: assistant
+    name: Values
+    summary:
+      Readable persisted non-secret configuration scoped to user, app, or
+      session.
+    code:
+      - packages/worker/src/mcp/capabilities/values/
+
+  - id: secrets
+    group: assistant
+    name: Secret references
+    summary:
+      Server-side secret references resolved through placeholders at the fetch
+      gateway; raw values never enter prompts or results.
+    code:
+      - packages/worker/src/mcp/capabilities/secrets/
+      - packages/worker/src/security/
+
+  - id: memories
+    group: assistant
+    name: Memories
+    summary:
+      Long-term per-user memories with a verify-first write workflow
+      (meta_memory_verify before upsert or delete).
+    code:
+      - packages/worker/src/mcp/capabilities/meta/
+
+  - id: email
+    group: assistant
+    name: Email
+    summary:
+      Inbox aliases, inbound message storage, and verified outbound send backed
+      by Cloudflare email primitives.
+    code:
+      - packages/worker/src/email/
+      - packages/worker/src/mcp/capabilities/email/
+
+  - id: remote-connectors
+    group: assistant
+    name: Remote connectors
+    summary:
+      Outbound-WebSocket MCP-style tool servers (per user, kind, and instance)
+      surfaced as synthesized capability domains.
+    code:
+      - packages/worker/src/remote-connector/
+    docs:
+      - docs/contributing/architecture/remote-connectors.md
+
+  - id: realtime-sessions
+    group: assistant
+    name: Realtime sessions
+    summary:
+      Kody-managed websocket sessions for package apps hosted in the
+      PackageRealtimeSession Durable Object.
+    code:
+      - packages/worker/src/package-runtime/realtime-session.ts
+
+  - id: chat
+    group: assistant
+    name: Chat threads & agent turns
+    summary:
+      Chat threads with agent turns executed in the AgentTurnRunner Durable
+      Object, keyed by (userId, sessionId).
+    code:
+      - packages/worker/src/app/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: durable-storage
+    group: assistant
+    name: Durable storage buckets
+    summary:
+      Isolated per-storage-id SQLite state in the StorageRunner Durable Object,
+      bindable to execute calls, jobs, and services.
+    code:
+      - packages/worker/src/storage-runner.ts
+      - packages/worker/src/mcp/capabilities/storage/
+
+  # --- Execution runtimes --------------------------------------------------
+  - id: codemode-execute
+    group: runtime
+    name: Codemode execute
+    summary:
+      Sandboxed ESM module execution with the kody:runtime virtual module;
+      per-request runtime isolation via AsyncLocalStorage.
+    code:
+      - packages/worker/src/mcp/execute-modules/
+      - packages/worker/src/mcp/run-codemode-registry.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: package-runtime
+    group: runtime
+    name: Package runtime
+    summary:
+      Module graph, bundle hydration, and loaders powering every saved package
+      surface (exports, apps, jobs, services, subscriptions, workflows).
+    code:
+      - packages/worker/src/package-runtime/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: repo-sessions
+    group: runtime
+    name: Repo sessions
+    summary:
+      RepoSession Durable Object editing forks with constrained git command
+      workflows, repo checks, and the publish transaction.
+    code:
+      - packages/worker/src/repo/
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  # --- Storage & infrastructure --------------------------------------------
+  - id: d1-app-db
+    group: storage
+    name: D1 app database
+    summary:
+      APP_DB relational metadata and projections (users, jobs, entity_sources,
+      saved_packages); never canonical package source.
+    code:
+      - packages/worker/migrations/
+      - packages/worker/src/db.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: artifacts-repos
+    group: storage
+    name: Artifacts repos
+    summary:
+      Cloudflare Artifacts git repos holding the canonical published source for
+      packages, apps, and jobs; reached through the REST API.
+    code:
+      - packages/worker/src/repo/artifacts.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: bundle-artifacts-kv
+    group: storage
+    name: Bundle artifacts KV
+    summary:
+      Published source snapshots and bundle artifacts keyed by source_id plus
+      published commit.
+    code:
+      - packages/worker/src/package-runtime/published-bundle-artifacts.ts
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: vectorize-search
+    group: storage
+    name: Vectorize search
+    summary:
+      Capability and package vector search filtered by userId; offline ranker
+      substitutes in local dev.
+    code:
+      - packages/worker/src/mcp/capabilities/capability-search.ts
+    docs:
+      - docs/contributing/adding-capabilities.md
+
+invariants:
+  - id: per-user-isolation
+    summary:
+      Every read/write path is scoped by userId, every user-owned Durable Object
+      id is user-namespaced, and every search/vector path filters by userId.
+      Cross-user data sharing is a bug.
+    docs:
+      - docs/contributing/project-intent.md
+      - docs/contributing/architecture/data-storage.md
+
+  - id: integration-host-allowlist
+    summary:
+      Any code path that materializes an integration OAuth token must enforce
+      the integration host allowlist before attaching the token to an outbound
+      request.
+    docs:
+      - docs/contributing/architecture/index.md
+
+  - id: canonical-repo-source
+    summary:
+      Published Artifacts repo source is the only canonical source for saved
+      packages, package apps, and jobs; D1 holds metadata and projections only.
+    docs:
+      - docs/contributing/architecture/data-storage.md
+
+  - id: compact-mcp-surface
+    summary:
+      The public MCP tool surface stays small; new functionality lands as
+      capabilities behind search/execute, not as new top-level MCP tools.
+    docs:
+      - docs/contributing/project-intent.md
+
+  - id: no-secrets-in-chat
+    summary:
+      Raw secret values never appear in prompts, chat, execute results, or
+      package app source; credential setup goes through the standard setup
+      pages.
+    docs:
+      - docs/contributing/architecture/data-storage.md

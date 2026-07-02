@@ -17,6 +17,10 @@ to become.
   MCP auth.
 - [Data Storage](./data-storage.md): what is stored in D1, KV, and Durable
   Objects.
+- [Primitives map](./primitives.yaml): machine-readable map of system primitives
+  and invariants, used by the visual-recap skill
+  (`.agents/skills/visual-recap/SKILL.md`) to classify PR risk. Update it in the
+  same PR whenever a primitive is added, removed, or reshaped.
 - [Remote connectors](./remote-connectors.md): generic outbound WebSocket
   protocol, URLs, secrets, and MCP caller context for any `kind` / instance.
 - [Local Agent Bridge Direction](./local-agent-bridge.md): proposed direction

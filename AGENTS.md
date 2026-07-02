@@ -65,6 +65,9 @@ This file is intentionally brief. Detailed instructions live in focused docs:
   - [docs/contributing/architecture/request-lifecycle.md](./docs/contributing/architecture/request-lifecycle.md)
   - [docs/contributing/architecture/authentication.md](./docs/contributing/architecture/authentication.md)
   - [docs/contributing/architecture/data-storage.md](./docs/contributing/architecture/data-storage.md)
+- PR system recaps (visual plan/recap blocks in PR descriptions):
+  - [.agents/skills/visual-recap/SKILL.md](./.agents/skills/visual-recap/SKILL.md)
+  - [docs/contributing/architecture/primitives.yaml](./docs/contributing/architecture/primitives.yaml)
 
 ## Cursor Cloud-specific instructions
 
