@@ -20,6 +20,8 @@ Read in order for a full tour, or jump to a topic.
 - [Mutating actions and confirmations](./mutating-actions.md)
 - [Troubleshooting](./troubleshooting.md)
 - [Memory and conversation context](./memory.md)
+- [Community Project mark](./community-project-mark.md) — logo for unofficial
+  integrations and community-built tools
 
 ## Contributing to these docs
 
