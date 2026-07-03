@@ -4,6 +4,7 @@ import { createAuthCookie, isSecureRequest } from '#app/auth-session.ts'
 import { getRequestIp, logAuditEvent } from '#app/audit-log.ts'
 import { getUniqueConstraintField } from '#app/database-errors.ts'
 import { normalizeEmail } from '#app/normalize-email.ts'
+import { assignUserRole } from '#app/permissions-db.ts'
 import { type routes } from '#app/routes.ts'
 import { getUsernameValidationError, normalizeUsername } from '#app/username.ts'
 import { createDb, usersTable } from '#worker/db.ts'
@@ -238,6 +239,48 @@ export function createAuthHandler(appEnv: AppEnv) {
 						ip: requestIp,
 						path: url.pathname,
 						reason: 'insert_failed',
+					})
+					return Response.json(
+						{ error: 'Unable to create account.' },
+						{ status: 500 },
+					)
+				}
+
+				// INSERT OR IGNORE affects zero rows when the seeded `user` role is
+				// missing (partial migration). Fail loudly rather than creating an
+				// account with no roles or permissions.
+				let assigned = false
+				try {
+					;({ assigned } = await assignUserRole({
+						db: appEnv.APP_DB,
+						userId: record.id,
+						roleName: 'user',
+					}))
+				} catch (error) {
+					console.error('Failed to assign default role at signup:', error)
+				}
+				if (!assigned) {
+					// Remove the just-created user row so the signup can be retried;
+					// otherwise the email/username would be stuck as "already
+					// registered" on an account that has no roles.
+					try {
+						await appEnv.APP_DB.prepare(`DELETE FROM users WHERE id = ?`)
+							.bind(record.id)
+							.run()
+					} catch (error) {
+						console.error(
+							'Failed to remove user row after role assignment failure:',
+							error,
+						)
+					}
+					void logAuditEvent({
+						category: 'auth',
+						action: 'signup',
+						result: 'failure',
+						email: normalizedEmail,
+						ip: requestIp,
+						path: url.pathname,
+						reason: 'default_role_assignment_failed',
 					})
 					return Response.json(
 						{ error: 'Unable to create account.' },

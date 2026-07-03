@@ -3,9 +3,12 @@ import { AccountIntegrationsRoute } from './account-integrations.tsx'
 import { AccountPackageInvocationTokensRoute } from './account-package-invocation-tokens.tsx'
 import { AccountRemoteConnectorsRoute } from './account-remote-connectors.tsx'
 import { AccountSecretsRoute } from './account-secrets.tsx'
+import { AdminRolesRoute } from './admin-roles.tsx'
+import { AdminUsersRoute } from './admin-users.tsx'
 import { ConnectOauthRoute } from './connect-oauth.tsx'
 import { HomeRoute } from './home.tsx'
 import { LoginRoute } from './login.tsx'
+import { PrivacyRoute } from './privacy.tsx'
 import { OAuthAuthorizeRoute } from './oauth-authorize.tsx'
 import { OAuthCallbackRoute } from './oauth-callback.tsx'
 import { ResetPasswordRoute } from './reset-password.tsx'
@@ -29,7 +32,11 @@ export const clientRoutes = {
 	'/account/secrets/user/:secretName': <AccountSecretsRoute />,
 	'/account/secrets/app/:appId/:secretName': <AccountSecretsRoute />,
 	'/account/secrets/session/:sessionId/:secretName': <AccountSecretsRoute />,
+	'/admin': <AdminUsersRoute />,
+	'/admin/users': <AdminUsersRoute />,
+	'/admin/roles': <AdminRolesRoute />,
 	'/login': <LoginRoute />,
+	'/privacy': <PrivacyRoute />,
 	'/signup': <LoginRoute />,
 	'/reset-password': <ResetPasswordRoute />,
 	'/connect/oauth': <ConnectOauthRoute />,

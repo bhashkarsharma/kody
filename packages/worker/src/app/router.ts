@@ -1,4 +1,13 @@
 import { createRouter } from 'remix/router'
+import {
+	createAdminHandler,
+	createAdminUsersApiHandler,
+	createAdminUsersHandler,
+} from '#app/handlers/admin-users.ts'
+import {
+	createAdminRolesApiHandler,
+	createAdminRolesHandler,
+} from '#app/handlers/admin-roles.ts'
 import { account } from '#app/handlers/account.ts'
 import { createAccountDeleteHandler } from '#app/handlers/account-delete.ts'
 import {
@@ -23,6 +32,7 @@ import { createConnectOauthHandler } from '#app/handlers/connect-oauth.ts'
 import { createHealthHandler } from '#app/handlers/health.ts'
 import { home } from '#app/handlers/home.ts'
 import { login } from '#app/handlers/login.ts'
+import { privacy } from '#app/handlers/privacy.ts'
 import { logout } from '#app/handlers/logout.ts'
 import {
 	createPasswordResetConfirmHandler,
@@ -48,6 +58,7 @@ export function createAppRouter(appEnv: AppEnv) {
 			home,
 			health: createHealthHandler(appEnv),
 			login,
+			privacy,
 			signup,
 			account,
 			accountDelete: createAccountDeleteHandler(appEnv as unknown as Env),
@@ -112,6 +123,12 @@ export function createAppRouter(appEnv: AppEnv) {
 			accountSecretsApiPost: createAccountSecretsApiHandler(
 				appEnv as unknown as Env,
 			),
+			admin: createAdminHandler(appEnv as unknown as Env),
+			adminUsers: createAdminUsersHandler(appEnv as unknown as Env),
+			adminUsersApi: createAdminUsersApiHandler(appEnv as unknown as Env),
+			adminUsersApiPost: createAdminUsersApiHandler(appEnv as unknown as Env),
+			adminRoles: createAdminRolesHandler(appEnv as unknown as Env),
+			adminRolesApi: createAdminRolesApiHandler(appEnv as unknown as Env),
 			connectOauth: createConnectOauthHandler(appEnv as unknown as Env),
 			auth: createAuthHandler(appEnv),
 			session: createSessionHandler(appEnv as unknown as Env),

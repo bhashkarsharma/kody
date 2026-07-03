@@ -1,7 +1,12 @@
+import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
 import { fail, runWrangler } from './ci/resource-utils.ts'
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
 import { isExecutedDirectly } from './node-runtime.ts'
+import {
+	getDefaultWranglerConfigPath,
+	resolveWranglerConfigPath,
+} from './wrangler-env-config.ts'
 
 type CliOptions = {
 	email: string
@@ -9,6 +14,7 @@ type CliOptions = {
 	password: string
 	local: boolean
 	remote: boolean
+	admin: boolean
 	env?: string
 	config?: string
 	persistTo?: string
@@ -16,7 +22,10 @@ type CliOptions = {
 
 const defaultTestEmail = 'kody@example.com'
 const defaultTestUsername = 'kody'
-const defaultTestPassword = 'iliketwix'
+const defaultTestPassword = 'ilikecode'
+// Companion non-admin fixture so RBAC flows can be tested from both sides.
+const regularTestEmail = 'jane@example.com'
+const regularTestUsername = 'jane'
 
 export function parseArgs(argv: Array<string>): CliOptions {
 	const options: CliOptions = {
@@ -25,11 +34,13 @@ export function parseArgs(argv: Array<string>): CliOptions {
 		password: defaultTestPassword,
 		local: false,
 		remote: false,
+		admin: false,
 		env: undefined,
 		config: undefined,
 		persistTo: undefined,
 	}
 	let usernameProvided = false
+	let adminProvided = false
 
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index]
@@ -60,6 +71,16 @@ export function parseArgs(argv: Array<string>): CliOptions {
 				options.remote = true
 				break
 			}
+			case '--admin': {
+				adminProvided = true
+				options.admin = true
+				break
+			}
+			case '--no-admin': {
+				adminProvided = true
+				options.admin = false
+				break
+			}
 			case '--env': {
 				options.env = argv[index + 1] ?? ''
 				index += 1
@@ -80,7 +101,7 @@ export function parseArgs(argv: Array<string>): CliOptions {
 					fail(
 						[
 							`Unknown flag: ${arg}`,
-							'Usage: node tools/seed-test-data.ts [--local|--remote] [--env <name>] [--config <path>] [--persist-to <path>] [--email <email>] [--username <username>] [--password <password>]',
+							'Usage: node tools/seed-test-data.ts [--local|--remote] [--admin|--no-admin] [--env <name>] [--config <path>] [--persist-to <path>] [--email <email>] [--username <username>] [--password <password>]',
 						].join('\n'),
 					)
 				}
@@ -103,6 +124,11 @@ export function parseArgs(argv: Array<string>): CliOptions {
 			effectiveEmail === defaultTestEmail
 				? defaultTestUsername
 				: usernameFromEmail(effectiveEmail)
+	}
+	// The default fixture account is an admin so RBAC features are testable
+	// out of the box; custom accounts stay non-admin unless requested.
+	if (!adminProvided) {
+		options.admin = effectiveEmail === defaultTestEmail
 	}
 	if (!options.username) {
 		fail('Missing required --username <username> value.')
@@ -160,15 +186,32 @@ function usernameFromEmail(email: string) {
 	return truncated.length >= 3 ? truncated : `user-${truncated || 'test'}`
 }
 
-function buildSeedSql({
-	email,
-	username,
-	passwordHash,
-}: {
+type SeedAccount = {
 	email: string
 	username: string
 	passwordHash: string
-}) {
+	admin: boolean
+}
+
+function buildAccountSeedSql({
+	email,
+	username,
+	passwordHash,
+	admin,
+}: SeedAccount) {
+	const userRoleSql = `
+INSERT OR IGNORE INTO user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM users u, roles r
+WHERE u.email = ${quoteSql(email)} AND r.name = 'user';`
+	const adminRoleSql = admin
+		? `
+INSERT OR IGNORE INTO user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM users u, roles r
+WHERE u.email = ${quoteSql(email)} AND r.name = 'admin';`
+		: ''
+
 	return `
 INSERT INTO users (username, email, password_hash)
 VALUES (${quoteSql(username)}, ${quoteSql(email)}, ${quoteSql(passwordHash)})
@@ -176,7 +219,21 @@ ON CONFLICT(email) DO UPDATE SET
   username = excluded.username,
   password_hash = excluded.password_hash,
   updated_at = CURRENT_TIMESTAMP;
-`.trim()
+${userRoleSql}${adminRoleSql}`.trim()
+}
+
+export function buildSeedSql(accounts: Array<SeedAccount>) {
+	return accounts.map(buildAccountSeedSql).join('\n')
+}
+
+/**
+ * The companion fixture uses a fixed, public password, so it is seeded for
+ * local development only — never into remote (deployed) environments.
+ */
+export function shouldSeedCompanionAccount(
+	options: Pick<CliOptions, 'local' | 'email'>,
+) {
+	return options.local && options.email !== regularTestEmail
 }
 
 function executeSeedSql(sql: string, options: CliOptions) {
@@ -193,8 +250,11 @@ function executeSeedSql(sql: string, options: CliOptions) {
 	if (options.env) {
 		args.push('--env', options.env)
 	}
-	if (options.config) {
-		args.push('--config', options.config)
+	// Wrangler cannot resolve APP_DB without the worker config; fall back to
+	// the repo default (same behavior as wrangler-env.ts) when none is given.
+	const configPath = options.config ?? getDefaultWranglerConfigPath()
+	if (existsSync(resolveWranglerConfigPath(configPath, process.cwd()))) {
+		args.push('--config', configPath)
 	}
 
 	const result = runWrangler(args)
@@ -206,15 +266,30 @@ function executeSeedSql(sql: string, options: CliOptions) {
 async function main() {
 	const options = parseArgs(process.argv.slice(2))
 	const passwordHash = await createPasswordHash(options.password)
-	const sql = buildSeedSql({
-		email: options.email,
-		username: options.username,
-		passwordHash,
-	})
+	const accounts: Array<SeedAccount> = [
+		{
+			email: options.email,
+			username: options.username,
+			passwordHash,
+			admin: options.admin,
+		},
+	]
+	if (shouldSeedCompanionAccount(options)) {
+		accounts.push({
+			email: regularTestEmail,
+			username: regularTestUsername,
+			passwordHash: await createPasswordHash(defaultTestPassword),
+			admin: false,
+		})
+	}
+	const sql = buildSeedSql(accounts)
 	executeSeedSql(sql, options)
 
+	const primaryLabel = options.admin ? 'admin' : 'regular'
+	const companionSuffix =
+		accounts.length > 1 ? ` + ${accounts.length - 1} regular` : ''
 	console.log(
-		`Seeded test account in D1 (${options.local ? 'local' : 'remote'}): ${options.email}`,
+		`Seeded ${accounts.length} test account${accounts.length > 1 ? 's' : ''} in D1 (${options.local ? 'local' : 'remote'}): 1 ${primaryLabel}${companionSuffix}`,
 	)
 }
 
