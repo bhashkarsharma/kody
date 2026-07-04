@@ -4,6 +4,8 @@ import {
 	getPackageAppEntryPath,
 	parseAuthoredPackageJson,
 } from '#worker/package-registry/manifest.ts'
+import { type AuthoredPackageJson } from '#worker/package-registry/types.ts'
+import { type EntitySourceRow } from '#worker/repo/types.ts'
 import {
 	buildCodemodeFns,
 	type PackageEventTools,
@@ -16,15 +18,16 @@ import {
 } from '#mcp/execute-modules/codemode-utils.ts'
 import {
 	buildKodyAppBundle,
-	createPublishedBundleArtifact,
 	createPublishedPackageAppBundleCacheKey,
 	hydrateKodyRuntimeModules,
 } from './module-graph.ts'
 import { assertPublishedSourceCanRebuildWithoutInstallingDeps } from './published-source-dependencies.ts'
 import {
-	readPublishedBundleArtifact,
-	writePublishedBundleArtifact,
-} from './published-runtime-artifacts.ts'
+	loadPublishedBundleArtifactByIdentity,
+	persistPublishedBundleArtifact,
+} from './published-bundle-artifacts.ts'
+import { PromiseLruCache } from '#worker/package-registry/published-package-cache.ts'
+import { getEntitySourceById } from '#worker/repo/entity-sources.ts'
 import { storageRunnerRpc } from '#worker/storage-runner.ts'
 import { packageRealtimeSessionRpc } from './realtime-session.ts'
 import {
@@ -1079,7 +1082,235 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 	}
 }
 
-export async function buildPackageAppWorker(input: {
+type PackageAppWorkerOptions = Parameters<Env['APP_LOADER']['load']>[0]
+
+type PackageAppWorkerBuild = {
+	workerId: string | null
+	workerOptions: PackageAppWorkerOptions
+}
+
+// Caches the built worker options (bundle lookup + hydration + wrapper), not
+// loader stubs: worker-loader stubs are bound to the request that created them
+// and must be re-acquired per request via APP_LOADER.get/load.
+const packageAppWorkerOptionsCache =
+	new PromiseLruCache<PackageAppWorkerBuild>()
+
+async function createPackageAppWorkerId(input: {
+	cacheKey: string
+	workerOptions: PackageAppWorkerOptions
+}) {
+	const moduleEntries = Object.entries(input.workerOptions.modules ?? {})
+	if (
+		moduleEntries.some(([, moduleValue]) => typeof moduleValue !== 'string')
+	) {
+		// Non-string modules cannot be hashed deterministically; fall back to
+		// one-off loads for those workers.
+		return null
+	}
+	const sortedModuleEntries = [...moduleEntries].sort(([left], [right]) =>
+		left.localeCompare(right),
+	)
+	const digest = await crypto.subtle.digest(
+		'SHA-256',
+		new TextEncoder().encode(
+			JSON.stringify([
+				'package-app-worker@v1',
+				input.cacheKey,
+				input.workerOptions.mainModule,
+				sortedModuleEntries,
+			]),
+		),
+	)
+	const hash = btoa(String.fromCharCode(...new Uint8Array(digest)))
+		.replaceAll('+', '-')
+		.replaceAll('/', '_')
+		.replaceAll('=', '')
+	return `package-app-${hash.slice(0, 43)}`
+}
+
+function createPackageAppWorkerCacheKey(input: {
+	userId: string
+	packageId: string
+	kodyId: string
+	sourceId: string
+	publishedCommit: string | null
+	baseUrl: string
+	callerEmail: string
+	callerDisplayName: string
+}) {
+	if (!input.publishedCommit) {
+		return null
+	}
+	return JSON.stringify([
+		input.userId,
+		input.packageId,
+		input.kodyId,
+		input.sourceId,
+		input.publishedCommit,
+		input.baseUrl,
+		input.callerEmail,
+		input.callerDisplayName,
+	])
+}
+
+function resolvePackageAppManifest(input: {
+	manifest?: AuthoredPackageJson
+	source?: EntitySourceRow
+	sourceFiles?: Record<string, string>
+	savedPackage: {
+		manifestPath: string
+	}
+}) {
+	if (input.manifest) {
+		return input.manifest
+	}
+	const packageJsonContent = input.sourceFiles?.['package.json']
+	if (!packageJsonContent) {
+		throw new Error('Saved package is missing package.json.')
+	}
+	return parseAuthoredPackageJson({
+		content: packageJsonContent,
+		manifestPath:
+			input.source?.manifest_path ?? input.savedPackage.manifestPath,
+	})
+}
+
+async function resolvePersistablePackageSource(input: {
+	env: Env
+	userId: string
+	source?: EntitySourceRow
+	sourceId: string
+}) {
+	if (input.source?.user_id === input.userId && input.source.repo_id) {
+		return input.source
+	}
+	const source = await getEntitySourceById(input.env.APP_DB, input.sourceId)
+	if (!source || source.user_id !== input.userId) {
+		throw new Error(`Saved package source "${input.sourceId}" was not found.`)
+	}
+	return source
+}
+
+async function resolvePackageAppBundledArtifact(input: {
+	env: Env
+	userId: string
+	source?: EntitySourceRow
+	manifest: AuthoredPackageJson
+	savedPackage: {
+		id: string
+		kodyId: string
+		sourceId: string
+		publishedCommit: string | null
+		manifestPath: string
+		sourceRoot: string
+	}
+	loadSourceFiles?: () => Promise<Record<string, string>>
+	sourceFiles?: Record<string, string>
+	baseUrl: string
+}) {
+	const appEntry = getPackageAppEntryPath(input.manifest)
+	if (!appEntry) {
+		throw new Error(
+			`Saved package "${input.savedPackage.kodyId}" does not define kody.app.entry.`,
+		)
+	}
+	const sourceForCache = input.source ?? {
+		id: input.savedPackage.sourceId,
+		published_commit: input.savedPackage.publishedCommit,
+		manifest_path: input.savedPackage.manifestPath,
+		source_root: input.savedPackage.sourceRoot,
+	}
+	const inMemoryCacheKey = createPublishedPackageAppBundleCacheKey({
+		userId: input.userId,
+		source: sourceForCache,
+		entryPoint: appEntry,
+	})
+	if (!input.savedPackage.publishedCommit) {
+		const sourceFiles = await resolvePackageAppSourceFiles(input)
+		assertPublishedSourceCanRebuildWithoutInstallingDeps({
+			sourceFiles,
+			bundleLabel: `Saved package app "${input.savedPackage.kodyId}"`,
+		})
+		return await buildKodyAppBundle({
+			env: input.env,
+			baseUrl: input.baseUrl,
+			userId: input.userId,
+			sourceFiles,
+			entryPoint: appEntry,
+			cacheKey: inMemoryCacheKey,
+		})
+	}
+	const loadedArtifact = await loadPublishedBundleArtifactByIdentity({
+		env: input.env,
+		userId: input.userId,
+		sourceId: input.savedPackage.sourceId,
+		kind: 'app',
+		artifactName: null,
+		entryPoint: appEntry,
+	})
+	if (loadedArtifact?.artifact) {
+		return {
+			mainModule: loadedArtifact.artifact.mainModule,
+			modules: loadedArtifact.artifact.modules,
+			dependencies: loadedArtifact.artifact.dependencies,
+			dynamicDependencies: loadedArtifact.artifact.dynamicDependencies,
+		}
+	}
+	const sourceFiles = await resolvePackageAppSourceFiles(input)
+	assertPublishedSourceCanRebuildWithoutInstallingDeps({
+		sourceFiles,
+		bundleLabel: `Saved package app "${input.savedPackage.kodyId}"`,
+	})
+	const compiled = await buildKodyAppBundle({
+		env: input.env,
+		baseUrl: input.baseUrl,
+		userId: input.userId,
+		sourceFiles,
+		entryPoint: appEntry,
+		cacheKey: inMemoryCacheKey,
+	})
+	const persistableSource = await resolvePersistablePackageSource({
+		env: input.env,
+		userId: input.userId,
+		source: input.source,
+		sourceId: input.savedPackage.sourceId,
+	})
+	await persistPublishedBundleArtifact({
+		env: input.env,
+		userId: input.userId,
+		source: persistableSource,
+		kind: 'app',
+		artifactName: null,
+		entryPoint: appEntry,
+		mainModule: compiled.mainModule,
+		modules: compiled.modules,
+		dependencies: compiled.dependencies,
+		dynamicDependencies: compiled.dynamicDependencies,
+		packageContext: {
+			packageId: input.savedPackage.id,
+			kodyId: input.savedPackage.kodyId,
+			sourceId: input.savedPackage.sourceId,
+		},
+	})
+	return compiled
+}
+
+async function resolvePackageAppSourceFiles(input: {
+	sourceFiles?: Record<string, string>
+	loadSourceFiles?: () => Promise<Record<string, string>>
+}) {
+	if (input.sourceFiles) {
+		return input.sourceFiles
+	}
+	if (!input.loadSourceFiles) {
+		throw new Error(
+			'Saved package source files are required to rebuild the app.',
+		)
+	}
+	return await input.loadSourceFiles()
+}
+
+async function buildPackageAppWorkerOptionsUncached(input: {
 	env: Env
 	baseUrl: string
 	userId: string
@@ -1092,82 +1323,30 @@ export async function buildPackageAppWorker(input: {
 		manifestPath: string
 		sourceRoot: string
 	}
-	sourceFiles: Record<string, string>
+	source?: EntitySourceRow
+	manifest?: AuthoredPackageJson
+	loadSourceFiles?: () => Promise<Record<string, string>>
+	sourceFiles?: Record<string, string>
 	runtime: {
 		callerContext: ReturnType<typeof createMcpCallerContext>
 	}
-}) {
-	const packageJsonContent = input.sourceFiles['package.json']
-	if (!packageJsonContent) {
-		throw new Error('Saved package is missing package.json.')
-	}
-	const manifest = parseAuthoredPackageJson({
-		content: packageJsonContent,
-		manifestPath: 'package.json',
+}): Promise<PackageAppWorkerOptions> {
+	const manifest = resolvePackageAppManifest({
+		manifest: input.manifest,
+		source: input.source,
+		sourceFiles: input.sourceFiles,
+		savedPackage: input.savedPackage,
 	})
-	const appEntry = getPackageAppEntryPath(manifest)
-	if (!appEntry) {
-		throw new Error(
-			`Saved package "${input.savedPackage.kodyId}" does not define kody.app.entry.`,
-		)
-	}
-	const kvKey = createPublishedPackageAppBundleCacheKey({
+	const bundled = await resolvePackageAppBundledArtifact({
+		env: input.env,
+		baseUrl: input.baseUrl,
 		userId: input.userId,
-		source: {
-			id: input.savedPackage.sourceId,
-			published_commit: input.savedPackage.publishedCommit,
-			manifest_path: input.savedPackage.manifestPath,
-			source_root: input.savedPackage.sourceRoot,
-		},
-		entryPoint: appEntry,
+		source: input.source,
+		manifest,
+		savedPackage: input.savedPackage,
+		loadSourceFiles: input.loadSourceFiles,
+		sourceFiles: input.sourceFiles,
 	})
-	const artifact =
-		kvKey != null
-			? await readPublishedBundleArtifact({
-					env: input.env,
-					kvKey,
-				})
-			: null
-	const bundled =
-		artifact ??
-		(await (async () => {
-			assertPublishedSourceCanRebuildWithoutInstallingDeps({
-				sourceFiles: input.sourceFiles,
-				bundleLabel: `Saved package app "${input.savedPackage.kodyId}"`,
-			})
-			const compiled = await buildKodyAppBundle({
-				env: input.env,
-				baseUrl: input.baseUrl,
-				userId: input.userId,
-				sourceFiles: input.sourceFiles,
-				entryPoint: appEntry,
-				cacheKey: kvKey,
-			})
-			if (!input.savedPackage.publishedCommit || kvKey == null) {
-				return compiled
-			}
-			await writePublishedBundleArtifact({
-				env: input.env,
-				artifact: createPublishedBundleArtifact({
-					kind: 'app',
-					artifactName: input.savedPackage.kodyId,
-					sourceId: input.savedPackage.sourceId,
-					publishedCommit: input.savedPackage.publishedCommit,
-					entryPoint: appEntry,
-					mainModule: compiled.mainModule,
-					modules: compiled.modules,
-					dependencies: compiled.dependencies,
-					dynamicDependencies: compiled.dynamicDependencies,
-					packageContext: {
-						packageId: input.savedPackage.id,
-						kodyId: input.savedPackage.kodyId,
-						sourceId: input.savedPackage.sourceId,
-					},
-				}),
-				kvKey,
-			})
-			return compiled
-		})())
 	const mainModule = 'package-app-entry.js'
 	const hydratedModules = await hydrateKodyRuntimeModules({
 		env: input.env,
@@ -1182,50 +1361,106 @@ export async function buildPackageAppWorker(input: {
 		}),
 	}
 	return {
-		// Keep the loader stub per-request because the bound runtime bridge props are
-		// caller-specific (user/package context) and we do not want to risk leaking
-		// request-scoped bindings through a reused stub.
-		stub: input.env.APP_LOADER.load({
-			compatibilityDate: '2026-04-13',
-			compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'],
-			mainModule,
-			modules,
-			env: {
-				[packageAppRuntimeBindingName]: workerExports.PackageAppRuntimeBridge({
-					props: {
-						baseUrl: input.baseUrl,
-						userId: input.userId,
-						email: input.runtime.callerContext.user?.email ?? '',
-						displayName:
-							input.runtime.callerContext.user?.displayName ??
-							`package:${input.savedPackage.id}`,
-						packageId: input.savedPackage.id,
-						kodyId: input.savedPackage.kodyId,
-						sourceId: input.savedPackage.sourceId,
-						publishedCommit: input.savedPackage.publishedCommit,
-					},
-				}),
-				__kodyPackageContext: {
+		compatibilityDate: '2026-04-13',
+		compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'],
+		mainModule,
+		modules,
+		env: {
+			[packageAppRuntimeBindingName]: workerExports.PackageAppRuntimeBridge({
+				props: {
+					baseUrl: input.baseUrl,
+					userId: input.userId,
+					email: input.runtime.callerContext.user?.email ?? '',
+					displayName:
+						input.runtime.callerContext.user?.displayName ??
+						`package:${input.savedPackage.id}`,
 					packageId: input.savedPackage.id,
 					kodyId: input.savedPackage.kodyId,
 					sourceId: input.savedPackage.sourceId,
 					publishedCommit: input.savedPackage.publishedCommit,
 				},
+			}),
+			__kodyPackageContext: {
+				packageId: input.savedPackage.id,
+				kodyId: input.savedPackage.kodyId,
+				sourceId: input.savedPackage.sourceId,
+				publishedCommit: input.savedPackage.publishedCommit,
 			},
-			globalOutbound: workerExports?.CodemodeFetchGateway
-				? workerExports.CodemodeFetchGateway({
-						props: {
-							baseUrl: input.baseUrl,
-							userId: input.userId,
-							storageContext: {
-								sessionId: null,
-								appId: input.savedPackage.id,
-								storageId: input.savedPackage.id,
-							},
+		},
+		globalOutbound: workerExports?.CodemodeFetchGateway
+			? workerExports.CodemodeFetchGateway({
+					props: {
+						baseUrl: input.baseUrl,
+						userId: input.userId,
+						storageContext: {
+							sessionId: null,
+							appId: input.savedPackage.id,
+							storageId: input.savedPackage.id,
 						},
-					})
-				: null,
-		}),
+					},
+				})
+			: null,
+	}
+}
+
+export async function buildPackageAppWorker(input: {
+	env: Env
+	baseUrl: string
+	userId: string
+	savedPackage: {
+		id: string
+		kodyId: string
+		name: string
+		sourceId: string
+		publishedCommit: string | null
+		manifestPath: string
+		sourceRoot: string
+	}
+	source?: EntitySourceRow
+	manifest?: AuthoredPackageJson
+	loadSourceFiles?: () => Promise<Record<string, string>>
+	sourceFiles?: Record<string, string>
+	runtime: {
+		callerContext: ReturnType<typeof createMcpCallerContext>
+	}
+}) {
+	const cacheKey = createPackageAppWorkerCacheKey({
+		userId: input.userId,
+		packageId: input.savedPackage.id,
+		kodyId: input.savedPackage.kodyId,
+		sourceId: input.savedPackage.sourceId,
+		publishedCommit: input.savedPackage.publishedCommit,
+		baseUrl: input.baseUrl,
+		callerEmail: input.runtime.callerContext.user?.email ?? '',
+		callerDisplayName:
+			input.runtime.callerContext.user?.displayName ??
+			`package:${input.savedPackage.id}`,
+	})
+	if (!cacheKey) {
+		return {
+			stub: input.env.APP_LOADER.load(
+				await buildPackageAppWorkerOptionsUncached(input),
+			),
+			entrypointName: packageAppEntrypointName,
+		}
+	}
+	const build = await packageAppWorkerOptionsCache.getOrCreate({
+		cacheKey,
+		create: async () => {
+			const workerOptions = await buildPackageAppWorkerOptionsUncached(input)
+			return {
+				workerId: await createPackageAppWorkerId({ cacheKey, workerOptions }),
+				workerOptions,
+			}
+		},
+	})
+	return {
+		// Stubs are request-bound, so acquire a fresh one per request. The stable
+		// worker id (derived from user + package + commit + caller identity) lets
+		// the loader reuse a warm isolate instead of compiling a new worker.
+		stub: build.workerId
+			? input.env.APP_LOADER.get(build.workerId, () => build.workerOptions)
+			: input.env.APP_LOADER.load(build.workerOptions),
 		entrypointName: packageAppEntrypointName,
 	}
 }

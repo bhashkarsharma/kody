@@ -84,23 +84,28 @@ export async function expandSecretPlaceholders(input: {
 	if (hasReferencedSecrets) {
 		ensureFetchAllowed(input.props)
 	}
-	for (const referenced of referencedSecrets) {
-		const resolved = await resolveSecret({
-			env: input.env,
-			userId: input.props.userId!,
-			name: referenced.name,
-			scope: referenced.scope,
-			storageContext: input.props.storageContext,
-		})
-		if (!resolved.found || typeof resolved.value !== 'string') {
-			throw new Error(createMissingSecretMessage(referenced.name))
-		}
+	const resolvedSecretResults = await Promise.all(
+		referencedSecrets.map(async (referenced) => {
+			const resolved = await resolveSecret({
+				env: input.env,
+				userId: input.props.userId!,
+				name: referenced.name,
+				scope: referenced.scope,
+				storageContext: input.props.storageContext,
+			})
+			if (!resolved.found || typeof resolved.value !== 'string') {
+				throw new Error(createMissingSecretMessage(referenced.name))
+			}
+			return { referenced, resolved, value: resolved.value }
+		}),
+	)
+	for (const { referenced, resolved, value } of resolvedSecretResults) {
 		const placeholder = buildSecretPlaceholder(referenced)
 		if (!replacements.has(placeholder)) {
-			replacements.set(placeholder, resolved.value)
+			replacements.set(placeholder, value)
 		}
 		if (!resolvedValues.has(placeholder)) {
-			resolvedValues.set(placeholder, resolved.value)
+			resolvedValues.set(placeholder, value)
 		}
 		resolvedSecrets.push({ referenced, resolved })
 	}

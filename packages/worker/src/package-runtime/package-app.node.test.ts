@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 async function extractCreatePackageAppWorkerSource() {
 	const sourceText = await readFile(
@@ -123,4 +123,445 @@ test('package app workflows proxy forwards validated input to runtime bridge', a
 		idempotencyKey: 'event-key',
 		params: { eventId: 'event-1' },
 	})
+})
+
+const packageAppRuntimeMock = vi.hoisted(() => ({
+	buildKodyAppBundle: vi.fn(),
+	hydrateKodyRuntimeModules: vi.fn(),
+	loadPublishedBundleArtifactByIdentity: vi.fn(),
+	persistPublishedBundleArtifact: vi.fn(),
+	assertPublishedSourceCanRebuildWithoutInstallingDeps: vi.fn(),
+	getEntitySourceById: vi.fn(),
+	packageAppRuntimeBridge: vi.fn((input: unknown) => input),
+}))
+
+vi.mock('cloudflare:workers', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('cloudflare:workers')>()
+	return {
+		...actual,
+		exports: {
+			...actual.exports,
+			PackageAppRuntimeBridge: packageAppRuntimeMock.packageAppRuntimeBridge,
+		},
+	}
+})
+
+vi.mock('./module-graph.ts', async () => {
+	const actual =
+		await vi.importActual<typeof import('./module-graph.ts')>(
+			'./module-graph.ts',
+		)
+	return {
+		...actual,
+		buildKodyAppBundle: (...args: Array<unknown>) =>
+			packageAppRuntimeMock.buildKodyAppBundle(...args),
+		hydrateKodyRuntimeModules: (...args: Array<unknown>) =>
+			packageAppRuntimeMock.hydrateKodyRuntimeModules(...args),
+	}
+})
+
+vi.mock('./published-bundle-artifacts.ts', async () => {
+	const actual = await vi.importActual<
+		typeof import('./published-bundle-artifacts.ts')
+	>('./published-bundle-artifacts.ts')
+	return {
+		...actual,
+		loadPublishedBundleArtifactByIdentity: (...args: Array<unknown>) =>
+			packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity(...args),
+		persistPublishedBundleArtifact: (...args: Array<unknown>) =>
+			packageAppRuntimeMock.persistPublishedBundleArtifact(...args),
+	}
+})
+
+vi.mock('./published-source-dependencies.ts', () => ({
+	assertPublishedSourceCanRebuildWithoutInstallingDeps: (
+		...args: Array<unknown>
+	) =>
+		packageAppRuntimeMock.assertPublishedSourceCanRebuildWithoutInstallingDeps(
+			...args,
+		),
+}))
+
+vi.mock('#worker/repo/entity-sources.ts', () => ({
+	getEntitySourceById: (...args: Array<unknown>) =>
+		packageAppRuntimeMock.getEntitySourceById(...args),
+}))
+
+function createPackageAppTestSource() {
+	return {
+		id: 'source-1',
+		user_id: 'user-1',
+		entity_kind: 'package' as const,
+		entity_id: 'package-1',
+		repo_id: 'repo-1',
+		published_commit: 'commit-1',
+		indexed_commit: null,
+		manifest_path: 'package.json',
+		source_root: '/',
+		created_at: '2026-04-30T00:00:00.000Z',
+		updated_at: '2026-04-30T00:00:00.000Z',
+	}
+}
+
+function createPackageAppTestManifest() {
+	return {
+		name: '@kody/example',
+		kody: {
+			id: 'example',
+			description: 'Example package',
+			app: {
+				entry: 'app.js',
+			},
+		},
+	}
+}
+
+function createPackageAppTestEnv() {
+	const getEntrypoint = vi.fn(() => ({
+		fetch: vi.fn(async () => new Response('ok')),
+	}))
+	return {
+		env: {
+			APP_DB: {},
+			APP_LOADER: {
+				load: vi.fn(() => ({
+					getEntrypoint,
+				})),
+				get: vi.fn(() => ({
+					getEntrypoint,
+				})),
+			},
+		} as unknown as Env,
+		getEntrypoint,
+	}
+}
+
+function resetPackageAppRuntimeMocks() {
+	packageAppRuntimeMock.buildKodyAppBundle.mockReset()
+	packageAppRuntimeMock.hydrateKodyRuntimeModules.mockReset()
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockReset()
+	packageAppRuntimeMock.persistPublishedBundleArtifact.mockReset()
+	packageAppRuntimeMock.assertPublishedSourceCanRebuildWithoutInstallingDeps.mockReset()
+	packageAppRuntimeMock.getEntitySourceById.mockReset()
+	packageAppRuntimeMock.hydrateKodyRuntimeModules.mockImplementation(
+		async ({ modules }: { modules: Record<string, string> }) => modules,
+	)
+}
+
+const { buildPackageAppWorker } = await import('./package-app.ts')
+
+test('buildPackageAppWorker loads published app artifacts with artifactName null', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockResolvedValue(
+		{
+			row: {
+				id: 'artifact-row-1',
+				artifactName: null,
+				entryPoint: 'app.js',
+			},
+			artifact: {
+				mainModule: 'dist/app.js',
+				modules: {
+					'dist/app.js':
+						'export default { fetch() { return new Response("cached") } }',
+				},
+				dependencies: [],
+				dynamicDependencies: [],
+			},
+		},
+	)
+
+	await buildPackageAppWorker({
+		env,
+		baseUrl: 'https://example.com',
+		userId: 'user-artifact-hit',
+		savedPackage: {
+			id: 'package-artifact-hit',
+			kodyId: 'example-hit',
+			name: '@kody/example-hit',
+			sourceId: 'source-1',
+			publishedCommit: 'commit-1',
+			manifestPath: 'package.json',
+			sourceRoot: '/',
+		},
+		source: createPackageAppTestSource(),
+		manifest: createPackageAppTestManifest(),
+		loadSourceFiles: async () => {
+			throw new Error('full source load should be skipped on artifact hit')
+		},
+		runtime: {
+			callerContext: {
+				user: {
+					userId: 'user-artifact-hit',
+					email: 'artifact-hit@example.com',
+					displayName: 'Artifact Hit User',
+				},
+			},
+		} as never,
+	})
+
+	expect(
+		packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity,
+	).toHaveBeenCalledWith({
+		env,
+		userId: 'user-artifact-hit',
+		sourceId: 'source-1',
+		kind: 'app',
+		artifactName: null,
+		entryPoint: 'app.js',
+	})
+	expect(packageAppRuntimeMock.buildKodyAppBundle).not.toHaveBeenCalled()
+	expect(
+		packageAppRuntimeMock.persistPublishedBundleArtifact,
+	).not.toHaveBeenCalled()
+})
+
+test('buildPackageAppWorker acquires a fresh stub per request while reusing the built worker options', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockResolvedValue(
+		{
+			row: {
+				id: 'artifact-row-1',
+				artifactName: null,
+				entryPoint: 'app.js',
+			},
+			artifact: {
+				mainModule: 'dist/app.js',
+				modules: {
+					'dist/app.js':
+						'export default { fetch() { return new Response("cached") } }',
+				},
+				dependencies: [],
+				dynamicDependencies: [],
+			},
+		},
+	)
+
+	const buildInput = {
+		env,
+		baseUrl: 'https://example.com',
+		userId: 'user-stub-reuse',
+		savedPackage: {
+			id: 'package-stub-reuse',
+			kodyId: 'example-stub-reuse',
+			name: '@kody/example-stub-reuse',
+			sourceId: 'source-1',
+			publishedCommit: 'commit-1',
+			manifestPath: 'package.json',
+			sourceRoot: '/',
+		},
+		source: createPackageAppTestSource(),
+		manifest: createPackageAppTestManifest(),
+		runtime: {
+			callerContext: {
+				user: {
+					userId: 'user-stub-reuse',
+					email: 'stub-reuse@example.com',
+					displayName: 'Stub Reuse User',
+				},
+			},
+		} as never,
+	}
+
+	await buildPackageAppWorker(buildInput)
+	await buildPackageAppWorker(buildInput)
+
+	const loader = env.APP_LOADER as unknown as {
+		get: ReturnType<typeof vi.fn>
+		load: ReturnType<typeof vi.fn>
+	}
+	// The expensive build (artifact lookup + hydration) runs once; each request
+	// still re-acquires a request-bound stub with the same stable worker id.
+	expect(
+		packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity,
+	).toHaveBeenCalledTimes(1)
+	expect(loader.get).toHaveBeenCalledTimes(2)
+	expect(loader.load).not.toHaveBeenCalled()
+	const [firstWorkerId] = loader.get.mock.calls[0] as [string]
+	const [secondWorkerId] = loader.get.mock.calls[1] as [string]
+	expect(firstWorkerId).toBe(secondWorkerId)
+	expect(firstWorkerId).toMatch(/^package-app-/)
+})
+
+test('buildPackageAppWorker persists rebuilt app artifacts with artifactName null', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	const source = createPackageAppTestSource()
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockResolvedValue(
+		null,
+	)
+	packageAppRuntimeMock.buildKodyAppBundle.mockResolvedValue({
+		mainModule: 'dist/app.js',
+		modules: {
+			'dist/app.js':
+				'export default { fetch() { return new Response("fresh") } }',
+		},
+		dependencies: [],
+		dynamicDependencies: [],
+	})
+	packageAppRuntimeMock.persistPublishedBundleArtifact.mockResolvedValue(
+		'bundle-artifact:v1:source-1:commit-1:app:_:app.js',
+	)
+
+	await buildPackageAppWorker({
+		env,
+		baseUrl: 'https://example.com',
+		userId: 'user-1',
+		savedPackage: {
+			id: 'package-persist-miss',
+			kodyId: 'example-miss',
+			name: '@kody/example-miss',
+			sourceId: 'source-1',
+			publishedCommit: 'commit-1',
+			manifestPath: 'package.json',
+			sourceRoot: '/',
+		},
+		source,
+		manifest: createPackageAppTestManifest(),
+		loadSourceFiles: async () => ({
+			'package.json': JSON.stringify(createPackageAppTestManifest()),
+			'app.js':
+				'export default { async fetch() { return new Response("ok") } }',
+		}),
+		runtime: {
+			callerContext: {
+				user: {
+					userId: 'user-1',
+					email: 'persist-miss@example.com',
+					displayName: 'Persist Miss User',
+				},
+			},
+		} as never,
+	})
+
+	expect(packageAppRuntimeMock.getEntitySourceById).not.toHaveBeenCalled()
+	expect(packageAppRuntimeMock.buildKodyAppBundle).toHaveBeenCalledTimes(1)
+	expect(
+		packageAppRuntimeMock.persistPublishedBundleArtifact,
+	).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 'user-1',
+			source,
+			kind: 'app',
+			artifactName: null,
+			entryPoint: 'app.js',
+		}),
+	)
+})
+
+test('buildPackageAppWorker rejects persisting artifacts for a source owned by another user', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	const source = createPackageAppTestSource()
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockResolvedValue(
+		null,
+	)
+	packageAppRuntimeMock.buildKodyAppBundle.mockResolvedValue({
+		mainModule: 'dist/app.js',
+		modules: {
+			'dist/app.js':
+				'export default { fetch() { return new Response("fresh") } }',
+		},
+		dependencies: [],
+		dynamicDependencies: [],
+	})
+	// The pre-resolved source belongs to user-1, so the fast path must be
+	// skipped and the DB lookup (which finds nothing for this user) must fail.
+	packageAppRuntimeMock.getEntitySourceById.mockResolvedValue(null)
+
+	await expect(
+		buildPackageAppWorker({
+			env,
+			baseUrl: 'https://example.com',
+			userId: 'user-other',
+			savedPackage: {
+				id: 'package-other',
+				kodyId: 'example-other',
+				name: '@kody/example-other',
+				sourceId: 'source-1',
+				publishedCommit: 'commit-1',
+				manifestPath: 'package.json',
+				sourceRoot: '/',
+			},
+			source,
+			manifest: createPackageAppTestManifest(),
+			loadSourceFiles: async () => ({
+				'package.json': JSON.stringify(createPackageAppTestManifest()),
+				'app.js':
+					'export default { async fetch() { return new Response("ok") } }',
+			}),
+			runtime: {
+				callerContext: {
+					user: {
+						userId: 'user-other',
+						email: 'other@example.com',
+						displayName: 'Other User',
+					},
+				},
+			} as never,
+		}),
+	).rejects.toThrow('Saved package source "source-1" was not found.')
+
+	expect(packageAppRuntimeMock.getEntitySourceById).toHaveBeenCalledTimes(1)
+	expect(
+		packageAppRuntimeMock.persistPublishedBundleArtifact,
+	).not.toHaveBeenCalled()
+})
+
+test('buildPackageAppWorker skips published artifact lookup when publishedCommit is null', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	const source = {
+		...createPackageAppTestSource(),
+		published_commit: null,
+	}
+	packageAppRuntimeMock.buildKodyAppBundle.mockResolvedValue({
+		mainModule: 'dist/app.js',
+		modules: {
+			'dist/app.js':
+				'export default { fetch() { return new Response("draft") } }',
+		},
+		dependencies: [],
+	})
+
+	await buildPackageAppWorker({
+		env,
+		baseUrl: 'https://example.com',
+		userId: 'user-unpublished',
+		savedPackage: {
+			id: 'package-unpublished',
+			kodyId: 'example-draft',
+			name: '@kody/example-draft',
+			sourceId: 'source-1',
+			publishedCommit: null,
+			manifestPath: 'package.json',
+			sourceRoot: '/',
+		},
+		source,
+		manifest: createPackageAppTestManifest(),
+		loadSourceFiles: async () => ({
+			'package.json': JSON.stringify(createPackageAppTestManifest()),
+			'app.js':
+				'export default { async fetch() { return new Response("ok") } }',
+		}),
+		runtime: {
+			callerContext: {
+				user: {
+					userId: 'user-unpublished',
+					email: 'unpublished@example.com',
+					displayName: 'Unpublished User',
+				},
+			},
+		} as never,
+	})
+
+	expect(
+		packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity,
+	).not.toHaveBeenCalled()
+	expect(
+		packageAppRuntimeMock.persistPublishedBundleArtifact,
+	).not.toHaveBeenCalled()
+	expect(packageAppRuntimeMock.buildKodyAppBundle).toHaveBeenCalledTimes(1)
 })

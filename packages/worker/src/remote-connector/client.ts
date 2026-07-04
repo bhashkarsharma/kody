@@ -1,6 +1,10 @@
 import { type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { userScopedConnectorSessionKey } from '#worker/remote-connector/connector-session-key.ts'
 import {
+	getCachedRemoteConnectorSnapshot,
+	invalidateRemoteConnectorSnapshotCache,
+} from '#worker/remote-connector/snapshot-cache.ts'
+import {
 	type RemoteConnectorSnapshot,
 	type RemoteConnectorToolDescriptor,
 } from './types.ts'
@@ -40,15 +44,31 @@ export function createRemoteConnectorMcpClient(input: {
 }): RemoteConnectorMcpClient {
 	const stub = getSessionStub(input)
 
+	// A failed RPC usually means the connector dropped since the snapshot was
+	// cached, so evict it instead of serving a stale "connected" view for the
+	// rest of the TTL.
+	function invalidateSnapshotOnFailure(error: unknown): never {
+		invalidateRemoteConnectorSnapshotCache(input)
+		throw error
+	}
+
 	return {
 		async listTools() {
-			return stub.rpcListTools()
+			try {
+				return await stub.rpcListTools()
+			} catch (error) {
+				invalidateSnapshotOnFailure(error)
+			}
 		},
 		async callTool(name, args) {
-			return (await stub.rpcCallTool(name, args ?? {})) as CallToolResult
+			try {
+				return (await stub.rpcCallTool(name, args ?? {})) as CallToolResult
+			} catch (error) {
+				invalidateSnapshotOnFailure(error)
+			}
 		},
 		async getSnapshot() {
-			return stub.getSnapshot()
+			return getCachedRemoteConnectorSnapshot(input)
 		},
 	}
 }
