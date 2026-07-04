@@ -1,5 +1,8 @@
 import { type Handle, css } from 'remix/ui'
+import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { on } from '#client/event-mixin.ts'
+import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
+import { readRouterSearch } from '#client/router-location.tsx'
 import {
 	fetchSessionInfo,
 	getSessionDisplayName,
@@ -36,10 +39,12 @@ type OAuthAuthorizeStatus = 'idle' | 'loading' | 'ready' | 'error'
 type OAuthAuthorizeMessage = { type: 'error' | 'info'; text: string }
 type OAuthAuthorizeDecision = 'approve' | 'deny' | 'reset-client'
 
-function getSearchParams() {
-	return typeof window === 'undefined'
-		? new URLSearchParams()
-		: new URLSearchParams(window.location.search)
+function getSearchParams(handle: Handle) {
+	return new URLSearchParams(readRouterSearch(handle))
+}
+
+function isOAuthAuthorizePath(href: string) {
+	return new URL(href, 'http://localhost').pathname === '/oauth/authorize'
 }
 
 export function OAuthAuthorizeRoute(handle: Handle) {
@@ -60,7 +65,7 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 	}
 
 	function readQueryError() {
-		const params = getSearchParams()
+		const params = getSearchParams(handle)
 		const description = params.get('error_description')
 		if (description) return description
 		const error = params.get('error')
@@ -69,7 +74,7 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 
 	async function loadInfo(requestId: number) {
 		try {
-			const query = typeof window === 'undefined' ? '' : window.location.search
+			const query = readRouterSearch(handle)
 			const response = await fetch(`/oauth/authorize-info${query}`, {
 				headers: { Accept: 'application/json' },
 				credentials: 'include',
@@ -117,6 +122,31 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 
 		sessionStatus = 'ready'
 		handle.update()
+	}
+
+	function applyEmbeddedLoaderData(currentHref: string) {
+		if (!isOAuthAuthorizePath(currentHref)) return false
+		const embedded = tryConsumeEmbeddedLoaderData(
+			handle,
+			'oauthAuthorize',
+			currentHref,
+		)
+		if (!embedded) return false
+		if (embedded.ok) {
+			info = {
+				client: embedded.client,
+				scopes: embedded.scopes,
+			}
+			status = 'ready'
+			allowClientReset = false
+			message = null
+		} else {
+			info = null
+			status = 'error'
+			allowClientReset = embedded.allowClientReset
+			message = { type: 'error', text: embedded.error }
+		}
+		return true
 	}
 
 	async function submitDecision(
@@ -199,21 +229,26 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 	}
 
 	return () => {
-		const currentSearch =
-			typeof window === 'undefined' ? '' : window.location.search
-		if (currentSearch !== lastSearch) {
+		const currentHref = readCurrentRouterHref(handle)
+		const currentSearch = readRouterSearch(handle)
+		if (status === 'idle' || currentSearch !== lastSearch) {
 			lastSearch = currentSearch
 			resetCompleted = false
-			allowClientReset = false
-			info = null
-			status = 'loading'
 			const queryError = readQueryError()
-			message = queryError ? { type: 'error', text: queryError } : null
-			activeInfoRequestId += 1
-			void loadInfo(activeInfoRequestId)
+			if (!applyEmbeddedLoaderData(currentHref)) {
+				allowClientReset = false
+				info = null
+				status = 'loading'
+				message = queryError ? { type: 'error', text: queryError } : null
+				activeInfoRequestId += 1
+				const requestId = activeInfoRequestId
+				if (typeof document !== 'undefined') {
+					handle.queueTask(() => loadInfo(requestId))
+				}
+			}
 		}
-		if (sessionStatus === 'idle') {
-			void loadSession()
+		if (sessionStatus === 'idle' && typeof document !== 'undefined') {
+			handle.queueTask(() => loadSession())
 		}
 
 		const clientLabel = info?.client?.name ?? 'Unknown client'

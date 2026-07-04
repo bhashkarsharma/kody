@@ -70,6 +70,19 @@ export {
 
 const claudeWidgetDomainSuffix = '.claudemcpcontent.com'
 
+// Immutable caching is only safe when asset URLs are versioned by a real
+// commit sha. In local dev the build id falls back to a constant ('dev'), so
+// an immutable header would pin browsers to a stale bundle across rebuilds.
+function shouldApplyLongLivedAssetCaching(pathname: string, env: Env) {
+	const commitSha = (env as { APP_COMMIT_SHA?: string }).APP_COMMIT_SHA?.trim()
+	if (!commitSha) return false
+	return (
+		pathname === '/client-entry.js' ||
+		pathname === '/styles.css' ||
+		pathname.startsWith('/assets/')
+	)
+}
+
 // Credential-accepting POST endpoints share one per-IP auth rate-limit bucket
 // so brute-force attempts cannot fan out across parallel paths (password login,
 // OAuth inline login, password-reset request, and password-reset confirm).
@@ -222,7 +235,7 @@ const appHandler = withCors({
 		}
 
 		if (url.pathname === oauthPaths.callback) {
-			return handleOAuthCallback(request)
+			return handleOAuthCallback(request, env)
 		}
 
 		if (url.pathname === '/.well-known/appspecific/com.chrome.devtools.json') {
@@ -274,6 +287,9 @@ const appHandler = withCors({
 			if (assetResponse.status !== 404) {
 				const headers = new Headers(assetResponse.headers)
 				headers.set('Access-Control-Allow-Origin', '*')
+				if (shouldApplyLongLivedAssetCaching(url.pathname, env)) {
+					headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+				}
 				return new Response(assetResponse.body, {
 					status: assetResponse.status,
 					statusText: assetResponse.statusText,
@@ -305,10 +321,22 @@ const appHandler = withCors({
 			})
 		}
 
-		// Try to serve static assets for safe methods only
+		// Try to serve static assets for safe methods only. Any non-404 status
+		// (including 304 Not Modified for conditional requests) must be passed
+		// through; treating 304 as a miss would fall through to the app router
+		// and return 404 for every browser revalidation request.
 		if (env.ASSETS && (request.method === 'GET' || request.method === 'HEAD')) {
 			const response = await env.ASSETS.fetch(request)
-			if (response.ok) {
+			if (response.status !== 404) {
+				if (shouldApplyLongLivedAssetCaching(url.pathname, env)) {
+					const headers = new Headers(response.headers)
+					headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+					return new Response(response.body, {
+						status: response.status,
+						statusText: response.statusText,
+						headers,
+					})
+				}
 				return response
 			}
 		}

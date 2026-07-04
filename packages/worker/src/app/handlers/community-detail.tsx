@@ -1,16 +1,21 @@
+/** @jsxImportSource remix/ui */
+/** @jsxRuntime automatic */
+import { type RemixNode } from 'remix/ui'
 import { z } from 'zod'
 import { type Action } from 'remix/router'
 import { getAppBaseUrl } from '#app/app-base-url.ts'
-import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import {
-	buildCommunityDetailOgHead,
-	buildForkPrompt,
-	toPublicCommunityListing,
 	truncateCommunityText,
+	toPublicCommunityListing,
 } from '#app/community-public.ts'
-import { Layout } from '#app/layout.ts'
-import { render } from '#app/render.ts'
+import { loadCommunityDetailData } from '#app/community-data.ts'
+import { CommunityDetailOgHead } from '#app/ssr-document.tsx'
+import { handleFrameRequest } from '#app/frame-registry.ts'
+import '#app/frame-registrations.ts'
+import { renderAppPage } from '#app/ssr-render.tsx'
 import { type routes } from '#app/routes.ts'
+import { getRequestDataCacheLookup } from '#app/request-cache.ts'
+import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import { CommunityActionError } from '#worker/community/errors.ts'
 import { renderCommunityOgImage } from '#worker/community/og-image.ts'
 import {
@@ -29,13 +34,20 @@ export function createCommunityDetailHandler(env: Env) {
 		middleware: [],
 		async handler({ request, params }) {
 			const listingId = params.listingId
-			const listing = await getCommunityListingWithAggregates({
+			const frameResponse = await handleFrameRequest(
+				request,
 				env,
-				listingId,
-				includeDelisted: false,
-			})
-			if (!listing) {
-				return render(Layout({ title: 'Community package not found' }), {
+				new URL(request.url).pathname,
+			)
+			if (frameResponse) return frameResponse
+
+			const detail = await loadCommunityDetailData(env, request, listingId)
+			if (!detail) {
+				return renderAppPage({
+					request,
+					env,
+					title: 'Community package not found',
+					notFound: true,
 					status: 404,
 				})
 			}
@@ -43,20 +55,34 @@ export function createCommunityDetailHandler(env: Env) {
 			const origin = getAppBaseUrl({ env, requestUrl: request.url })
 			const canonicalUrl = `${origin}/community/${listingId}`
 			const ogImageUrl = `${canonicalUrl}/og.png`
-			const pageTitle = `${listing.name} — Kody community package`
-			const ogDescription = truncateCommunityText(listing.description, 200)
-
-			return render(
-				Layout({
-					title: pageTitle,
-					head: buildCommunityDetailOgHead({
-						title: pageTitle,
-						description: ogDescription,
-						canonicalUrl,
-						ogImageUrl,
-					}),
-				}),
+			const pageTitle = `${detail.listing.name} — Kody community package`
+			const ogDescription = truncateCommunityText(
+				detail.listing.description,
+				200,
 			)
+
+			return renderAppPage({
+				request,
+				env,
+				title: pageTitle,
+				extraHead: (
+					<CommunityDetailOgHead
+						title={pageTitle}
+						description={ogDescription}
+						canonicalUrl={canonicalUrl}
+						ogImageUrl={ogImageUrl}
+					/>
+				) as RemixNode,
+				loaderData: {
+					communityDetailShell: {
+						ok: true,
+						listingId,
+						forkPrompt: detail.forkPrompt,
+						loggedIn: detail.loggedIn,
+						readmeContent: detail.listing.readmeContent,
+					},
+				},
+			})
 		},
 	} satisfies Action<typeof routes.communityDetail>
 }
@@ -66,28 +92,16 @@ export function createCommunityDetailApiHandler(env: Env) {
 		middleware: [],
 		async handler({ request, params }) {
 			const listingId = params.listingId
-			const listing = await getCommunityListingWithAggregates({
-				env,
-				listingId,
-				includeDelisted: false,
-			})
-			if (!listing) {
+			const detail = await loadCommunityDetailData(env, request, listingId)
+			if (!detail) {
 				return jsonResponse(
+					request,
 					{ ok: false, error: 'Community listing not found.' },
 					404,
 				)
 			}
 
-			const user = await readAuthenticatedAppUser(request, env)
-			return jsonResponse({
-				ok: true,
-				listing: toPublicCommunityListing(listing),
-				loggedIn: Boolean(user),
-				forkPrompt: buildForkPrompt({
-					name: listing.name,
-					listingId: listing.id,
-				}),
-			})
+			return jsonResponse(request, detail)
 		},
 	} satisfies Action<typeof routes.communityDetailApi>
 }
@@ -132,17 +146,25 @@ export function createCommunityReportApiPostHandler(env: Env) {
 		middleware: [],
 		async handler({ request, params }) {
 			if (request.method !== 'POST') {
-				return jsonResponse({ ok: false, error: 'Method not allowed.' }, 405)
+				return jsonResponse(
+					request,
+					{ ok: false, error: 'Method not allowed.' },
+					405,
+				)
 			}
 
 			const user = await readAuthenticatedAppUser(request, env)
 			if (!user) {
-				return jsonResponse({ ok: false, error: 'Unauthorized.' }, 401)
+				return jsonResponse(request, { ok: false, error: 'Unauthorized.' }, 401)
 			}
 
 			const body = await request.json().catch(() => null)
 			if (!body || typeof body !== 'object') {
-				return jsonResponse({ ok: false, error: 'Invalid request body.' }, 400)
+				return jsonResponse(
+					request,
+					{ ok: false, error: 'Invalid request body.' },
+					400,
+				)
 			}
 
 			const parsedReason = reportReasonSchema.safeParse(
@@ -150,6 +172,7 @@ export function createCommunityReportApiPostHandler(env: Env) {
 			)
 			if (!parsedReason.success) {
 				return jsonResponse(
+					request,
 					{
 						ok: false,
 						error:
@@ -166,13 +189,14 @@ export function createCommunityReportApiPostHandler(env: Env) {
 					listingId: params.listingId,
 					reason: parsedReason.data,
 				})
-				return jsonResponse({ ok: true })
+				return jsonResponse(request, { ok: true })
 			} catch (error) {
 				if (error instanceof CommunityActionError) {
-					return jsonResponse({ ok: false, error: error.message }, 400)
+					return jsonResponse(request, { ok: false, error: error.message }, 400)
 				}
 				console.error('Community report submission failed:', error)
 				return jsonResponse(
+					request,
 					{ ok: false, error: 'Unable to submit report.' },
 					500,
 				)
@@ -181,12 +205,22 @@ export function createCommunityReportApiPostHandler(env: Env) {
 	} satisfies Action<typeof routes.communityReportApiPost>
 }
 
-function jsonResponse(body: Record<string, unknown>, status = 200) {
+function jsonResponse(
+	request: Request,
+	body: Record<string, unknown>,
+	status = 200,
+) {
+	const headers: Record<string, string> = {
+		'Cache-Control': 'no-store',
+		'Content-Type': 'application/json; charset=utf-8',
+	}
+	const cacheLookup = getRequestDataCacheLookup(request)
+	if (cacheLookup) {
+		headers['X-Kody-Cache'] = cacheLookup
+	}
+
 	return new Response(JSON.stringify(body), {
 		status,
-		headers: {
-			'Cache-Control': 'no-store',
-			'Content-Type': 'application/json; charset=utf-8',
-		},
+		headers,
 	})
 }

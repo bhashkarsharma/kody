@@ -1,5 +1,10 @@
 import { type Handle, css } from 'remix/ui'
 import { on } from '#client/event-mixin.ts'
+import {
+	listenToRouterNavigation,
+	readCurrentRouterHref,
+} from '#client/client-router.tsx'
+import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import {
 	cardCss,
@@ -12,6 +17,7 @@ import {
 	mutedLinkCss,
 	primaryLinkCss,
 } from '#client/styles/style-primitives.ts'
+import { queueSessionRefresh } from '#client/session.ts'
 import {
 	type AccountStatus,
 	accountProfileApiPath,
@@ -22,26 +28,27 @@ type AccountProfilePayload = {
 	ok: true
 	email: string
 	username: string
+	displayName: string
 }
 
-type SaveStatus = 'idle' | 'saving'
-type MessageTone = 'error' | 'info'
+function isAccountPath(href: string) {
+	return new URL(href, 'http://localhost').pathname === '/account'
+}
 
 export function AccountRoute(handle: Handle) {
 	let status: AccountStatus = 'loading'
-	let saveStatus: SaveStatus = 'idle'
+	let saveStatus: 'idle' | 'saving' = 'idle'
 	let email = ''
 	let username = ''
 	let draftUsername = ''
 	let message: string | null = null
-	let messageTone: MessageTone = 'info'
+	let messageTone: 'error' | 'info' = 'info'
 	let lastLoadedHref = ''
 
 	async function loadAccountProfile(signal: AbortSignal) {
 		try {
-			const href =
-				typeof window === 'undefined' ? '/account' : window.location.href
-			const search = typeof window === 'undefined' ? '' : new URL(href).search
+			const href = readCurrentRouterHref(handle)
+			const search = new URL(href, 'http://localhost').search
 			lastLoadedHref = href
 			const response = await fetch(`${accountProfileApiPath}${search}`, {
 				headers: { Accept: 'application/json' },
@@ -120,6 +127,7 @@ export function AccountRoute(handle: Handle) {
 			draftUsername = payload.username
 			message = 'Username saved.'
 			messageTone = 'info'
+			queueSessionRefresh()
 		} catch (error) {
 			message =
 				error instanceof Error ? error.message : 'Unable to save username.'
@@ -130,13 +138,43 @@ export function AccountRoute(handle: Handle) {
 		}
 	}
 
+	listenToRouterNavigation(handle, () => {
+		const href = readCurrentRouterHref(handle)
+		if (href !== lastLoadedHref && status !== 'loading') {
+			status = 'loading'
+			handle.update()
+		}
+	})
+
+	function applyEmbeddedLoaderData(href: string) {
+		if (!isAccountPath(href)) return false
+		const embedded = tryConsumeEmbeddedLoaderData(
+			handle,
+			'accountProfile',
+			href,
+		)
+		if (!embedded) return false
+		email = embedded.email
+		username = embedded.username
+		draftUsername = embedded.username
+		status = 'ready'
+		message = null
+		messageTone = 'info'
+		lastLoadedHref = href
+		return true
+	}
+
 	return () => {
-		const currentHref =
-			typeof window === 'undefined' ? '/account' : window.location.href
+		const currentHref = readCurrentRouterHref(handle)
 		const isRefreshingForLocationChange =
 			status !== 'loading' && currentHref !== lastLoadedHref
 		if (status === 'loading' || isRefreshingForLocationChange) {
-			handle.queueTask(loadAccountProfile)
+			if (
+				!applyEmbeddedLoaderData(currentHref) &&
+				typeof document !== 'undefined'
+			) {
+				handle.queueTask(loadAccountProfile)
+			}
 		}
 		const isSaving = saveStatus === 'saving'
 		const normalizedDraftUsername = draftUsername.trim().toLowerCase()

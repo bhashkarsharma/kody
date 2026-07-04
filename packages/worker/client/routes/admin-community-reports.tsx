@@ -1,6 +1,11 @@
 import { type Handle, css } from 'remix/ui'
 import { on } from '#client/event-mixin.ts'
-import { listenToRouterNavigation } from '#client/client-router.tsx'
+import {
+	listenToRouterNavigation,
+	readCurrentRouterHref,
+} from '#client/client-router.tsx'
+import { readRouterSearch } from '#client/router-location.tsx'
+import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import {
@@ -17,27 +22,10 @@ import {
 	AccountManagementMessage,
 	AccountManagementShell,
 } from './account-management-components.tsx'
+import { type AdminCommunityReportsLoaderData } from '#app/loader-data.ts'
 
-type ReportStatus = 'open' | 'resolved' | 'dismissed'
-
-type AdminCommunityReportListItem = {
-	id: string
-	listingId: string
-	listingName: string
-	listingOwnerUserId: string
-	reporterUserId: string
-	reason: string
-	status: ReportStatus
-	createdAt: string
-	resolvedAt: string | null
-	resolutionNote: string | null
-}
-
-type AdminCommunityReportsPayload = {
-	ok: true
-	reports: Array<AdminCommunityReportListItem>
-	statusFilter: string
-}
+type AdminCommunityReportListItem =
+	AdminCommunityReportsLoaderData['reports'][number]
 
 type PageStatus = 'loading' | 'ready' | 'error'
 type ReportIntent =
@@ -56,18 +44,18 @@ const statusOptions = [
 	{ value: 'all', label: 'All' },
 ] as const
 
-function getCurrentHref() {
-	return typeof window === 'undefined'
-		? '/admin/community-reports'
-		: window.location.href
+function isAdminCommunityReportsPath(href: string) {
+	return (
+		new URL(href, 'http://localhost').pathname === '/admin/community-reports'
+	)
 }
 
 function formatTimestamp(value: string) {
 	return new Date(value).toLocaleString()
 }
 
-function buildReportsHref(status: string) {
-	const url = new URL(getCurrentHref(), 'http://localhost')
+function buildReportsHref(handle: Handle, status: string) {
+	const url = new URL(readCurrentRouterHref(handle), 'http://localhost')
 	if (status === 'open') url.searchParams.delete('status')
 	else url.searchParams.set('status', status)
 	return `${url.pathname}${url.search}`
@@ -83,6 +71,8 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 	let pendingDoubleCheckKey: string | null = null
 	let loadRequestId = 0
 	let lastLoadedHref = ''
+	let loadingForHref: string | null = null
+	let lastFailedHref: string | null = null
 
 	function getDoubleCheckKey(reportId: string, intent: ReportIntent) {
 		return `${reportId}:${intent}`
@@ -128,11 +118,12 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 	}
 
 	async function loadReports() {
-		const href = getCurrentHref()
+		const href = readCurrentRouterHref(handle)
+		loadingForHref = href
 		const requestId = ++loadRequestId
 		try {
 			const response = await fetch(
-				`${adminCommunityReportsApiPath}${new URL(href).search}`,
+				`${adminCommunityReportsApiPath}${readRouterSearch(handle)}`,
 				{
 					headers: { Accept: 'application/json' },
 					credentials: 'include',
@@ -146,10 +137,11 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 			if (response.status === 403) {
 				status = 'error'
 				message = 'You do not have permission to view community reports.'
+				lastFailedHref = href
 				handle.update()
 				return
 			}
-			const payload = await readJson<AdminCommunityReportsPayload>(response)
+			const payload = await readJson<AdminCommunityReportsLoaderData>(response)
 			if (!response.ok || !payload?.ok) {
 				throw new Error('Unable to load community reports.')
 			}
@@ -158,6 +150,7 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 			status = 'ready'
 			message = null
 			lastLoadedHref = href
+			lastFailedHref = null
 			handle.update()
 		} catch (error) {
 			if (requestId !== loadRequestId) return
@@ -166,7 +159,10 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 				error instanceof Error
 					? error.message
 					: 'Unable to load community reports.'
+			lastFailedHref = href
 			handle.update()
+		} finally {
+			if (requestId === loadRequestId) loadingForHref = null
 		}
 	}
 
@@ -206,22 +202,47 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 	}
 
 	listenToRouterNavigation(handle, () => {
-		const href = getCurrentHref()
+		const href = readCurrentRouterHref(handle)
 		if (href !== lastLoadedHref) {
 			status = 'loading'
+			lastFailedHref = null
 			handle.update()
 		}
 	})
+
+	function applyEmbeddedLoaderData(href: string) {
+		if (!isAdminCommunityReportsPath(href)) return false
+		const embedded = tryConsumeEmbeddedLoaderData(
+			handle,
+			'adminCommunityReports',
+			href,
+		)
+		if (!embedded) return false
+		reports = embedded.reports
+		statusFilter = embedded.statusFilter
+		status = 'ready'
+		message = null
+		lastLoadedHref = href
+		return true
+	}
 
 	const secondaryButtonCss = getSecondaryButtonCss()
 	const dangerButtonCss = getDangerButtonCss()
 
 	return () => {
-		const currentHref = getCurrentHref()
+		const currentHref = readCurrentRouterHref(handle)
 		const isMutating = actionState !== 'idle'
 
-		if (status === 'loading' || currentHref !== lastLoadedHref) {
-			handle.queueTask(loadReports)
+		const needsLoad =
+			(status === 'loading' || currentHref !== lastLoadedHref) &&
+			currentHref !== lastFailedHref &&
+			loadingForHref !== currentHref
+		if (needsLoad && !applyEmbeddedLoaderData(currentHref)) {
+			if (typeof document !== 'undefined') {
+				status = 'loading'
+				loadingForHref = currentHref
+				handle.queueTask(loadReports)
+			}
 		}
 
 		return (
@@ -251,7 +272,7 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 					{statusOptions.map((option) => (
 						<a
 							key={option.value}
-							href={buildReportsHref(option.value)}
+							href={buildReportsHref(handle, option.value)}
 							aria-current={statusFilter === option.value ? 'page' : undefined}
 							mix={css({
 								...secondaryButtonCss,
@@ -286,7 +307,7 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 					{status === 'ready' && reports.length === 0 ? (
 						<p mix={css(descriptionCss)}>No reports in this view.</p>
 					) : null}
-					{status === 'ready' && currentHref === lastLoadedHref
+					{status === 'ready'
 						? reports.map((report) => (
 								<article key={report.id} mix={css(cardCss)}>
 									<h2
