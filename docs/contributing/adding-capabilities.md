@@ -121,9 +121,9 @@ export const exampleAdminCapability = defineDomainCapability(
 The registry filters role-gated capabilities from `search`,
 `meta_list_capabilities`, and MCP server domain instructions for callers who do
 not satisfy the requirement. This filtering is UX only; execute-time checks are
-the security boundary. The codemode wrapper and normalized capability handler
-also reject unauthorized calls, even if a test or internal caller accidentally
-passes an unfiltered registry.
+the security boundary. The kody wrapper and normalized capability handler also
+reject unauthorized calls, even if a test or internal caller accidentally passes
+an unfiltered registry.
 
 Role and permission checks use the authenticated MCP caller context for the
 current request. Do **not** cache role or permission decisions into Vectorize
@@ -400,6 +400,43 @@ Use filename suffixes to choose the Vitest project:
 ## Naming
 
 - Use snake_case capability names.
-- Keep names action-oriented and specific.
-- Add a domain prefix only when it prevents ambiguity.
-- Avoid introducing new public MCP tool names for individual capabilities.
+- Prefer `<domain>_<noun>_<verb>` or `<domain>_<verb>` names for new kody. Keep
+  the domain prefix unless the capability is one of the intentionally tiny
+  public/meta primitives (`search`, `execute`) where the short name is already
+  part of the contract.
+- Keep names action-oriented, specific, and boring. Avoid temporary project
+  names, implementation details, brand names, or current product UI labels
+  unless those terms are the stable user-facing concept forever.
+- Use singular nouns for single-entity operations (`package_get`) and plural
+  nouns only when the object being manipulated is itself plural.
+- Before open signup, fix bad names directly while Kent is the only user and can
+  manually update saved packages, jobs, and secret allowlists. After real users
+  exist, treat capability names as persisted contracts.
+- Avoid introducing new public MCP tool names for individual kody.
+
+## Compatibility and versioning policy
+
+Capability names, input field names, output field names, domain ids, and
+remote-connector synthesized names are compatibility contracts once real users
+can reference them. Treat every change as if it might affect saved user code.
+This policy is for the post-cleanup, pre-open-signup line in the sand; do not
+add alias/deprecation machinery for the current Kent-only cleanup.
+
+- Inputs are additive-only. Add optional fields first; never make an existing
+  optional field required for an existing capability name.
+- Outputs are additive-only. Never remove or rename an output field, even if the
+  field looks awkward or inconsistently cased.
+- Capability renames after open signup need an explicit compatibility plan
+  before implementation. Do not straddle old and new names during the current
+  cleanup.
+- Raw JSON Schema inputs are an escape hatch. If a capability cannot use Zod,
+  the handler must validate the args explicitly before reading them.
+- Remote connector capability entity ids use `remote:<name>:<tool>` (for example
+  `remote:home:set_pin`). In execute/runtime code, remote capabilities are not
+  flat functions. Use `kody.remote["<name>"].<tool>(input)`, for example
+  `kody.remote["home"].set_pin({ pin })`.
+- Remote connector descriptions, keywords, schemas, and annotations cross a
+  trust boundary from the connector into Kody search and execute. Keep them
+  concise, non-secret, and stable; Kody records connector provenance on
+  synthesized capability metadata so hosts and logs can distinguish built-ins
+  from connector-provided actions.

@@ -37,7 +37,7 @@ ready-to-run **execute** snippet plus `inputTypeDefinition` /
 
 Examples:
 
-- `kody_official_guide:capability`
+- `coding_guide_get:capability`
 - `user:preferred_org:value`
 - `github:integration`
 - `my-package:package`
@@ -54,19 +54,20 @@ the ref into a follow-up `entity` lookup when needed.
 Capability detail shows the exact runtime pattern for **execute**:
 
 ```ts
-import { codemode } from 'kody:runtime'
+import { kody } from 'kody:runtime'
 
 export default async function main(input = {}) {
-	return await codemode.kody_official_guide(input)
+	return await kody.coding_guide_get(input)
 }
 ```
 
-Use the capability id returned by **search** as the `codemode` method name, and
-pass an object matching the displayed input type. Valid JavaScript identifier
-ids use dot notation such as `codemode.kody_official_guide(input)`. If a
-capability id is not a valid JavaScript identifier, use bracket notation such as
-`codemode["capability-id"](input)`. Capability detail emits the exact form to
-copy. Use `{}` when the capability has no required fields.
+Use the call shape emitted by capability detail and pass an object matching the
+displayed input type. Built-in capabilities stay flat on `kody`: valid
+JavaScript identifier ids use dot notation such as
+`kody.coding_guide_get(input)`, and non-identifier built-in ids use bracket
+notation such as `kody["capability-id"](input)`. Remote connector capabilities
+are namespaced by connector: `kody.remote["name"].capability_name(input)`. Use
+`{}` when the capability has no required fields.
 
 ## When results look thin
 
@@ -91,7 +92,7 @@ Long-term memory retrieval also requires a signed-in MCP user.
 
 Use **search** as the default way to discover whether an integration or secret
 already exists before switching to **execute**. Runtime code inside **execute**
-can call **`codemode.secret_list(...)`** when it needs secret metadata, but
+can call **`kody.secret_list(...)`** when it needs secret metadata, but
 **search** is the primary discovery path.
 
 Saved integrations and the `integration_*` CRUD capabilities live in the

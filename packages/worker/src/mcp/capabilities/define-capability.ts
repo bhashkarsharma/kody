@@ -32,6 +32,7 @@ export function defineCapability<
 	const outputSchema = definition.outputSchema
 		? toJsonSchema(definition.outputSchema)
 		: undefined
+	const source = definition.source ?? 'builtin'
 
 	return {
 		name: definition.name,
@@ -46,6 +47,10 @@ export function defineCapability<
 			: {}),
 		...(definition.requiredPermission
 			? { requiredPermission: definition.requiredPermission }
+			: {}),
+		source,
+		...(definition.remoteConnector
+			? { remoteConnector: definition.remoteConnector }
 			: {}),
 		inputSchema,
 		...(outputSchema ? { outputSchema } : {}),
@@ -76,6 +81,7 @@ export function defineCapability<
 					tool: 'capability',
 					capabilityName: definition.name,
 					domain: definition.domain,
+					capabilitySource: source,
 					outcome: 'failure',
 					durationMs: Math.round(performance.now() - startedAt),
 					baseUrl,
@@ -98,6 +104,7 @@ export function defineCapability<
 					tool: 'capability',
 					capabilityName: definition.name,
 					domain: definition.domain,
+					capabilitySource: source,
 					outcome: 'failure',
 					durationMs: Math.round(performance.now() - startedAt),
 					baseUrl,
@@ -117,6 +124,7 @@ export function defineCapability<
 					tool: 'capability',
 					capabilityName: definition.name,
 					domain: definition.domain,
+					capabilitySource: source,
 					outcome: 'success',
 					durationMs: Math.round(performance.now() - startedAt),
 					baseUrl,
@@ -130,6 +138,7 @@ export function defineCapability<
 					tool: 'capability',
 					capabilityName: definition.name,
 					domain: definition.domain,
+					capabilitySource: source,
 					outcome: 'failure',
 					durationMs: Math.round(performance.now() - startedAt),
 					baseUrl,

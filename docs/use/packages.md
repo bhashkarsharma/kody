@@ -100,9 +100,9 @@ exhaustive.
   literal `import("kody:@scope/my-package/export")` when you want
   current-version runtime resolution.
 - `kody:runtime` is always host-owned and request-scoped. Static imports such as
-  `import { codemode } from "kody:runtime"` stay valid, but saved package
-  artifacts do not persist Kody's runtime implementation; execution always uses
-  the deployed host runtime.
+  `import { kody } from "kody:runtime"` stay valid, but saved package artifacts
+  do not persist Kody's runtime implementation; execution always uses the
+  deployed host runtime.
 - Exports are normal modules. They may expose a default export, named exports,
   or both.
 - Direct package invocation calls the resolved module's default export when that
@@ -199,7 +199,7 @@ to prevent runaway loops.
 
 External trusted clients that must call package exports over HTTP use package
 invocation tokens instead. Before sending a user to create one, agents should
-load `kody_official_guide` with `guide: "package_invocation_token_setup"` and
+load `coding_guide_get` with `guide: "package_invocation_token_setup"` and
 construct a prefilled `/account/package-invocation-tokens/new` URL without raw
 token material.
 
@@ -238,9 +238,9 @@ Use the package app model when the package needs:
 
 When a package app depends on OAuth, saved secrets, or a third-party API, run
 the integration bootstrap first: use `search` for the saved integration or
-secret reference, load `kody_official_guide` with
-`guide: "integration_bootstrap"`, and complete a minimal authenticated `execute`
-smoke test before treating the app as ready.
+secret reference, load `coding_guide_get` with `guide: "integration_bootstrap"`,
+and complete a minimal authenticated `execute` smoke test before treating the
+app as ready.
 
 Treat package apps like Worker-style modules:
 
@@ -310,7 +310,7 @@ user, package-owned storage, package context, secrets, and `kody:runtime`
 helpers. Published bundle artifacts are rebuilt for subscription handlers during
 package checks and publish, just like exports, services, jobs, and apps.
 
-Use the built-in `package_subscription_list` capability to discover the
+Use the built-in `package_subscriptions_list` capability to discover the
 signed-in user's saved package subscriptions, optionally filtered by exact
 topic. This is the generic discovery step before building fan-out, debugging why
 an event did or did not dispatch, or checking which packages subscribe to

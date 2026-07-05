@@ -6,7 +6,10 @@ import {
 	createHostSecretAccessDeniedBatchMessage,
 	createMissingSecretMessage,
 } from '#mcp/secrets/errors.ts'
+import { EntitlementLimitError } from '#worker/entitlements/errors.ts'
 import {
+	createKodyRemoteProxy,
+	createKodyProviderProxySource,
 	createExecuteExecutor,
 	extractRawContent,
 	formatExecutionOutput,
@@ -74,7 +77,7 @@ function createExecutorTestEnv(loader: Env['LOADER']) {
 
 function createExecutorTestExports() {
 	return {
-		CodemodeFetchGateway: ({ props }: { props: unknown }) => ({ props }),
+		KodyFetchGateway: ({ props }: { props: unknown }) => ({ props }),
 	} as never
 }
 
@@ -86,13 +89,127 @@ function createGatewayProps(userId: string) {
 	}
 }
 
+test('kody remote proxy dispatches and reports connector/capability errors clearly', async () => {
+	const calls: Array<{ dispatchName: string; args: unknown }> = []
+	const remote = createKodyRemoteProxy({
+		remoteConnectors: [
+			{
+				name: 'home',
+				kind: 'home',
+				instanceId: 'home',
+				status: {
+					state: 'connected',
+					connected: true,
+					toolCount: 1,
+					message: 'The home connector "home" is connected.',
+					unavailableMessage: 'The home connector "home" is connected.',
+				},
+				capabilities: [
+					{
+						name: 'set_pin',
+						dispatchName: 'remote:home:set_pin',
+					},
+				],
+			},
+			{
+				name: 'lights',
+				kind: 'lights',
+				instanceId: 'home',
+				status: {
+					state: 'disconnected',
+					connected: false,
+					toolCount: 0,
+					message: 'The lights connector "lights" is not connected.',
+					unavailableMessage:
+						'The lights connector "lights" is not connected. Kody cannot use this connector until it reconnects.',
+				},
+				capabilities: [],
+			},
+		],
+		async callTool(dispatchName, args) {
+			calls.push({ dispatchName, args })
+			return { ok: true }
+		},
+	}) as Record<string, Record<string, (args: unknown) => Promise<unknown>>>
+
+	await expect(remote['home']?.set_pin({ pin: '1234' })).resolves.toEqual({
+		ok: true,
+	})
+	expect(calls).toEqual([
+		{
+			dispatchName: 'remote:home:set_pin',
+			args: { pin: '1234' },
+		},
+	])
+	expect(() => remote['missing']).toThrow(
+		'Unknown remote connector "missing". Available remote connectors: "home", "lights".',
+	)
+	expect(() => remote['home']?.missing_tool).toThrow(
+		'Unknown remote capability "missing_tool" for connector "home". Available capabilities: "set_pin".',
+	)
+	expect(() => remote['lights']?.set_pin).toThrow(
+		'The lights connector "lights" is not connected. Kody cannot use this connector until it reconnects.',
+	)
+})
+
+test('generated kody provider source wires remote proxy dispatch', async () => {
+	const calls: Array<{ name: string; argsJson: string }> = []
+	const source = createKodyProviderProxySource({
+		providerName: 'kody',
+		remoteConnectors: [
+			{
+				name: 'home',
+				kind: 'home',
+				instanceId: 'home',
+				status: {
+					state: 'connected',
+					connected: true,
+					toolCount: 1,
+					message: 'The home connector "home" is connected.',
+					unavailableMessage: 'The home connector "home" is connected.',
+				},
+				capabilities: [
+					{
+						name: 'set_pin',
+						dispatchName: 'remote:home:set_pin',
+					},
+				],
+			},
+		],
+	})
+	const kody = new Function('__dispatchers', `${source}; return kody;`)({
+		kody: {
+			async call(name: string, argsJson: string) {
+				calls.push({ name, argsJson })
+				return JSON.stringify({ result: { ok: true } })
+			},
+		},
+	}) as {
+		remote: Record<string, Record<string, (args: unknown) => Promise<unknown>>>
+		[key: string]: unknown
+	}
+
+	await expect(kody.remote['home']?.set_pin({ pin: '1234' })).resolves.toEqual({
+		ok: true,
+	})
+	expect(calls).toEqual([
+		{
+			name: 'remote:home:set_pin',
+			argsJson: JSON.stringify({ pin: '1234' }),
+		},
+	])
+	expect(() => kody['remote:home:set_pin']).toThrow(
+		'Remote connector capability "remote:home:set_pin" is not available as a flat kody function.',
+	)
+})
+
 test('createExecuteExecutor reuses stable dynamic worker ids until binding context or module graph changes', async () => {
 	const fakeLoader = createFakeWorkerLoader()
 	const env = createExecutorTestEnv(fakeLoader.loader)
 	const exports = createExecutorTestExports()
 	const providers = [
 		{
-			name: 'codemode',
+			name: 'kody',
 			fns: {
 				search: async () => ({ ok: true }),
 			},
@@ -110,7 +227,7 @@ test('createExecuteExecutor reuses stable dynamic worker ids until binding conte
 		gatewayProps: createGatewayProps('user-1'),
 	}).execute('async () => "ok"', [
 		{
-			name: 'codemode',
+			name: 'kody',
 			fns: {
 				search: async () => ({ ok: 'different dispatcher same worker' }),
 			},
@@ -124,7 +241,7 @@ test('createExecuteExecutor reuses stable dynamic worker ids until binding conte
 
 	const scopedProviders = [
 		{
-			name: 'codemode',
+			name: 'kody',
 			fns: {},
 		},
 	]
@@ -286,7 +403,7 @@ test('createExecuteExecutor records one usage event per sandbox run with duratio
 		},
 	}
 	const exports = createExecutorTestExports()
-	const providers = [{ name: 'codemode', fns: {} }]
+	const providers = [{ name: 'kody', fns: {} }]
 
 	// Successful sandbox run: one success event.
 	const successLoader = createFakeWorkerLoader()
@@ -420,16 +537,16 @@ test('createExecuteExecutor disables dispatchers after execution completes', asy
 		env: createExecutorTestEnv(fakeLoader.loader),
 		exports: createExecutorTestExports(),
 		gatewayProps: createGatewayProps('user-1'),
-	}).execute('async () => await codemode.search({ q: "ok" })', [
+	}).execute('async () => await kody.search({ q: "ok" })', [
 		{
-			name: 'codemode',
+			name: 'kody',
 			fns: {
 				search: async () => ({ ok: true }),
 			},
 		},
 	])
 	const dispatchers = fakeLoader.evaluations[0]
-	const result = await dispatchers?.codemode?.call('search', '{}')
+	const result = await dispatchers?.kody?.call('search', '{}')
 
 	expect(JSON.parse(result ?? '{}')).toEqual({
 		error: 'Execution has already completed.',
@@ -520,6 +637,42 @@ test('executor maps secret errors, formats guidance, extracts raw content, and t
 		],
 		suggestedAction: {
 			type: 'approve_secret_host',
+		},
+	})
+
+	const entitlementError = new EntitlementLimitError({
+		resource: 'saved_packages',
+		plan: 'personal',
+		limit: 3,
+		current: 3,
+		upgradeHint: 'Remove an old package or upgrade your plan.',
+	})
+	expect(getExecutionErrorDetails(entitlementError)).toMatchObject({
+		kind: 'entitlement_limit_exceeded',
+		details: {
+			code: 'entitlement_limit_exceeded',
+			resource: 'saved_packages',
+			plan: 'personal',
+			limit: 3,
+			current: 3,
+			upgradeHint: 'Remove an old package or upgrade your plan.',
+		},
+		suggestedAction: {
+			type: 'review_plan_limit',
+			resource: 'saved_packages',
+		},
+	})
+	expect(
+		getExecutionErrorDetails(new Error(entitlementError.message)),
+	).toMatchObject({
+		kind: 'entitlement_limit_exceeded',
+		details: {
+			code: 'entitlement_limit_exceeded',
+			resource: 'saved_packages',
+			plan: 'personal',
+			limit: 3,
+			current: 3,
+			upgradeHint: 'Remove an old package or upgrade your plan.',
 		},
 	})
 

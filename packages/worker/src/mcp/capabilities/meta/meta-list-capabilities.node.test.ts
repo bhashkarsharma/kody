@@ -75,7 +75,7 @@ function buildRemoteConnectorEnv() {
 				return {
 					getSnapshot() {
 						return Promise.resolve({
-							connectorId: 'default',
+							connectorId: 'roku',
 							connectedAt: '2026-03-25T00:00:00.000Z',
 							lastSeenAt: '2026-03-25T00:00:01.000Z',
 							tools: runtimeRokuTools,
@@ -101,7 +101,7 @@ test('meta_list_capabilities lists runtime remote tools and filters by domain', 
 					email: 'user-1@example.com',
 					displayName: 'user-1',
 				},
-				remoteConnectors: [{ kind: 'roku', instanceId: 'default' }],
+				remoteConnectors: [{ kind: 'roku', instanceId: 'roku' }],
 			}),
 		},
 	)
@@ -113,26 +113,35 @@ test('meta_list_capabilities lists runtime remote tools and filters by domain', 
 		),
 	).toBe(true)
 	const pressKeyCapability = remoteResult.capabilities.find(
-		(capability) => capability.name === 'roku_default_roku_press_key',
+		(capability) => capability.name === 'remote:roku:roku_press_key',
 	)
 	const listAppsCapability = remoteResult.capabilities.find(
-		(capability) => capability.name === 'roku_default_roku_list_apps',
+		(capability) => capability.name === 'remote:roku:roku_list_apps',
 	)
 	const activeAppCapability = remoteResult.capabilities.find(
-		(capability) => capability.name === 'roku_default_roku_get_active_app',
+		(capability) => capability.name === 'remote:roku:roku_get_active_app',
 	)
 	expect(pressKeyCapability).toMatchObject({
-		domain: 'remote:roku:default',
+		domain: 'remote:roku',
+		source: 'remote-connector',
+		remoteConnector: {
+			kind: 'roku',
+			instanceId: 'roku',
+			connectorId: 'roku',
+			connectorName: 'roku',
+			mcpToolName: 'roku_press_key',
+			toolName: 'roku_press_key',
+		},
 		requiredInputFields: ['deviceId', 'key'],
 		inputTypeDefinition: expect.any(String),
 	})
 	expect(pressKeyCapability).not.toHaveProperty('inputSchema')
 	expect(listAppsCapability).toMatchObject({
-		domain: 'remote:roku:default',
+		domain: 'remote:roku',
 		outputTypeDefinition: expect.any(String),
 	})
 	expect(listAppsCapability).not.toHaveProperty('outputSchema')
-	expect(activeAppCapability?.domain).toBe('remote:roku:default')
+	expect(activeAppCapability?.domain).toBe('remote:roku')
 
 	const metaOnly = await metaListCapabilitiesCapability.handler(
 		{
@@ -153,6 +162,55 @@ test('meta_list_capabilities lists runtime remote tools and filters by domain', 
 	expect(
 		metaOnly.capabilities.some(
 			(capability) => capability.name === 'meta_list_capabilities',
+		),
+	).toBe(true)
+
+	const packagesOnly = await metaListCapabilitiesCapability.handler(
+		{
+			domain: 'packages',
+		},
+		{
+			env: {} as Env,
+			callerContext: createMcpCallerContext({
+				baseUrl: 'https://heykody.dev',
+			}),
+		},
+	)
+
+	expect(packagesOnly.total).toBeGreaterThan(0)
+	expect(
+		packagesOnly.capabilities.every(
+			(capability) => capability.domain === 'packages',
+		),
+	).toBe(true)
+
+	const remoteOnly = await metaListCapabilitiesCapability.handler(
+		{
+			domain: 'remote:roku',
+		},
+		{
+			env: buildRemoteConnectorEnv(),
+			callerContext: createMcpCallerContext({
+				baseUrl: 'https://heykody.dev',
+				user: {
+					userId: 'user-1',
+					email: 'user-1@example.com',
+					displayName: 'user-1',
+				},
+				remoteConnectors: [{ kind: 'roku', instanceId: 'roku' }],
+			}),
+		},
+	)
+
+	expect(remoteOnly.total).toBeGreaterThan(0)
+	expect(
+		remoteOnly.capabilities.every(
+			(capability) => capability.domain === 'remote:roku',
+		),
+	).toBe(true)
+	expect(
+		remoteOnly.capabilities.some(
+			(capability) => capability.name === 'remote:roku:roku_press_key',
 		),
 	).toBe(true)
 })

@@ -95,12 +95,11 @@ The top-level saved identity is the package.
   arbitrary computed package resolution until the security and review model is
   designed.
 - `kody:runtime` is a reserved host-external virtual module. The bundler may add
-  a placeholder so author code can keep
-  `import { codemode } from "kody:runtime"`, but published bundle artifacts must
-  not persist the host runtime implementation. Execution loaders hydrate the
-  deployed host runtime module into every referenced
-  `.__kody_virtual__/runtime.js` path, including nested static dependency
-  artifacts and package-app workers.
+  a placeholder so author code can keep `import { kody } from "kody:runtime"`,
+  but published bundle artifacts must not persist the host runtime
+  implementation. Execution loaders hydrate the deployed host runtime module
+  into every referenced `.__kody_virtual__/runtime.js` path, including nested
+  static dependency artifacts and package-app workers.
 - Callable exports are resolved from package exports, not from a second Kody
   registry.
 - Packages may also export non-callable helper modules and values for reuse.
@@ -245,7 +244,7 @@ publish. At runtime, event dispatch invokes the handler through the package
 execution path with package context, package-owned storage, package secrets, and
 the host-owned `kody:runtime` module.
 
-The built-in `package_subscription_list` capability is the generic discovery
+The built-in `package_subscriptions_list` capability is the generic discovery
 surface for declared subscriptions. It reads the signed-in user's saved package
 manifests and returns package id, `kody.id`, package name, topic, handler,
 description, and filters, optionally narrowed by exact topic.

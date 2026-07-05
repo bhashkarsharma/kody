@@ -57,8 +57,7 @@ Saved packages may also declare long-lived package services under
 - Package services are **not** routed through a public HTTP path the way package
   apps are.
 - Instead, the Worker hosts them via the `PackageServiceInstance` Durable Object
-  binding and controls them through package runtime bridges and MCP
-  capabilities.
+  binding and controls them through package runtime bridges and MCP kody.
 - Package services share package identity with apps/jobs and can publish into
   package app realtime sessions, but they own their own durable storage bucket
   and lifecycle.
@@ -76,7 +75,7 @@ there is no separate context-specific Workflow class.
   queues a saved-package export invocation. Package runtime contexts resolve
   `packageId` from `packageContext`; ad hoc contexts must pass it explicitly.
 - The hub verifies saved-package ownership before queuing export-backed
-  workflows and records recent workflow rows for `workflow_list`.
+  workflows and records recent workflow rows for `workflow_run_list`.
 
 ## App server flow
 

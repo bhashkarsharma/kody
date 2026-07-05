@@ -16,8 +16,36 @@ async function extractCreatePackageAppWorkerSource() {
 	if (start < 0 || end < 0) {
 		throw new Error('createWorkflowsProxy source was not found.')
 	}
-	const proxySource = sourceText.slice(start, end).replaceAll('\\\\', '\\')
+	const proxySource = sourceText
+		.slice(start, end)
+		.replaceAll('\\\\', '\\')
+		.replaceAll('\\`', '`')
+		.replaceAll('\\${', '${')
 	return `${proxySource}; return createWorkflowsProxy(runtimeBridge);`
+}
+
+async function extractCreateKodyProxySource() {
+	const sourceText = await readFile(
+		new URL('./package-app.ts', import.meta.url),
+		'utf8',
+	)
+	const start = sourceText.indexOf('function createKodyProxy(runtimeBridge) {')
+	const end = sourceText.indexOf('\nfunction createStorageProxy', start)
+	if (start < 0 || end < 0) {
+		throw new Error('createKodyProxy source was not found.')
+	}
+	const proxySource = sourceText
+		.slice(start, end)
+		.replaceAll('\\\\', '\\')
+		.replaceAll('\\`', '`')
+		.replaceAll('\\${', '${')
+	return `${proxySource}; return createKodyProxy(runtimeBridge);`
+}
+
+async function createKodyProxyForTest(runtimeBridge: unknown) {
+	return new Function('runtimeBridge', await extractCreateKodyProxySource())(
+		runtimeBridge,
+	) as Record<string, unknown>
 }
 
 async function createWorkflowsProxyForTest(runtimeBridge: unknown) {
@@ -28,6 +56,34 @@ async function createWorkflowsProxyForTest(runtimeBridge: unknown) {
 		create(input: unknown): Promise<unknown>
 	}
 }
+
+test('package app kody proxy supports remote namespace calls', async () => {
+	const calls: Array<{ name: string; args: unknown }> = []
+	const kody = await createKodyProxyForTest({
+		callCapability: async (input: { name: string; args: unknown }) => {
+			calls.push(input)
+			return { ok: true }
+		},
+	})
+
+	await expect(
+		(
+			kody.remote as Record<
+				string,
+				Record<string, (args: unknown) => Promise<unknown>>
+			>
+		)['home']?.set_pin({ pin: '1234' }),
+	).resolves.toEqual({ ok: true })
+	expect(calls).toEqual([
+		{
+			name: 'remote:home:set_pin',
+			args: { pin: '1234' },
+		},
+	])
+	expect(() => kody['remote:home:set_pin']).toThrow(
+		'Remote connector capability "remote:home:set_pin" is not available as a flat kody function.',
+	)
+})
 
 test('package app workflows proxy validates required workflow input fields', async () => {
 	const workflows = await createWorkflowsProxyForTest({

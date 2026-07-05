@@ -18,6 +18,17 @@ export type CapabilityJsonSchema = JsonSchemaToolDescriptor['inputSchema']
 // Capability authors may provide Zod or raw JSON Schema.
 export type CapabilitySchemaDefinition = CapabilityJsonSchema | ZodType
 
+export type CapabilitySource = 'builtin' | 'remote-connector'
+
+export type CapabilityRemoteConnectorMetadata = {
+	kind: string
+	instanceId: string
+	connectorId: string
+	connectorName: string
+	mcpToolName: string
+	toolName: string
+}
+
 export type InferCapabilitySchema<TSchema> =
 	TSchema extends ZodType<infer TOutput> ? TOutput : Record<string, unknown>
 
@@ -38,6 +49,8 @@ export type CapabilityDefinition<
 	destructive?: boolean
 	requiredRole?: RoleName
 	requiredPermission?: PermissionString
+	source?: CapabilitySource
+	remoteConnector?: CapabilityRemoteConnectorMetadata
 	inputSchema: TInputSchema
 	outputSchema?: TOutputSchema
 	handler: (
@@ -61,6 +74,8 @@ export type Capability = {
 	destructive: boolean
 	requiredRole?: RoleName
 	requiredPermission?: PermissionString
+	source: CapabilitySource
+	remoteConnector?: CapabilityRemoteConnectorMetadata
 	inputSchema: CapabilityJsonSchema
 	outputSchema?: JsonSchemaToolDescriptor['outputSchema']
 	inputTypeDefinition: string
@@ -81,6 +96,8 @@ export type CapabilitySpec = {
 	destructive: boolean
 	requiredRole?: RoleName
 	requiredPermission?: PermissionString
+	source: CapabilitySource
+	remoteConnector?: CapabilityRemoteConnectorMetadata
 	inputFields: Array<string>
 	requiredInputFields: Array<string>
 	outputFields: Array<string>
@@ -98,7 +115,7 @@ export type CapabilityDomainMetadata = {
 }
 
 /**
- * Single source of truth for a domain: metadata plus its capabilities.
+ * Single source of truth for a domain: metadata plus its kody.
  * Pass an array of these to `buildCapabilityRegistry` (see `builtin-domains.ts`).
  */
 export type DomainSpec = {

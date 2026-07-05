@@ -6,12 +6,12 @@ const mockModule = vi.hoisted(() => ({
 	createExecutePackageInvokeTools: vi.fn(),
 	getCapabilityRegistryForContext: vi.fn(async () => ({
 		capabilityHandlers: {
-			kody_official_guide: true,
+			coding_guide_get: true,
 		},
 	})),
 }))
 
-vi.mock('#mcp/run-codemode-registry.ts', () => ({
+vi.mock('#mcp/run-kody-registry.ts', () => ({
 	runModuleWithRegistry: (...args: Array<unknown>) =>
 		mockModule.runModuleWithRegistry(...args),
 }))
@@ -132,7 +132,7 @@ test('execute tool serializes successes and errors, binds storage, passes packag
 		expect.objectContaining({
 			capabilityRegistry: {
 				capabilityHandlers: {
-					kody_official_guide: true,
+					coding_guide_get: true,
 				},
 			},
 		}),

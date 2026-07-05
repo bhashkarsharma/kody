@@ -7,15 +7,15 @@ import {
 import { type AuthoredPackageJson } from '#worker/package-registry/types.ts'
 import { type EntitySourceRow } from '#worker/repo/types.ts'
 import {
-	buildCodemodeFns,
+	buildKodyFns,
 	type PackageEventTools,
 	type PackageInvokeTools,
-} from '#mcp/run-codemode-registry.ts'
+} from '#mcp/run-kody-registry.ts'
 import { getCapabilityRegistryForContext } from '#mcp/capabilities/registry.ts'
 import {
 	createAuthenticatedFetch,
 	refreshAccessToken,
-} from '#mcp/execute-modules/codemode-utils.ts'
+} from '#mcp/execute-modules/kody-runtime-utils.ts'
 import {
 	buildKodyAppBundle,
 	createPublishedPackageAppBundleCacheKey,
@@ -97,10 +97,35 @@ function buildFacetClassExportName(rawFacetName) {
 		: \`App_\${sanitizedFacetName}_\${hashSuffix}\`;
 }
 
-function createCodemodeProxy(runtimeBridge) {
+function createKodyProxy(runtimeBridge) {
+	const remote = new Proxy({}, {
+		get(_target, connectorName) {
+			if (typeof connectorName !== 'string' || connectorName === 'then') {
+				return undefined;
+			}
+			return new Proxy({}, {
+				get(_connectorTarget, capabilityName) {
+					if (typeof capabilityName !== 'string' || capabilityName === 'then') {
+						return undefined;
+					}
+					return async (args = {}) =>
+						await runtimeBridge.callCapability({
+							name: \`remote:\${connectorName}:\${capabilityName}\`,
+							args,
+						});
+				},
+			});
+		},
+	});
 	return new Proxy({}, {
 		get(_target, property) {
-			if (typeof property !== 'string') return undefined;
+			if (typeof property !== 'string' || property === 'then') return undefined;
+			if (property === 'remote') return remote;
+			if (property.startsWith('remote:')) {
+				throw new Error(
+					\`Remote connector capability "\${property}" is not available as a flat kody function. Use kody.remote[connectorName].capabilityName(input) instead.\`,
+				);
+			}
 			return async (args = {}) =>
 				await runtimeBridge.callCapability({
 					name: property,
@@ -445,7 +470,7 @@ function createRuntime(runtimeBridge, packageContext) {
 					},
 				}
 	return {
-		codemode: createCodemodeProxy(runtimeBridge),
+		kody: createKodyProxy(runtimeBridge),
 		storage: createStorageProxy(runtimeBridge, packageId),
 		refreshAccessToken: async (providerName) =>
 			await runtimeBridge.refreshAccessToken(providerName),
@@ -854,11 +879,11 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 	}
 
 	async refreshAccessToken(providerName: string) {
-		const codemode = await buildCodemodeFns(
+		const kody = await buildKodyFns(
 			this.env,
 			this.createCallerContext(this.ctx.props.packageId),
 		)
-		return await refreshAccessToken(codemode, providerName)
+		return await refreshAccessToken(kody, providerName)
 	}
 
 	async authenticatedFetch(input: {
@@ -870,12 +895,12 @@ export class PackageAppRuntimeBridge extends WorkerEntrypoint<
 			body?: string
 		}
 	}) {
-		const codemode = await buildCodemodeFns(
+		const kody = await buildKodyFns(
 			this.env,
 			this.createCallerContext(this.ctx.props.packageId),
 		)
 		const authenticatedFetch = await createAuthenticatedFetch(
-			codemode,
+			kody,
 			input.providerName,
 		)
 		return await authenticatedFetch(input.request.url, {
@@ -1388,8 +1413,8 @@ async function buildPackageAppWorkerOptionsUncached(input: {
 				publishedCommit: input.savedPackage.publishedCommit,
 			},
 		},
-		globalOutbound: workerExports?.CodemodeFetchGateway
-			? workerExports.CodemodeFetchGateway({
+		globalOutbound: workerExports?.KodyFetchGateway
+			? workerExports.KodyFetchGateway({
 					props: {
 						baseUrl: input.baseUrl,
 						userId: input.userId,

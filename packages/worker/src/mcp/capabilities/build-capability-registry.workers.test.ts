@@ -100,3 +100,28 @@ test('capability domain registration rejects mismatched and duplicate invariants
 		}),
 	).toThrow(/Duplicate capability .* in domain/)
 })
+
+test('capability registry exposes primary names and source metadata', () => {
+	const primaryCapability = defineDomainCapability(capabilityDomainNames.meta, {
+		name: 'primary_name',
+		description: 'Primary capability.',
+		inputSchema: z.object({}),
+		outputSchema: z.object({ ok: z.boolean() }),
+		handler: async () => ({ ok: true }),
+	})
+	const registry = buildCapabilityRegistry([
+		defineDomain({
+			name: capabilityDomainNames.meta,
+			description: 'meta',
+			capabilities: [primaryCapability],
+		}),
+	])
+
+	expect(registry.capabilityMap.primary_name).toBe(primaryCapability)
+	expect(registry.capabilityHandlers.primary_name).toBe(
+		primaryCapability.handler,
+	)
+	expect(registry.capabilitySpecs.primary_name).toMatchObject({
+		source: 'builtin',
+	})
+})
