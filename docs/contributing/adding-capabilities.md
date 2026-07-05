@@ -139,17 +139,17 @@ limited to user/role account metadata and sanitized audit metadata. Never return
 or join against user content tables such as packages, secrets, values, memories,
 jobs, email, chat threads, storage buckets, OAuth grants, or remote connectors.
 
-Current admin capabilities are read-only:
+Current admin capabilities:
 
 - `admin_user_list`
 - `admin_user_get`
+- `admin_user_create`
 - `admin_audit_log_query`
 
-When the invite-signup branch lands, expose its invite and admin
-create-user-by-email service functions by adding new `admin/*` capability files
-that call those service-layer functions directly, set `requiredRole: 'admin'`,
-and audit-log the invocation. Do not duplicate the invite/user-creation SQL in
-capability handlers.
+When adding more admin actions, expose service-layer functions by adding new
+`admin/*` capability files that call those service functions directly, set
+`requiredRole: 'admin'`, and audit-log the invocation. Do not duplicate admin
+workflow SQL in capability handlers.
 
 Use raw JSON Schema only when you need an escape hatch that Zod does not model
 cleanly. The registry and Code Mode layer consume normalized JSON Schema after
