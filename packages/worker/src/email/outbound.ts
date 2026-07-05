@@ -1,5 +1,6 @@
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import { isAccountEmailVerified } from '#app/email-verification.ts'
+import { recordUsage } from '#worker/usage/record-usage.ts'
 import { normalizeEmailAddress } from './address.ts'
 import {
 	createEmailThread,
@@ -16,6 +17,7 @@ type SendEmailEnv = Pick<
 	Env,
 	| 'APP_DB'
 	| 'EMAIL'
+	| 'USAGE_EVENTS'
 	| 'CLOUDFLARE_ACCOUNT_ID'
 	| 'CLOUDFLARE_API_BASE_URL'
 	| 'CLOUDFLARE_API_TOKEN'
@@ -160,6 +162,17 @@ async function sendViaRestFallback(input: {
 	return result.messageId ?? null
 }
 
+function outboundEmailContentBytes(
+	text: string | null,
+	html: string | null,
+): number | undefined {
+	if (!text && !html) return undefined
+	let bytes = 0
+	if (text) bytes += new TextEncoder().encode(text).byteLength
+	if (html) bytes += new TextEncoder().encode(html).byteLength
+	return bytes
+}
+
 export async function sendOutboundEmail(
 	input: EmailSendInput,
 ): Promise<EmailSendResult> {
@@ -268,6 +281,9 @@ export async function sendOutboundEmail(
 		detail: { to, from, subject },
 	})
 
+	const messageContentBytes = outboundEmailContentBytes(text, html)
+	const sendStartedAtMs = Date.now()
+	let sendOutcome: 'success' | 'error' = 'success'
 	try {
 		const bindingResult = await sendViaBinding({
 			env: input.env,
@@ -324,6 +340,7 @@ export async function sendOutboundEmail(
 			error: null,
 		}
 	} catch (error) {
+		sendOutcome = 'error'
 		const messageText = error instanceof Error ? error.message : String(error)
 		await updateEmailMessageDelivery({
 			db: input.env.APP_DB,
@@ -357,6 +374,17 @@ export async function sendOutboundEmail(
 			providerMessageId: null,
 			status: 'failed',
 			error: messageText,
+		}
+	} finally {
+		if (input.userId) {
+			await recordUsage(input.env, {
+				userId: input.userId,
+				eventType: 'email_send',
+				entityId: message.id,
+				bytes: messageContentBytes,
+				durationMs: Date.now() - sendStartedAtMs,
+				outcome: sendOutcome,
+			})
 		}
 	}
 }
