@@ -11,9 +11,84 @@ import {
 } from './repo.ts'
 import { sendOutboundEmail } from './outbound.ts'
 import { createMswNodeServer } from '#worker/test-support/msw-node-server.ts'
+import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
+import { planLimits } from '#worker/entitlements/plans.ts'
+import {
+	incrementDailyEntitlementCounter,
+	utcDayKey,
+} from '#worker/entitlements/service.ts'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 
 const cloudflareEmailApi =
 	'https://api.cloudflare.test/client/v4/accounts/account-123/email/sending/send'
+
+function createBindingSendEnv() {
+	return {
+		...env,
+		EMAIL: {
+			async send() {
+				return { messageId: 'provider-message-entitlement' }
+			},
+		},
+	}
+}
+
+async function seedVerifiedAccountWithPlan(input: {
+	email: string
+	plan: 'personal' | null
+}) {
+	const username = `email-entitlement-${crypto.randomUUID().slice(0, 8)}`
+	await env.APP_DB.prepare(
+		`INSERT INTO users (username, email, password_hash, email_verified_at, plan)
+			VALUES (?, ?, ?, ?, ?)`,
+	)
+		.bind(
+			username,
+			input.email,
+			'test-password-hash',
+			new Date().toISOString(),
+			input.plan,
+		)
+		.run()
+}
+
+async function readDailyEmailSendCounter(userId: string) {
+	const row = await env.APP_DB.prepare(
+		`SELECT count FROM entitlement_daily_counters
+			WHERE user_id = ? AND resource = ? AND day = ?`,
+	)
+		.bind(userId, 'email_sends_per_day', utcDayKey())
+		.first<{ count: number }>()
+	return Number(row?.count ?? 0)
+}
+
+async function seedVerifiedSender(userId: string) {
+	const from = `sender-${crypto.randomUUID()}@example.com`
+	await upsertEmailSenderIdentity({
+		db: env.APP_DB,
+		userId,
+		email: from,
+		domain: getEmailDomain(from),
+		status: 'verified',
+	})
+	return from
+}
+
+async function sendTestOutboundEmail(input: {
+	userId: string
+	from: string
+	accountEmail: string
+}) {
+	return await sendOutboundEmail({
+		env: createBindingSendEnv(),
+		userId: input.userId,
+		accountEmail: input.accountEmail,
+		from: input.from,
+		to: 'recipient@example.com',
+		subject: 'Entitlement test',
+		text: 'Body',
+	})
+}
 
 async function listEmailSendRollups(db: D1Database, userId: string) {
 	const { results } = await db
@@ -374,4 +449,121 @@ test('sendOutboundEmail preserves reply headers and records failed fallback send
 	expect(
 		(await listEmailSendRollups(env.APP_DB, isolatedUserId))[0],
 	).toBeUndefined()
+})
+
+test('sendOutboundEmail enforces email_sends_per_day for plan users at the limit', async () => {
+	await ensureEmailTestSchema(env.APP_DB)
+	const email = `planned-${crypto.randomUUID()}@example.com`
+	const userId = await createStableUserIdFromEmail(email)
+	const limit = planLimits.personal.maxEmailSendsPerDay
+	if (limit === null)
+		throw new Error('Expected a numeric personal email limit.')
+	await seedVerifiedAccountWithPlan({ email, plan: 'personal' })
+	const from = await seedVerifiedSender(userId)
+	await env.APP_DB.prepare(
+		`INSERT INTO entitlement_daily_counters (user_id, resource, day, count, updated_at)
+			VALUES (?, ?, ?, ?, ?)`,
+	)
+		.bind(
+			userId,
+			'email_sends_per_day',
+			utcDayKey(),
+			limit,
+			new Date().toISOString(),
+		)
+		.run()
+
+	const error = await sendTestOutboundEmail({
+		userId,
+		from,
+		accountEmail: email,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!isEntitlementLimitError(error)) {
+		throw new Error('Expected an EntitlementLimitError from sendOutboundEmail.')
+	}
+	expect(error.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'email_sends_per_day',
+		plan: 'personal',
+		limit,
+		current: limit,
+	})
+	expect(error.message).toContain(`at most ${limit} email sends per day`)
+})
+
+test('sendOutboundEmail increments the daily counter when under the plan limit', async () => {
+	await ensureEmailTestSchema(env.APP_DB)
+	const email = `under-limit-${crypto.randomUUID()}@example.com`
+	const userId = await createStableUserIdFromEmail(email)
+	await seedVerifiedAccountWithPlan({ email, plan: 'personal' })
+	const from = await seedVerifiedSender(userId)
+	expect(await readDailyEmailSendCounter(userId)).toBe(0)
+
+	const result = await sendTestOutboundEmail({
+		userId,
+		from,
+		accountEmail: email,
+	})
+
+	expect(result.status).toBe('sent')
+	expect(await readDailyEmailSendCounter(userId)).toBe(1)
+})
+
+test('sendOutboundEmail stays unlimited for NULL-plan users while still counting attempts', async () => {
+	await ensureEmailTestSchema(env.APP_DB)
+	const limit = planLimits.personal.maxEmailSendsPerDay
+	if (limit === null)
+		throw new Error('Expected a numeric personal email limit.')
+
+	{
+		const email = `legacy-${crypto.randomUUID()}@example.com`
+		const userId = await createStableUserIdFromEmail(email)
+		await seedVerifiedAccountWithPlan({ email, plan: null })
+		const from = await seedVerifiedSender(userId)
+		for (let index = 0; index < limit; index += 1) {
+			await incrementDailyEntitlementCounter({
+				db: env.APP_DB,
+				userId,
+				resource: 'email_sends_per_day',
+			})
+		}
+		expect(await readDailyEmailSendCounter(userId)).toBe(limit)
+
+		const result = await sendTestOutboundEmail({
+			userId,
+			from,
+			accountEmail: email,
+		})
+		expect(result.status).toBe('sent')
+		expect(await readDailyEmailSendCounter(userId)).toBe(limit + 1)
+	}
+
+	{
+		// A verified account whose email does not hash to the userId (for
+		// example a mismatched synthetic context) fails open to unlimited
+		// while the counter still tracks attempts.
+		const email = `mismatched-${crypto.randomUUID()}@example.com`
+		const userId = `email-outbound-mismatch-${crypto.randomUUID()}`
+		await seedVerifiedAccountWithPlan({ email, plan: 'personal' })
+		const from = await seedVerifiedSender(userId)
+		for (let index = 0; index < limit; index += 1) {
+			await incrementDailyEntitlementCounter({
+				db: env.APP_DB,
+				userId,
+				resource: 'email_sends_per_day',
+			})
+		}
+		expect(await readDailyEmailSendCounter(userId)).toBe(limit)
+
+		const result = await sendTestOutboundEmail({
+			userId,
+			from,
+			accountEmail: email,
+		})
+		expect(result.status).toBe('sent')
+		expect(await readDailyEmailSendCounter(userId)).toBe(limit + 1)
+	}
 })

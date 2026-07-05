@@ -119,6 +119,7 @@ const userScopedTables: ReadonlyArray<UserScopedDeleteTarget> = [
 	{ kind: 'user_id', table: 'email_inbox_addresses' },
 	{ kind: 'user_id', table: 'email_inboxes' },
 	{ kind: 'user_id', table: 'email_sender_identities' },
+	{ kind: 'user_id', table: 'entitlement_daily_counters' },
 	{
 		kind: 'community_listing_child',
 		table: 'community_ratings',

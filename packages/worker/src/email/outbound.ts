@@ -1,5 +1,6 @@
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
 import { isAccountEmailVerified } from '#app/email-verification.ts'
+import { consumeDailyEntitlement } from '#worker/entitlements/service.ts'
 import { recordUsage } from '#worker/usage/record-usage.ts'
 import { normalizeEmailAddress } from './address.ts'
 import {
@@ -26,6 +27,10 @@ type SendEmailEnv = Pick<
 export type EmailSendInput = {
 	env: SendEmailEnv
 	userId: string
+	/**
+	 * Acting user's account email (not the message from/to). Used for the
+	 * verified-account gate and for entitlement plan lookup.
+	 */
 	accountEmail: string
 	from: string
 	to: string | Array<string>
@@ -215,6 +220,15 @@ export async function sendOutboundEmail(
 	const text = input.text?.trim() || null
 	const html = input.html?.trim() || null
 	if (!text && !html) throw new Error('Email text or HTML body is required.')
+
+	// Atomic check-and-increment: the counter tracks attempts for every user
+	// (plan or not) and denies the send when a plan's daily limit is reached.
+	await consumeDailyEntitlement({
+		db: input.env.APP_DB,
+		userId: input.userId,
+		email: input.accountEmail,
+		resource: 'email_sends_per_day',
+	})
 
 	const existingThreadId = original?.threadId ?? input.threadId ?? null
 	const thread = existingThreadId
