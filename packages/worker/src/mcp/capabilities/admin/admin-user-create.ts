@@ -9,10 +9,7 @@ import {
 } from './admin-shared.ts'
 
 const inputSchema = z.object({
-	email: z
-		.string()
-		.email()
-		.describe('Email address for the account to create.'),
+	email: z.email().describe('Email address for the account to create.'),
 	username: z
 		.string()
 		.min(1)
