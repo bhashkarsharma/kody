@@ -8,10 +8,14 @@ import {
 import {
 	navigate,
 	routerEvents,
-	listenToRouterNavigation,
 	readCurrentRouterHref,
 } from '#client/client-router.tsx'
-import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { consumeStaleNavigationData } from '#client/navigation-data.ts'
+import {
+	routeLoaderRedirect,
+	type RouteLoaderResult,
+} from '#client/route-loader.ts'
 import { createDoubleCheck } from '#client/double-check.ts'
 import {
 	type AccountStatus,
@@ -492,6 +496,40 @@ function getDataRefreshKey(href: string) {
 	return `${url.pathname}?allowed-host=${requestedHost}&capability=${requestedCapability}&package_id=${requestedPackageId}&new-secret=${newSecretQuery}`
 }
 
+function buildSecretsApiRequestUrl(href: string) {
+	const pageUrl = new URL(href, 'http://localhost')
+	const selection = getSelectionState(href)
+	const requestUrl = new URL(accountSecretsApiPath, 'http://localhost')
+	requestUrl.search = pageUrl.search
+	if (selection.selectedSecretId) {
+		requestUrl.searchParams.set('selected', selection.selectedSecretId)
+	} else {
+		requestUrl.searchParams.delete('selected')
+	}
+	return requestUrl
+}
+
+export async function accountSecretsRouteLoader(
+	url: URL,
+	signal: AbortSignal,
+): Promise<RouteLoaderResult> {
+	const href = `${url.pathname}${url.search}`
+	const requestUrl = buildSecretsApiRequestUrl(href)
+	const response = await fetch(`${requestUrl.pathname}${requestUrl.search}`, {
+		headers: { Accept: 'application/json' },
+		credentials: 'include',
+		signal,
+	})
+	if (response.status === 401) {
+		return routeLoaderRedirect('/login')
+	}
+	const payload = await readJson<AccountSecretsPayload>(response)
+	if (!response.ok || !payload?.ok) {
+		throw new Error('Unable to load your secrets.')
+	}
+	return { accountSecrets: payload }
+}
+
 function readFilterState(
 	href: string,
 	apps: Array<PackageAppOption>,
@@ -682,13 +720,7 @@ export function AccountSecretsRoute(handle: Handle) {
 		const requestId = ++loadRequestId
 		loadingDataKey = dataKey
 		try {
-			const requestUrl = new URL(accountSecretsApiPath, 'http://localhost')
-			requestUrl.search = getCurrentSearch()
-			if (selection.selectedSecretId) {
-				requestUrl.searchParams.set('selected', selection.selectedSecretId)
-			} else {
-				requestUrl.searchParams.delete('selected')
-			}
+			const requestUrl = buildSecretsApiRequestUrl(href)
 
 			const response = await fetch(
 				`${requestUrl.pathname}${requestUrl.search}`,
@@ -801,8 +833,12 @@ export function AccountSecretsRoute(handle: Handle) {
 				nextUrl.searchParams.delete('capability')
 				nextUrl.searchParams.delete('package_id')
 				nextUrl.searchParams.delete('package')
+				// `navigate` is async (preload-then-commit); the commit render
+				// consumes its preloaded data and updates `lastLoadedDataKey`.
+				// Pre-setting it to the destination here would make interim
+				// renders (current URL unchanged) look like a location change
+				// and fire a spurious refetch for the pre-approval URL.
 				navigate(`${nextUrl.pathname}${nextUrl.search}`)
-				lastLoadedDataKey = getDataRefreshKey(nextUrl.toString())
 			}
 		} catch (error) {
 			submittingApprovalAction = null
@@ -1041,25 +1077,12 @@ export function AccountSecretsRoute(handle: Handle) {
 		handle.update()
 	}
 
-	listenToRouterNavigation(handle, () => {
-		const href = getCurrentHref()
-		const nextDataKey = getDataRefreshKey(href)
-		if (nextDataKey !== lastLoadedDataKey && status !== 'loading') {
-			status = 'loading'
-			handle.update()
-		}
-	})
-
-	function applyEmbeddedLoaderData(href: string) {
+	function applyRouteLoaderData(href: string) {
 		if (!isAccountSecretsPath(href)) return false
-		const embedded = tryConsumeEmbeddedLoaderData(
-			handle,
-			'accountSecrets',
-			href,
-		)
-		if (!embedded) return false
+		const routeData = tryConsumeRouteLoaderData(handle, 'accountSecrets', href)
+		if (!routeData) return false
 		const selection = getSelectionState(href)
-		applyPayload(embedded, selection, embedded.approvalError)
+		applyPayload(routeData, selection, routeData.approvalError)
 		lastLoadedDataKey = getDataRefreshKey(href)
 		lastFailedDataKey = null
 		return true
@@ -1085,21 +1108,25 @@ export function AccountSecretsRoute(handle: Handle) {
 		]
 
 		const currentDataKey = getDataRefreshKey(currentHref)
+		const appliedRouteData = applyRouteLoaderData(currentHref)
+		// A same-path refresh whose loader failed leaves no preload and no
+		// data-key change; the stale marker forces the fallback refetch.
+		const needsStaleRefresh =
+			consumeStaleNavigationData(currentHref) && !appliedRouteData
 		const isRefreshingForLocationChange =
 			status !== 'loading' &&
 			currentDataKey !== lastLoadedDataKey &&
 			currentDataKey !== lastFailedDataKey
 		const isLoadingCurrentLocation = loadingDataKey === currentDataKey
 		if (
-			(status === 'loading' || isRefreshingForLocationChange) &&
-			!isLoadingCurrentLocation
+			!appliedRouteData &&
+			(status === 'loading' ||
+				isRefreshingForLocationChange ||
+				needsStaleRefresh) &&
+			!isLoadingCurrentLocation &&
+			typeof document !== 'undefined'
 		) {
-			if (
-				!applyEmbeddedLoaderData(currentHref) &&
-				typeof document !== 'undefined'
-			) {
-				handle.queueTask(loadAccountSecrets)
-			}
+			handle.queueTask(loadAccountSecrets)
 		}
 
 		const activeSecretId =

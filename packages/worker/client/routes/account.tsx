@@ -1,10 +1,8 @@
 import { type Handle, css } from 'remix/ui'
 import { on } from '#client/event-mixin.ts'
-import {
-	listenToRouterNavigation,
-	readCurrentRouterHref,
-} from '#client/client-router.tsx'
-import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
+import { readCurrentRouterHref } from '#client/client-router.tsx'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { consumeStaleNavigationData } from '#client/navigation-data.ts'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import {
 	cardCss,
@@ -23,6 +21,10 @@ import {
 	accountProfileApiPath,
 	readJson,
 } from '#client/routes/account-approval-shared.ts'
+import {
+	routeLoaderRedirect,
+	type RouteLoaderResult,
+} from '#client/route-loader.ts'
 
 type AccountProfilePayload = {
 	ok: true
@@ -33,6 +35,25 @@ type AccountProfilePayload = {
 
 function isAccountPath(href: string) {
 	return new URL(href, 'http://localhost').pathname === '/account'
+}
+
+export async function accountRouteLoader(
+	url: URL,
+	signal: AbortSignal,
+): Promise<RouteLoaderResult> {
+	const response = await fetch(`${accountProfileApiPath}${url.search}`, {
+		headers: { Accept: 'application/json' },
+		credentials: 'include',
+		signal,
+	})
+	if (response.status === 401) {
+		return routeLoaderRedirect('/login')
+	}
+	const payload = await readJson<AccountProfilePayload>(response)
+	if (!response.ok || !payload?.ok) {
+		throw new Error('Unable to load your account.')
+	}
+	return { accountProfile: payload }
 }
 
 export function AccountRoute(handle: Handle) {
@@ -138,25 +159,13 @@ export function AccountRoute(handle: Handle) {
 		}
 	}
 
-	listenToRouterNavigation(handle, () => {
-		const href = readCurrentRouterHref(handle)
-		if (href !== lastLoadedHref && status !== 'loading') {
-			status = 'loading'
-			handle.update()
-		}
-	})
-
-	function applyEmbeddedLoaderData(href: string) {
+	function applyRouteLoaderData(href: string) {
 		if (!isAccountPath(href)) return false
-		const embedded = tryConsumeEmbeddedLoaderData(
-			handle,
-			'accountProfile',
-			href,
-		)
-		if (!embedded) return false
-		email = embedded.email
-		username = embedded.username
-		draftUsername = embedded.username
+		const routeData = tryConsumeRouteLoaderData(handle, 'accountProfile', href)
+		if (!routeData) return false
+		email = routeData.email
+		username = routeData.username
+		draftUsername = routeData.username
 		status = 'ready'
 		message = null
 		messageTone = 'info'
@@ -166,15 +175,21 @@ export function AccountRoute(handle: Handle) {
 
 	return () => {
 		const currentHref = readCurrentRouterHref(handle)
+		const appliedRouteData = applyRouteLoaderData(currentHref)
+		// A same-path refresh whose loader failed leaves no preload and no
+		// href change; the stale marker forces the fallback refetch.
+		const needsStaleRefresh =
+			consumeStaleNavigationData(currentHref) && !appliedRouteData
 		const isRefreshingForLocationChange =
 			status !== 'loading' && currentHref !== lastLoadedHref
-		if (status === 'loading' || isRefreshingForLocationChange) {
-			if (
-				!applyEmbeddedLoaderData(currentHref) &&
-				typeof document !== 'undefined'
-			) {
-				handle.queueTask(loadAccountProfile)
-			}
+		if (
+			!appliedRouteData &&
+			(status === 'loading' ||
+				isRefreshingForLocationChange ||
+				needsStaleRefresh) &&
+			typeof document !== 'undefined'
+		) {
+			handle.queueTask(loadAccountProfile)
 		}
 		const isSaving = saveStatus === 'saving'
 		const normalizedDraftUsername = draftUsername.trim().toLowerCase()

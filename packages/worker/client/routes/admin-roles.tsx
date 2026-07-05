@@ -1,9 +1,7 @@
 import { type Handle, css } from 'remix/ui'
-import {
-	listenToRouterNavigation,
-	readCurrentRouterHref,
-} from '#client/client-router.tsx'
-import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
+import { readCurrentRouterHref } from '#client/client-router.tsx'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { consumeStaleNavigationData } from '#client/navigation-data.ts'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import { getSecondaryButtonCss } from '#client/styles/style-primitives.ts'
@@ -14,6 +12,10 @@ import {
 	AccountManagementShell,
 } from './account-management-components.tsx'
 import { type AdminRolesLoaderData } from '#app/loader-data.ts'
+import {
+	routeLoaderRedirect,
+	type RouteLoaderResult,
+} from '#client/route-loader.ts'
 
 type AccountStatus = 'loading' | 'ready' | 'error'
 
@@ -21,6 +23,28 @@ const adminRolesApiPath = '/admin/roles.json'
 
 function isAdminRolesPath(href: string) {
 	return new URL(href, 'http://localhost').pathname === '/admin/roles'
+}
+
+export async function adminRolesRouteLoader(
+	_url: URL,
+	signal: AbortSignal,
+): Promise<RouteLoaderResult> {
+	const response = await fetch(adminRolesApiPath, {
+		headers: { Accept: 'application/json' },
+		credentials: 'include',
+		signal,
+	})
+	if (response.status === 401) {
+		return routeLoaderRedirect('/login')
+	}
+	if (response.status === 403) {
+		throw new Error('You do not have permission to view admin roles.')
+	}
+	const payload = await readJson<AdminRolesLoaderData>(response)
+	if (!response.ok || !payload?.ok) {
+		throw new Error('Unable to load admin roles.')
+	}
+	return { adminRoles: payload }
 }
 
 export function AdminRolesRoute(handle: Handle) {
@@ -75,41 +99,46 @@ export function AdminRolesRoute(handle: Handle) {
 		}
 	}
 
-	listenToRouterNavigation(handle, () => {
-		const href = readCurrentRouterHref(handle)
-		if (href !== lastLoadedHref) {
-			status = 'loading'
-			lastFailedHref = null
-			handle.update()
-		}
-	})
-
-	function applyEmbeddedLoaderData(href: string) {
+	function applyRouteLoaderData(href: string) {
 		if (!isAdminRolesPath(href)) return false
-		const embedded = tryConsumeEmbeddedLoaderData(handle, 'adminRoles', href)
-		if (!embedded) return false
-		roles = embedded.roles
+		const routeData = tryConsumeRouteLoaderData(handle, 'adminRoles', href)
+		if (!routeData) return false
+		roles = routeData.roles
 		status = 'ready'
 		message = null
 		lastLoadedHref = href
+		lastFailedHref = null
 		return true
 	}
 
 	const secondaryButtonCss = getSecondaryButtonCss()
 
+	let lastSeenHref = ''
+
 	return () => {
 		const currentHref = readCurrentRouterHref(handle)
+		// The failure latch only guards retry loops for the location that
+		// failed; leaving it (or coming back) must allow a fresh attempt.
+		if (currentHref !== lastSeenHref) {
+			lastSeenHref = currentHref
+			lastFailedHref = null
+		}
 
+		const appliedRouteData = applyRouteLoaderData(currentHref)
+		// A same-path refresh whose loader failed leaves no preload and no
+		// href change; the stale marker forces the fallback refetch.
+		const needsStaleRefresh =
+			consumeStaleNavigationData(currentHref) && !appliedRouteData
 		const needsLoad =
-			(status === 'loading' || currentHref !== lastLoadedHref) &&
+			(status === 'loading' ||
+				currentHref !== lastLoadedHref ||
+				needsStaleRefresh) &&
 			currentHref !== lastFailedHref &&
 			loadingForHref !== currentHref
-		if (needsLoad && !applyEmbeddedLoaderData(currentHref)) {
-			if (typeof document !== 'undefined') {
-				status = 'loading'
-				loadingForHref = currentHref
-				handle.queueTask(loadAdminRoles)
-			}
+		if (!appliedRouteData && needsLoad && typeof document !== 'undefined') {
+			status = 'loading'
+			loadingForHref = currentHref
+			handle.queueTask(loadAdminRoles)
 		}
 
 		return (

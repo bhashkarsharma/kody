@@ -1,16 +1,17 @@
 import { type Handle, css } from 'remix/ui'
 import { createHref } from 'remix/route-pattern/href'
 import { on } from '#client/event-mixin.ts'
-import {
-	listenToRouterNavigation,
-	navigate,
-	readCurrentRouterHref,
-} from '#client/client-router.tsx'
-import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
+import { navigate, readCurrentRouterHref } from '#client/client-router.tsx'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { consumeStaleNavigationData } from '#client/navigation-data.ts'
 import {
 	type AccountStatus,
 	readJson,
 } from '#client/routes/account-approval-shared.ts'
+import {
+	routeLoaderRedirect,
+	type RouteLoaderResult,
+} from '#client/route-loader.ts'
 import {
 	colors,
 	mq,
@@ -185,6 +186,26 @@ function isAccountPackageInvocationTokensPath(href: string) {
 		path === `${accountPackageInvocationTokensBasePath}/new` ||
 		path.startsWith(`${accountPackageInvocationTokensBasePath}/`)
 	)
+}
+
+export async function accountPackageInvocationTokensRouteLoader(
+	_url: URL,
+	signal: AbortSignal,
+): Promise<RouteLoaderResult> {
+	const response = await fetch(accountPackageInvocationTokensApiPath, {
+		headers: { Accept: 'application/json' },
+		credentials: 'include',
+		signal,
+	})
+	if (response.status === 401) {
+		return routeLoaderRedirect('/login')
+	}
+	const payload =
+		await readJson<AccountPackageInvocationTokensPayload>(response)
+	if (!response.ok || !payload?.ok) {
+		throw new Error('Unable to load package invocation tokens.')
+	}
+	return { accountPackageInvocationTokens: payload }
 }
 
 function getSelectedTokenIdFromPath(href: string) {
@@ -363,14 +384,13 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 		)
 	}
 
-	function normalizeRouterHref(href: string) {
-		if (typeof window === 'undefined') return href
-		const destination = new URL(href, window.location.href)
-		return `${destination.pathname}${destination.search}${destination.hash}`
-	}
-
 	function syncRouterLocation(nextPath: string) {
-		lastLoadedHref = normalizeRouterHref(nextPath)
+		// Do not pre-set `lastLoadedHref` to the destination: `navigate` is
+		// async (preload-then-commit), so until it commits the current href is
+		// unchanged and a pre-set would make interim renders look like a
+		// location change and fire a spurious fallback fetch for the old URL.
+		// The commit render consumes the navigation's preloaded data (or the
+		// stale marker) and updates `lastLoadedHref` itself.
 		navigate(nextPath)
 	}
 
@@ -887,23 +907,15 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 		handle.update()
 	}
 
-	listenToRouterNavigation(handle, () => {
-		const href = readCurrentRouterHref(handle)
-		if (href !== lastLoadedHref && status !== 'loading') {
-			status = 'loading'
-			handle.update()
-		}
-	})
-
-	function applyEmbeddedLoaderData(href: string) {
+	function applyRouteLoaderData(href: string) {
 		if (!isAccountPackageInvocationTokensPath(href)) return false
-		const embedded = tryConsumeEmbeddedLoaderData(
+		const routeData = tryConsumeRouteLoaderData(
 			handle,
 			'accountPackageInvocationTokens',
 			href,
 		)
-		if (!embedded) return false
-		applyPayload(embedded, href)
+		if (!routeData) return false
+		applyPayload(routeData, href)
 		status = 'ready'
 		message = null
 		messageTone = 'info'
@@ -913,15 +925,21 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 
 	return () => {
 		const currentHref = readCurrentRouterHref(handle)
+		const appliedRouteData = applyRouteLoaderData(currentHref)
+		// A same-path refresh whose loader failed leaves no preload and no
+		// href change; the stale marker forces the fallback refetch.
+		const needsStaleRefresh =
+			consumeStaleNavigationData(currentHref) && !appliedRouteData
 		const isRefreshingForLocationChange =
 			status !== 'loading' && currentHref !== lastLoadedHref
-		if (status === 'loading' || isRefreshingForLocationChange) {
-			if (
-				!applyEmbeddedLoaderData(currentHref) &&
-				typeof document !== 'undefined'
-			) {
-				handle.queueTask(loadTokens)
-			}
+		if (
+			!appliedRouteData &&
+			(status === 'loading' ||
+				isRefreshingForLocationChange ||
+				needsStaleRefresh) &&
+			typeof document !== 'undefined'
+		) {
+			handle.queueTask(loadTokens)
 		}
 		const isMutating = saveState !== 'idle'
 		const isCreatingToken = isNewTokenPath(currentHref)

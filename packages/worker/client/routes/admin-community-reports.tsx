@@ -1,11 +1,9 @@
 import { type Handle, css } from 'remix/ui'
 import { on } from '#client/event-mixin.ts'
-import {
-	listenToRouterNavigation,
-	readCurrentRouterHref,
-} from '#client/client-router.tsx'
+import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { readRouterSearch } from '#client/router-location.tsx'
-import { tryConsumeEmbeddedLoaderData } from '#client/loader-data-context.tsx'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { consumeStaleNavigationData } from '#client/navigation-data.ts'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import {
@@ -23,6 +21,10 @@ import {
 	AccountManagementShell,
 } from './account-management-components.tsx'
 import { type AdminCommunityReportsLoaderData } from '#app/loader-data.ts'
+import {
+	routeLoaderRedirect,
+	type RouteLoaderResult,
+} from '#client/route-loader.ts'
 
 type AdminCommunityReportListItem =
 	AdminCommunityReportsLoaderData['reports'][number]
@@ -59,6 +61,28 @@ function buildReportsHref(handle: Handle, status: string) {
 	if (status === 'open') url.searchParams.delete('status')
 	else url.searchParams.set('status', status)
 	return `${url.pathname}${url.search}`
+}
+
+export async function adminCommunityReportsRouteLoader(
+	url: URL,
+	signal: AbortSignal,
+): Promise<RouteLoaderResult> {
+	const response = await fetch(`${adminCommunityReportsApiPath}${url.search}`, {
+		headers: { Accept: 'application/json' },
+		credentials: 'include',
+		signal,
+	})
+	if (response.status === 401) {
+		return routeLoaderRedirect('/login')
+	}
+	if (response.status === 403) {
+		throw new Error('You do not have permission to view community reports.')
+	}
+	const payload = await readJson<AdminCommunityReportsLoaderData>(response)
+	if (!response.ok || !payload?.ok) {
+		throw new Error('Unable to load community reports.')
+	}
+	return { adminCommunityReports: payload }
 }
 
 export function AdminCommunityReportsRoute(handle: Handle) {
@@ -201,48 +225,53 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 		}
 	}
 
-	listenToRouterNavigation(handle, () => {
-		const href = readCurrentRouterHref(handle)
-		if (href !== lastLoadedHref) {
-			status = 'loading'
-			lastFailedHref = null
-			handle.update()
-		}
-	})
-
-	function applyEmbeddedLoaderData(href: string) {
+	function applyRouteLoaderData(href: string) {
 		if (!isAdminCommunityReportsPath(href)) return false
-		const embedded = tryConsumeEmbeddedLoaderData(
+		const routeData = tryConsumeRouteLoaderData(
 			handle,
 			'adminCommunityReports',
 			href,
 		)
-		if (!embedded) return false
-		reports = embedded.reports
-		statusFilter = embedded.statusFilter
+		if (!routeData) return false
+		reports = routeData.reports
+		statusFilter = routeData.statusFilter
 		status = 'ready'
 		message = null
 		lastLoadedHref = href
+		lastFailedHref = null
 		return true
 	}
 
 	const secondaryButtonCss = getSecondaryButtonCss()
 	const dangerButtonCss = getDangerButtonCss()
 
+	let lastSeenHref = ''
+
 	return () => {
 		const currentHref = readCurrentRouterHref(handle)
 		const isMutating = actionState !== 'idle'
+		// The failure latch only guards retry loops for the location that
+		// failed; leaving it (or coming back) must allow a fresh attempt.
+		if (currentHref !== lastSeenHref) {
+			lastSeenHref = currentHref
+			lastFailedHref = null
+		}
 
+		const appliedRouteData = applyRouteLoaderData(currentHref)
+		// A same-path refresh whose loader failed leaves no preload and no
+		// href change; the stale marker forces the fallback refetch.
+		const needsStaleRefresh =
+			consumeStaleNavigationData(currentHref) && !appliedRouteData
 		const needsLoad =
-			(status === 'loading' || currentHref !== lastLoadedHref) &&
+			(status === 'loading' ||
+				currentHref !== lastLoadedHref ||
+				needsStaleRefresh) &&
 			currentHref !== lastFailedHref &&
 			loadingForHref !== currentHref
-		if (needsLoad && !applyEmbeddedLoaderData(currentHref)) {
-			if (typeof document !== 'undefined') {
-				status = 'loading'
-				loadingForHref = currentHref
-				handle.queueTask(loadReports)
-			}
+		if (!appliedRouteData && needsLoad && typeof document !== 'undefined') {
+			status = 'loading'
+			loadingForHref = currentHref
+			handle.queueTask(loadReports)
 		}
 
 		return (
