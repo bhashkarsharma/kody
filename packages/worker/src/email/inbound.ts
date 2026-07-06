@@ -1,3 +1,4 @@
+import { isAccountEmailVerified } from '#app/email-verification.ts'
 import {
 	findReplyTokenHash,
 	normalizeEmailAddress,
@@ -63,6 +64,33 @@ export async function handleInboundEmail(
 	}
 
 	const userId = inboxAddress.userId
+	// Inbox rows only store the stable user id, so this uses the stable-id
+	// scan inside `isAccountEmailVerified` (same pattern as outbound send).
+	// Cost is O(users) hashing per inbound message; if user counts grow
+	// enough to matter, add an indexed stable-id column on `users` instead
+	// of weakening this fail-closed check.
+	const accountEmailVerified = await isAccountEmailVerified({
+		db: env.APP_DB,
+		stableUserId: userId,
+	})
+	if (!accountEmailVerified) {
+		const reason = 'Account email is not verified.'
+		message.setReject(reason)
+		await insertEmailDeliveryEvent({
+			db: env.APP_DB,
+			userId,
+			inboxId: inbox.id,
+			eventType: 'rejected',
+			provider: 'cloudflare-email-routing',
+			detail: {
+				recipient,
+				reason,
+				phase: 'account-verification',
+			},
+		}).catch(() => undefined)
+		return
+	}
+
 	let parsed: Awaited<ReturnType<typeof parseForwardableEmailMessage>>
 	try {
 		parsed = await parseForwardableEmailMessage(message)
