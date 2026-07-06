@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { expect, test, vi } from 'vitest'
+import { expect, test } from 'vitest'
 import {
 	getEmailDomain,
 	getEmailLocalPart,
@@ -16,6 +16,7 @@ import {
 	listEmailAttachmentsForMessage,
 	upsertEmailSenderIdentity,
 } from './repo.ts'
+import { createForwardableEmailMessage } from './test-fixtures.ts'
 import { ensureEmailTestSchema } from './test-schema.ts'
 import { buildPublishedSourceManifestSnapshotKvKey } from '#worker/package-runtime/published-runtime-artifacts.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
@@ -65,38 +66,6 @@ async function seedVerifiedAccount(input: {
 	username: string
 }) {
 	await seedAccount(input)
-}
-
-function createForwardableEmailMessage(input: {
-	from: string
-	to: string
-	raw: string
-}): ForwardableEmailMessage & { rejectedReason: string | null } {
-	const encoded = new TextEncoder().encode(input.raw)
-	const headers = new Headers()
-	for (const line of input.raw.split(/\r?\n/)) {
-		if (!line.trim()) break
-		const separator = line.indexOf(':')
-		if (separator <= 0) continue
-		headers.append(line.slice(0, separator), line.slice(separator + 1).trim())
-	}
-	return {
-		from: input.from,
-		to: input.to,
-		headers,
-		raw: new Blob([encoded]).stream(),
-		rawSize: encoded.byteLength,
-		rejectedReason: null,
-		setReject(reason: string) {
-			this.rejectedReason = reason
-		},
-		async forward() {
-			return { messageId: 'unused-forward' }
-		},
-		async reply() {
-			return { messageId: 'unused-reply' }
-		},
-	}
 }
 
 test('inbound email handler stores all routed inbound messages', async () => {
@@ -250,25 +219,47 @@ test('inbound email handler rejects unknown aliases and malformed messages witho
 		localPart: getEmailLocalPart(address),
 		domain: getEmailDomain(address),
 	})
-	const malformedMessage = createForwardableEmailMessage({
+	// Oversize mail now trips the pre-parse email_message_bytes gate (the
+	// NULL-plan fallback is 512 KiB) with the generic over-quota reason.
+	const oversizeMessage = createForwardableEmailMessage({
 		from: 'sender@example.net',
 		to: address,
 		raw: 'Subject: Too large\r\n\r\nBody',
 	})
-	Object.defineProperty(malformedMessage, 'rawSize', {
+	Object.defineProperty(oversizeMessage, 'rawSize', {
 		value: 600 * 1024,
 	})
 
-	await handleInboundEmail(malformedMessage, env)
+	await handleInboundEmail(oversizeMessage, env)
 
-	expect(malformedMessage.rejectedReason).toMatch(/too large/)
-	const malformedMessages = await listEmailMessages({
+	expect(oversizeMessage.rejectedReason).toBe(
+		'Recipient mailbox is over quota.',
+	)
+
+	// A raw stream that fails mid-read exercises the parse-failure path.
+	const unreadableMessage = createForwardableEmailMessage({
+		from: 'sender@example.net',
+		to: address,
+		raw: 'Subject: Unreadable\r\n\r\nBody',
+	})
+	Object.defineProperty(unreadableMessage, 'raw', {
+		value: new ReadableStream({
+			pull() {
+				throw new Error('raw stream read failed')
+			},
+		}),
+	})
+
+	await handleInboundEmail(unreadableMessage, env)
+
+	expect(unreadableMessage.rejectedReason).toMatch(/raw stream read failed/)
+	const rejectedMessages = await listEmailMessages({
 		db: env.APP_DB,
 		userId,
 		inboxId: inbox.id,
 		limit: 10,
 	})
-	expect(malformedMessages).toEqual([])
+	expect(rejectedMessages).toEqual([])
 })
 
 test('inbound email handler rejects mail for unverified accounts', async () => {
@@ -321,16 +312,30 @@ test('inbound email handler rejects mail for unverified accounts', async () => {
 		limit: 10,
 	})
 	expect(messages).toEqual([])
+	// Unverified-account rejections go through the bounded recorder: one
+	// detailed event plus the daily aggregate row.
 	const events = await env.APP_DB.prepare(
 		`SELECT event_type, detail_json FROM email_delivery_events WHERE user_id = ?`,
 	)
 		.bind(userId)
 		.all<{ event_type: string; detail_json: string }>()
-	expect(events.results).toHaveLength(1)
-	expect(events.results?.[0]?.event_type).toBe('rejected')
-	expect(JSON.parse(events.results?.[0]?.detail_json ?? '{}')).toMatchObject({
+	const details = (events.results ?? []).map((row) => ({
+		eventType: row.event_type,
+		detail: JSON.parse(row.detail_json) as Record<string, unknown>,
+	}))
+	expect(details).toHaveLength(2)
+	expect(details.every((row) => row.eventType === 'rejected')).toBe(true)
+	expect(
+		details.find((row) => row.detail['aggregate'] !== true)?.detail,
+	).toMatchObject({
 		reason: 'Account email is not verified.',
 		phase: 'account-verification',
+	})
+	expect(
+		details.find((row) => row.detail['aggregate'] === true)?.detail,
+	).toMatchObject({
+		count: 1,
+		last_phase: 'account-verification',
 	})
 })
 

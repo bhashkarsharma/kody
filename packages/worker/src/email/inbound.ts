@@ -1,10 +1,23 @@
-import { isAccountEmailVerified } from '#app/email-verification.ts'
+import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
+import {
+	nullPlanEmailFallbackLimits,
+	resolveEmailResourceLimit,
+} from '#worker/entitlements/plans.ts'
+import {
+	assertWithinEntitlement,
+	consumeDailyEntitlement,
+	findUserAccountByStableUserId,
+} from '#worker/entitlements/service.ts'
+import { recordUsage } from '#worker/usage/record-usage.ts'
 import {
 	findReplyTokenHash,
 	normalizeEmailAddress,
 	normalizeSubject,
 } from './address.ts'
-import { parseForwardableEmailMessage } from './parser.ts'
+import {
+	maxInlineRawMimeBytes,
+	parseForwardableEmailMessage,
+} from './parser.ts'
 import {
 	createEmailThread,
 	findEmailThreadForInboundMessage,
@@ -13,13 +26,17 @@ import {
 	getEmailInboxAddressByReplyTokenHash,
 	insertEmailDeliveryEvent,
 	insertEmailMessageWithAttachments,
+	recordBoundedEmailRejectionEvent,
 	touchEmailThread,
 } from './repo.ts'
 import { dispatchInboundEmailSubscriptionEvents } from './package-subscriptions.ts'
 
 export async function handleInboundEmail(
 	message: ForwardableEmailMessage,
-	env: Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV' | 'APP_BASE_URL'>,
+	env: Pick<
+		Env,
+		'APP_DB' | 'BUNDLE_ARTIFACTS_KV' | 'APP_BASE_URL' | 'USAGE_EVENTS'
+	>,
 	_ctx?: ExecutionContext,
 ) {
 	const recipient = normalizeEmailAddress(message.to)
@@ -64,39 +81,123 @@ export async function handleInboundEmail(
 	}
 
 	const userId = inboxAddress.userId
-	// Inbox rows only store the stable user id, so this uses the stable-id
-	// scan inside `isAccountEmailVerified` (same pattern as outbound send).
-	// Cost is O(users) hashing per inbound message; if user counts grow
-	// enough to matter, add an indexed stable-id column on `users` instead
-	// of weakening this fail-closed check.
-	const accountEmailVerified = await isAccountEmailVerified({
-		db: env.APP_DB,
-		stableUserId: userId,
-	})
-	if (!accountEmailVerified) {
+	const receiveStartedAtMs = Date.now()
+	const recordReceiveUsage = async (input: {
+		entityId?: string | null
+		outcome: 'success' | 'error'
+	}) => {
+		await recordUsage(env, {
+			userId,
+			eventType: 'email_received',
+			entityId: input.entityId ?? null,
+			bytes: message.rawSize,
+			durationMs: Date.now() - receiveStartedAtMs,
+			outcome: input.outcome,
+		})
+	}
+
+	// Inbound volume is attacker-controlled (anyone who learns an alias can
+	// send to it), so every fail-closed gate runs before any parsing work,
+	// cheapest rejection first: verified account, per-message size cap,
+	// per-day receive rate, and stored-message cap (entitlements with
+	// NULL-plan fallbacks). The routing layer has no caller context, so one
+	// stable-id reverse lookup resolves the account email, plan, and
+	// verified state for all of the gates (same fail-closed stable-id scan
+	// `isAccountEmailVerified` uses, with a per-isolate id→email cache).
+	const account = await findUserAccountByStableUserId(env.APP_DB, userId)
+
+	// Verified-account gate first: an unverified (or deleted) account can
+	// never receive mail, so the attempt must not consume any of the daily
+	// receive quota or trip the other counters. Rejection rows go through
+	// the bounded recorder because unverified-alias floods are the same
+	// attacker-controlled row-growth shape as over-quota floods.
+	if (!account?.emailVerified) {
 		const reason = 'Account email is not verified.'
 		message.setReject(reason)
-		await insertEmailDeliveryEvent({
+		await recordBoundedEmailRejectionEvent({
 			db: env.APP_DB,
 			userId,
 			inboxId: inbox.id,
-			eventType: 'rejected',
-			provider: 'cloudflare-email-routing',
-			detail: {
-				recipient,
-				reason,
-				phase: 'account-verification',
-			},
+			recipient,
+			reason,
+			phase: 'account-verification',
 		}).catch(() => undefined)
+		await recordReceiveUsage({ outcome: 'error' })
+		return
+	}
+
+	// The plan's per-message cap also becomes the parser's raw-MIME ceiling
+	// so the two size gates can never disagree; a null (unlimited) plan
+	// limit still keeps the parser's hard platform-bound default.
+	const maxMessageBytes = resolveEmailResourceLimit(
+		account.plan,
+		'email_message_bytes',
+	)
+	try {
+		// Size first: an oversize message is rejected without consuming any
+		// of the owner's daily receive quota (griefing resistance) and
+		// without touching the counters.
+		await assertWithinEntitlement({
+			db: env.APP_DB,
+			userId,
+			email: account.email,
+			resource: 'email_message_bytes',
+			requested: 0,
+			getCurrent: async () => message.rawSize,
+			fallbackLimit: nullPlanEmailFallbackLimits.email_message_bytes,
+		})
+		await consumeDailyEntitlement({
+			db: env.APP_DB,
+			userId,
+			email: account.email,
+			resource: 'email_receives_per_day',
+			fallbackLimit: nullPlanEmailFallbackLimits.email_receives_per_day,
+		})
+		// Check-then-insert: a concurrent burst can overshoot the stored cap
+		// by a few rows, which is the documented row-count-limit trade-off
+		// (see entitlements.md "Concurrency") — this is a denial-of-wallet
+		// backstop, not billing-grade accounting.
+		await assertWithinEntitlement({
+			db: env.APP_DB,
+			userId,
+			email: account.email,
+			resource: 'stored_email_messages',
+			fallbackLimit: nullPlanEmailFallbackLimits.stored_email_messages,
+		})
+	} catch (error) {
+		if (!isEntitlementLimitError(error)) throw error
+		// The SMTP reject reason goes to the arbitrary sender; keep it
+		// generic and store the detailed entitlement message for the owner.
+		// Rejection rows are bounded per inbox per day because over-quota
+		// traffic is exactly the flood these limits exist to absorb.
+		message.setReject('Recipient mailbox is over quota.')
+		await recordBoundedEmailRejectionEvent({
+			db: env.APP_DB,
+			userId,
+			inboxId: inbox.id,
+			recipient,
+			reason: error.message,
+			phase:
+				error.details.resource === 'email_message_bytes'
+					? 'size'
+					: 'entitlement',
+		}).catch(() => undefined)
+		await recordReceiveUsage({ outcome: 'error' })
 		return
 	}
 
 	let parsed: Awaited<ReturnType<typeof parseForwardableEmailMessage>>
 	try {
-		parsed = await parseForwardableEmailMessage(message)
+		parsed = await parseForwardableEmailMessage(message, {
+			maxRawSize: maxMessageBytes ?? maxInlineRawMimeBytes,
+		})
 	} catch (error) {
 		const reason =
 			error instanceof Error ? error.message : 'Failed to parse inbound email.'
+		// Parse failures keep one event per attempt: unlike quota/size
+		// rejections they are bounded by the daily receive quota (the
+		// counter was already consumed above), and the per-attempt detail
+		// is useful for the owner to debug a misbehaving sender.
 		message.setReject(reason)
 		await insertEmailDeliveryEvent({
 			db: env.APP_DB,
@@ -110,6 +211,7 @@ export async function handleInboundEmail(
 				phase: 'parse',
 			},
 		}).catch(() => undefined)
+		await recordReceiveUsage({ outcome: 'error' })
 		return
 	}
 	const now = new Date().toISOString()
@@ -189,6 +291,7 @@ export async function handleInboundEmail(
 			from_address: parsed.headerFrom,
 		},
 	})
+	await recordReceiveUsage({ entityId: stored.id, outcome: 'success' })
 	const dispatchPromise = dispatchInboundEmailSubscriptionEvents({
 		env,
 		userId,

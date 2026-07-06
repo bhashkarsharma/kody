@@ -5,7 +5,13 @@ import {
 	buildEntitlementLimitMessage,
 	isEntitlementLimitError,
 } from './errors.ts'
-import { parsePlanName, planLimits, resolvePlanLimit } from './plans.ts'
+import {
+	nullPlanEmailFallbackLimits,
+	parsePlanName,
+	planLimits,
+	resolveEmailResourceLimit,
+	resolvePlanLimit,
+} from './plans.ts'
 import {
 	assertWithinEntitlement,
 	consumeDailyEntitlement,
@@ -405,6 +411,114 @@ test('consumeDailyEntitlement counts attempts without capping plan-less users', 
 		})
 	}
 	expect(counters[0]?.count).toBe(limit + 1)
+})
+
+test('consumeDailyEntitlement caps plan-less users when a fallback limit is provided', async () => {
+	const { db, counters } = createEntitlementsTestDb()
+	const fallbackLimit = nullPlanEmailFallbackLimits.email_receives_per_day
+	const now = new Date('2026-07-05T15:00:00.000Z')
+	for (let index = 0; index < fallbackLimit; index += 1) {
+		await consumeDailyEntitlement({
+			db,
+			userId: 'user-1',
+			email: null,
+			resource: 'email_receives_per_day',
+			fallbackLimit,
+			now,
+		})
+	}
+	expect(counters[0]?.count).toBe(fallbackLimit)
+
+	const error = await consumeDailyEntitlement({
+		db,
+		userId: 'user-1',
+		email: null,
+		resource: 'email_receives_per_day',
+		fallbackLimit,
+		now,
+	}).then(
+		() => null,
+		(thrown: unknown) => thrown,
+	)
+	if (!(error instanceof EntitlementLimitError)) {
+		throw new Error('Expected an EntitlementLimitError.')
+	}
+	// plan is null because the limit came from the fallback, not a plan.
+	expect(error.details).toMatchObject({
+		code: 'entitlement_limit_exceeded',
+		resource: 'email_receives_per_day',
+		plan: null,
+		limit: fallbackLimit,
+		current: fallbackLimit,
+	})
+	expect(error.message).toContain(
+		`this deployment allows at most ${fallbackLimit} email receives per day`,
+	)
+	expect(counters[0]?.count).toBe(fallbackLimit)
+})
+
+test('resolveEmailResourceLimit prefers plan limits and falls back for plan-less users', () => {
+	expect(resolveEmailResourceLimit('personal', 'email_receives_per_day')).toBe(
+		planLimits.personal.maxEmailReceivesPerDay,
+	)
+	expect(resolveEmailResourceLimit('pro', 'stored_email_messages')).toBe(
+		planLimits.pro.maxStoredEmailMessages,
+	)
+	expect(resolveEmailResourceLimit(null, 'email_receives_per_day')).toBe(
+		nullPlanEmailFallbackLimits.email_receives_per_day,
+	)
+	expect(resolveEmailResourceLimit(null, 'stored_email_messages')).toBe(
+		nullPlanEmailFallbackLimits.stored_email_messages,
+	)
+	expect(resolveEmailResourceLimit(null, 'email_message_bytes')).toBe(
+		nullPlanEmailFallbackLimits.email_message_bytes,
+	)
+	expect(resolvePlanLimit('partner', 'email_receives_per_day')).toBe(
+		planLimits.partner.maxEmailReceivesPerDay,
+	)
+	expect(resolvePlanLimit('partner', 'stored_email_messages')).toBe(
+		planLimits.partner.maxStoredEmailMessages,
+	)
+	expect(resolvePlanLimit('pro', 'email_message_bytes')).toBe(
+		planLimits.pro.maxEmailMessageBytes,
+	)
+})
+
+test('email_message_bytes enforces the per-message size via getCurrent', async () => {
+	const userId = await createStableUserIdFromEmail(plannedEmail)
+	const { db } = createEntitlementsTestDb({
+		users: [{ email: plannedEmail, plan: 'personal' }],
+	})
+	const maxBytes = planLimits.personal.maxEmailMessageBytes
+	if (maxBytes === null) throw new Error('Expected a numeric size cap.')
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId,
+			email: plannedEmail,
+			resource: 'email_message_bytes',
+			requested: 0,
+			getCurrent: async () => maxBytes + 1,
+		}),
+	).rejects.toThrow(`at most ${maxBytes} bytes per email message`)
+	// A message exactly at the cap passes.
+	await assertWithinEntitlement({
+		db,
+		userId,
+		email: plannedEmail,
+		resource: 'email_message_bytes',
+		requested: 0,
+		getCurrent: async () => maxBytes,
+	})
+	// The per-message resource has no accumulating counter.
+	await expect(
+		assertWithinEntitlement({
+			db,
+			userId,
+			email: plannedEmail,
+			resource: 'email_message_bytes',
+		}),
+	).rejects.toThrow('pass getCurrent')
 })
 
 test('requested units and getCurrent overrides are honored', async () => {
