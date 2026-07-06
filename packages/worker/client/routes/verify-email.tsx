@@ -21,7 +21,12 @@ export function VerifyEmailRoute(handle: Handle) {
 				error:
 					'Open the verification link from your email to verify your account.',
 			} satisfies EmailVerificationLoaderData)
-		const title = data.ok ? 'Email verified' : 'Email verification'
+		const isEmailChange = data.ok && data.kind === 'email_change'
+		const title = data.ok
+			? isEmailChange
+				? 'Email changed'
+				: 'Email verified'
+			: 'Email verification'
 
 		return (
 			<section mix={css(pageCss)}>
@@ -29,7 +34,9 @@ export function VerifyEmailRoute(handle: Handle) {
 					<h1 mix={css(pageTitleCss)}>{title}</h1>
 					<p mix={css(pageDescriptionCss)}>
 						{data.ok
-							? 'Your Kody account can now send outbound email.'
+							? isEmailChange
+								? 'Your Kody account now uses the new email address.'
+								: 'Your Kody account can now send outbound email.'
 							: 'We could not verify your email address.'}
 					</p>
 				</header>

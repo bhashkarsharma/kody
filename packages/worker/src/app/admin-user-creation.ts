@@ -6,6 +6,7 @@ import {
 } from '#app/password-reset-tokens.ts'
 import { assignUserRole } from '#app/permissions-db.ts'
 import { getUsernameValidationError, normalizeUsername } from '#app/username.ts'
+import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 
 const adminCreatedNoUsablePasswordHash = 'admin_created_no_usable_password'
 
@@ -148,6 +149,7 @@ export async function adminCreateUserWithPasswordSetup(input: {
 	})
 	const now = input.now ?? new Date()
 	const nowIso = now.toISOString()
+	const stableUserId = await createStableUserIdFromEmail(email)
 	let userId: number | null = null
 
 	try {
@@ -166,6 +168,11 @@ export async function adminCreateUserWithPasswordSetup(input: {
 			)
 		}
 		userId = lastRowId
+		await input.db
+			.prepare(`UPDATE users SET stable_user_id = ? WHERE id = ?`)
+			.bind(stableUserId, userId)
+			.run()
+			.catch(() => undefined)
 	} catch (error) {
 		const uniqueField = getUniqueConstraintField(error)
 		if (uniqueField === 'email') {

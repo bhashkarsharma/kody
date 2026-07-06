@@ -6,6 +6,7 @@ import {
 import { createCookie } from '@remix-run/cookie'
 import { getRequestIp, logAuditEvent } from '#app/audit-log.ts'
 import {
+	createAuthCookie,
 	isSecureRequest,
 	readAuthSessionResult,
 	setAuthSessionSecret,
@@ -13,7 +14,10 @@ import {
 import { getEnv } from '#app/env.ts'
 import { type OAuthAuthorizeLoaderData } from '#app/loader-data.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
-import { createStableUserIdFromEmail } from '#worker/user-id.ts'
+import {
+	createStableUserIdFromEmail,
+	resolveUserStableId,
+} from '#worker/user-id.ts'
 import { createDb, usersTable } from './db.ts'
 import { wantsJson } from './utils.ts'
 import { verifyPassword } from '@kody-internal/shared/password-hash.ts'
@@ -462,7 +466,19 @@ async function handleResetClientRequest(
 	}
 
 	try {
-		const userId = await createStableUserIdFromEmail(sessionEmail)
+		let userId = await createStableUserIdFromEmail(sessionEmail)
+		try {
+			const db = createDb(env.APP_DB)
+			const userRecord = await db.findOne(usersTable, {
+				where: { email: sessionEmail },
+			})
+			if (userRecord) {
+				userId = await resolveUserStableId(userRecord)
+			}
+		} catch {
+			// Reset cleanup predated stored stable ids and can run in OAuth-only
+			// test/adaptor contexts where the users table is unavailable.
+		}
 		const grants = await listUserGrantsForClient(helpers, userId, clientId)
 		await Promise.all(
 			grants.map((grant) => helpers.revokeGrant(grant.id, userId)),
@@ -558,11 +574,13 @@ async function resolveSessionEmail(request: Request, env: Env) {
 		const { session, setCookie } = await readAuthSessionResult(request)
 		const email = session?.email?.trim()
 		return {
+			session,
 			email: email ? email.toLowerCase() : null,
 			setCookie,
 		}
 	} catch {
 		return {
+			session: null,
 			email: null,
 			setCookie: null,
 		}
@@ -753,10 +771,12 @@ export async function handleAuthorizeRequest(
 	const email = String(formData.get('email') ?? '').trim()
 	const password = String(formData.get('password') ?? '')
 	const normalizedEmail = email.toLowerCase()
-	const { email: sessionEmail, setCookie } = await resolveSessionEmail(
-		request,
-		env,
-	)
+	const {
+		session,
+		email: sessionEmail,
+		setCookie: sessionSetCookie,
+	} = await resolveSessionEmail(request, env)
+	let setCookie = sessionSetCookie
 	const hasFormCredentials = Boolean(email && password)
 	const hasSession = Boolean(sessionEmail)
 
@@ -775,6 +795,7 @@ export async function handleAuthorizeRequest(
 
 	let approvedEmail = ''
 	let approvedUsername = ''
+	let approvedUserId = ''
 	if (hasFormCredentials) {
 		const db = createDb(env.APP_DB)
 		const userRecord = await db.findOne(usersTable, {
@@ -814,11 +835,14 @@ export async function handleAuthorizeRequest(
 		}
 		approvedEmail = normalizedEmail
 		approvedUsername = username
+		approvedUserId = await resolveUserStableId(userRecord)
 	} else if (sessionEmail) {
 		const db = createDb(env.APP_DB)
-		const userRecord = await db.findOne(usersTable, {
-			where: { email: sessionEmail },
-		})
+		const sessionDbUserId = Number(session?.id)
+		const userRecord =
+			Number.isSafeInteger(sessionDbUserId) && sessionDbUserId > 0
+				? await db.findOne(usersTable, { where: { id: sessionDbUserId } })
+				: await db.findOne(usersTable, { where: { email: sessionEmail } })
 		if (!userRecord) {
 			void logAuditEvent({
 				category: 'oauth',
@@ -844,13 +868,24 @@ export async function handleAuthorizeRequest(
 			})
 			return respondAuthorizeError(request, 'Username is required.', 401)
 		}
-		approvedEmail = sessionEmail
+		approvedEmail = userRecord.email.trim().toLowerCase()
 		approvedUsername = username
+		approvedUserId = await resolveUserStableId(userRecord)
+		if (session && approvedEmail !== sessionEmail) {
+			setCookie = await createAuthCookie(
+				{
+					id: session.id,
+					email: approvedEmail,
+					rememberMe: session.rememberMe,
+				},
+				isSecureRequest(request),
+			)
+		}
 	}
 
 	const resolvedScopes = resolveScopes(authRequest.scope)
 	if (Array.isArray(resolvedScopes)) {
-		const userId = await createStableUserIdFromEmail(approvedEmail)
+		const userId = approvedUserId
 		const displayName = approvedUsername
 		const { redirectTo } = await helpers.completeAuthorization({
 			request: authRequest,
