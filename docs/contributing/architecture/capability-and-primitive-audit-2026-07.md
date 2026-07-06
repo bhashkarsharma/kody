@@ -120,7 +120,8 @@ change remote id or capabilities namespace rules without a migration plan.
 - Email JSON metadata in `0030-email-primitives.sql` and
   `0031-unified-email-receipt.sql`.
 - Secret policy arrays in `0009-secret-allowed-hosts.sql`,
-  `0010-secret-allowed-capabilities.sql`, and `0023-secret-allowed-packages.sql`.
+  `0010-secret-allowed-capabilities.sql`, and
+  `0023-secret-allowed-packages.sql`.
 - Runtime debug JSON in `0037-package-runtime-debug.sql`.
 - Account export sections in `packages/worker/src/app/account-export.ts` mirror
   the account-deletion inventory and read D1, Durable Object, KV, and Vectorize
