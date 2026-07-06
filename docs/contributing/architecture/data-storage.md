@@ -426,7 +426,7 @@ on write unless a migration backfills existing rows.
 - `secret_entries.allowed_hosts`, `secret_entries.allowed_capabilities`, and
   `secret_entries.allowed_packages` are JSON string lists used as security
   policy inputs (`0009-secret-allowed-hosts.sql`,
-  `0010-secret-allowed-kody.sql`, `0023-secret-allowed-packages.sql`).
+  `0010-secret-allowed-capabilities.sql`, `0023-secret-allowed-packages.sql`).
   Tightening parse-error behavior requires explicit compatibility review.
 - `package_runtime_runs.metadata_json` and `package_runtime_logs.fields_json`
   (`0037-package-runtime-debug.sql`) store bounded debug metadata and log
