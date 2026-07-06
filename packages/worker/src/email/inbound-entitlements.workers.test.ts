@@ -10,32 +10,33 @@ import {
 } from '#worker/entitlements/service.ts'
 import { ensureUsageRollupsTestSchema } from '#worker/usage/test-schema.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
-import {
-	getEmailDomain,
-	getEmailLocalPart,
-	requireNormalizedEmailAddress,
-} from './address.ts'
 import { handleInboundEmail } from './inbound.ts'
 import {
-	createEmailInbox,
-	createEmailInboxAddress,
 	listEmailMessages,
 	maxDetailedEmailRejectionEventsPerDay,
 } from './repo.ts'
 import { createForwardableEmailMessage } from './test-fixtures.ts'
 import { ensureEmailTestSchema } from './test-schema.ts'
 
+const platformBaseUrl = 'https://kody.example.com'
+const platformDomain = 'kody.example.com'
+
+function createInboundEnv() {
+	return { ...env, APP_BASE_URL: platformBaseUrl }
+}
+
 async function seedAccountWithPlan(input: {
 	email: string
 	plan: 'personal' | null
 	emailVerifiedAt?: string | null
 }) {
+	const username = `quota-${crypto.randomUUID().slice(0, 8)}`
 	await env.APP_DB.prepare(
 		`INSERT INTO users (username, email, password_hash, email_verified_at, plan)
 			VALUES (?, ?, ?, ?, ?)`,
 	)
 		.bind(
-			`inbound-entitlement-${crypto.randomUUID().slice(0, 8)}`,
+			username,
 			input.email,
 			'test-password-hash',
 			input.emailVerifiedAt === undefined
@@ -44,27 +45,8 @@ async function seedAccountWithPlan(input: {
 			input.plan,
 		)
 		.run()
-}
-
-async function seedInboxWithAddress(userId: string) {
-	const address = requireNormalizedEmailAddress(
-		`inbox-${crypto.randomUUID()}@example.com`,
-	)
-	const inbox = await createEmailInbox({
-		db: env.APP_DB,
-		userId,
-		name: 'Entitlement inbox',
-		description: 'Entitlement test inbox',
-	})
-	await createEmailInboxAddress({
-		db: env.APP_DB,
-		inboxId: inbox.id,
-		userId,
-		address,
-		localPart: getEmailLocalPart(address),
-		domain: getEmailDomain(address),
-	})
-	return { inbox, address }
+	// The default inbox is auto-provisioned on the first inbound message.
+	return { username, address: `${username}@${platformDomain}` }
 }
 
 function buildInboundMessage(address: string) {
@@ -152,12 +134,11 @@ test('inbound email rejects plan users at the daily receive limit', async () => 
 	const userId = await createStableUserIdFromEmail(email)
 	const limit = planLimits.personal.maxEmailReceivesPerDay
 	if (limit === null) throw new Error('Expected a numeric personal limit.')
-	await seedAccountWithPlan({ email, plan: 'personal' })
-	const { address } = await seedInboxWithAddress(userId)
+	const { address } = await seedAccountWithPlan({ email, plan: 'personal' })
 	await setDailyReceiveCounter(userId, limit)
 
 	const message = buildInboundMessage(address)
-	await handleInboundEmail(message, env)
+	await handleInboundEmail(message, createInboundEnv())
 
 	expect(message.rejectedReason).toBe('Recipient mailbox is over quota.')
 	expect(
@@ -166,8 +147,8 @@ test('inbound email rejects plan users at the daily receive limit', async () => 
 	expect(await readDailyReceiveCounter(userId)).toBe(limit)
 	const rejections = await readRejectionEvents(userId)
 	expect(rejections.detailed).toHaveLength(1)
-	// The plan-specific wording proves the stable-id reverse lookup resolved
-	// the account (the fallback message says "this deployment" instead).
+	// The plan-specific wording proves the username routing resolved the
+	// account (the fallback message says "this deployment" instead).
 	expect(rejections.detailed[0]?.detail).toMatchObject({
 		phase: 'entitlement',
 		reason: expect.stringContaining(
@@ -188,12 +169,11 @@ test('inbound email rejects plan users at the stored message cap and still count
 	const userId = await createStableUserIdFromEmail(email)
 	const cap = planLimits.personal.maxStoredEmailMessages
 	if (cap === null) throw new Error('Expected a numeric personal cap.')
-	await seedAccountWithPlan({ email, plan: 'personal' })
-	const { address } = await seedInboxWithAddress(userId)
+	const { address } = await seedAccountWithPlan({ email, plan: 'personal' })
 	await bulkInsertStoredMessages(userId, cap)
 
 	const message = buildInboundMessage(address)
-	await handleInboundEmail(message, env)
+	await handleInboundEmail(message, createInboundEnv())
 
 	expect(message.rejectedReason).toBe('Recipient mailbox is over quota.')
 	expect(
@@ -216,13 +196,12 @@ test('inbound email applies the NULL-plan fallback receive limit', async () => {
 	// A verified account with a NULL plan gets the deployment fallback.
 	const email = `fallback-${crypto.randomUUID()}@example.com`
 	const userId = await createStableUserIdFromEmail(email)
-	await seedAccountWithPlan({ email, plan: null })
+	const { address } = await seedAccountWithPlan({ email, plan: null })
 	const fallbackLimit = nullPlanEmailFallbackLimits.email_receives_per_day
-	const { address } = await seedInboxWithAddress(userId)
 	await setDailyReceiveCounter(userId, fallbackLimit)
 
 	const message = buildInboundMessage(address)
-	await handleInboundEmail(message, env)
+	await handleInboundEmail(message, createInboundEnv())
 
 	expect(message.rejectedReason).toBe('Recipient mailbox is over quota.')
 	const rejections = await readRejectionEvents(userId)
@@ -240,13 +219,12 @@ test('inbound email rejects oversize messages without consuming the daily receiv
 	const userId = await createStableUserIdFromEmail(email)
 	const maxBytes = planLimits.personal.maxEmailMessageBytes
 	if (maxBytes === null) throw new Error('Expected a numeric size cap.')
-	await seedAccountWithPlan({ email, plan: 'personal' })
-	const { address } = await seedInboxWithAddress(userId)
+	const { address } = await seedAccountWithPlan({ email, plan: 'personal' })
 
 	const message = buildInboundMessage(address)
 	const oversizeBytes = maxBytes + 1
 	Object.defineProperty(message, 'rawSize', { value: oversizeBytes })
-	await handleInboundEmail(message, env)
+	await handleInboundEmail(message, createInboundEnv())
 
 	expect(message.rejectedReason).toBe('Recipient mailbox is over quota.')
 	expect(
@@ -276,14 +254,13 @@ test('inbound email stores at most five detailed rejection events per inbox per 
 	const userId = await createStableUserIdFromEmail(email)
 	const limit = planLimits.personal.maxEmailReceivesPerDay
 	if (limit === null) throw new Error('Expected a numeric personal limit.')
-	await seedAccountWithPlan({ email, plan: 'personal' })
-	const { address } = await seedInboxWithAddress(userId)
+	const { address } = await seedAccountWithPlan({ email, plan: 'personal' })
 	await setDailyReceiveCounter(userId, limit)
 
 	const attempts = maxDetailedEmailRejectionEventsPerDay + 3
 	for (let index = 0; index < attempts; index += 1) {
 		const message = buildInboundMessage(address)
-		await handleInboundEmail(message, env)
+		await handleInboundEmail(message, createInboundEnv())
 		expect(message.rejectedReason).toBe('Recipient mailbox is over quota.')
 	}
 
@@ -344,12 +321,15 @@ test('inbound email rejects unverified accounts without consuming quota, with bo
 	await ensureUsageRollupsTestSchema(env.APP_DB)
 	const email = `unverified-quota-${crypto.randomUUID()}@example.com`
 	const userId = await createStableUserIdFromEmail(email)
-	await seedAccountWithPlan({ email, plan: 'personal', emailVerifiedAt: null })
-	const { address } = await seedInboxWithAddress(userId)
+	const { address } = await seedAccountWithPlan({
+		email,
+		plan: 'personal',
+		emailVerifiedAt: null,
+	})
 
 	for (let index = 0; index < 2; index += 1) {
 		const message = buildInboundMessage(address)
-		await handleInboundEmail(message, env)
+		await handleInboundEmail(message, createInboundEnv())
 		expect(message.rejectedReason).toBe('Account email is not verified.')
 	}
 
@@ -380,11 +360,10 @@ test('inbound email under quota stores the message, counts the receive, and reco
 	await ensureUsageRollupsTestSchema(env.APP_DB)
 	const email = `under-quota-${crypto.randomUUID()}@example.com`
 	const userId = await createStableUserIdFromEmail(email)
-	await seedAccountWithPlan({ email, plan: 'personal' })
-	const { address } = await seedInboxWithAddress(userId)
+	const { address } = await seedAccountWithPlan({ email, plan: 'personal' })
 
 	const message = buildInboundMessage(address)
-	await handleInboundEmail(message, env)
+	await handleInboundEmail(message, createInboundEnv())
 
 	expect(message.rejectedReason).toBeNull()
 	const messages = await listEmailMessages({

@@ -13,6 +13,8 @@ test('isReservedUsername matches brand, support, infrastructure, and email local
 	expect(isReservedUsername('no-reply')).toBe(true)
 	expect(isReservedUsername('admin')).toBe(true)
 	expect(isReservedUsername('mcp')).toBe(true)
+	// The legacy inbound reply-token address space is reserved as a prefix.
+	expect(isReservedUsername('kody-r-0123456789abcdef')).toBe(true)
 })
 
 test('isReservedUsername allows ordinary usernames', () => {
