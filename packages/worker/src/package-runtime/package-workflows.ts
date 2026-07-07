@@ -28,8 +28,8 @@ export type PackageWorkflowParams = Record<string, unknown>
 
 type WorkflowCreateBaseInput = {
 	workflowName?: string
-	runAt: string | Date
-	idempotencyKey: string
+	runAt?: string | Date
+	idempotencyKey?: string
 	params?: PackageWorkflowParams
 }
 
@@ -142,6 +142,7 @@ type DynamicCallableWorkflowStep = {
 const packageWorkflowTokenId = 'internal:package-workflows'
 const maxPackageWorkflowParamsJsonBytes = 16 * 1024
 const workflowStatusRefreshTtlMs = 30_000
+const creatingWorkflowRunStatus = 'creating'
 const knownWorkflowStatusValues = [
 	...activeWorkflowStatusValues,
 	...terminalWorkflowStatusValues,
@@ -234,8 +235,13 @@ function normalizeOptionalWorkflowName(
 	return workflowName?.trim() || fallback
 }
 
-function normalizeRunAt(runAt: string | Date) {
-	const date = typeof runAt === 'string' ? new Date(runAt) : runAt
+function normalizeRunAt(runAt: string | Date | undefined) {
+	const date =
+		runAt === undefined
+			? new Date()
+			: typeof runAt === 'string'
+				? new Date(runAt)
+				: runAt
 	if (Number.isNaN(date.getTime())) {
 		throw new Error('runAt must be a valid date or ISO string.')
 	}
@@ -275,6 +281,9 @@ export async function createPackageWorkflowInstanceId(input: {
 	workflowName: string
 	idempotencyKey: string
 	runAt: string | Date
+	options?: {
+		includeRunAt?: boolean
+	}
 }) {
 	const canonical = canonicalJsonStringify({
 		userId: normalizeNonEmptyString(input.userId, 'userId'),
@@ -284,7 +293,9 @@ export async function createPackageWorkflowInstanceId(input: {
 			input.idempotencyKey,
 			'idempotencyKey',
 		),
-		runAt: normalizeRunAt(input.runAt),
+		...(input.options?.includeRunAt === false
+			? {}
+			: { runAt: normalizeRunAt(input.runAt) }),
 	})
 	return `pkgwf-${(await sha256Base64Url(canonical)).slice(0, 43)}`
 }
@@ -293,16 +304,24 @@ export function createPackageWorkflowPlanDate(runAt: string | Date) {
 	return normalizeRunAt(runAt).slice(0, 'YYYY-MM-DD'.length)
 }
 
+function normalizeWorkflowIdempotencyKey(idempotencyKey: string | undefined) {
+	if (idempotencyKey !== undefined) {
+		return normalizeNonEmptyString(idempotencyKey, 'idempotencyKey')
+	}
+	return `generated:${crypto.randomUUID()}`
+}
+
 function createInlineWorkflowPayload(input: {
 	userId: string
 	workflowName?: string
 	code: string
-	idempotencyKey: string
-	runAt: string | Date
+	idempotencyKey?: string
+	runAt?: string | Date
 	params?: PackageWorkflowParams | null
 	planDate?: string | null
 }): DynamicCallableWorkflowPayload {
 	const runAt = normalizeRunAt(input.runAt)
+	const idempotencyKey = normalizeWorkflowIdempotencyKey(input.idempotencyKey)
 	const params = normalizePackageWorkflowParams(input.params)
 	return {
 		version: 2,
@@ -313,10 +332,7 @@ function createInlineWorkflowPayload(input: {
 			'inline-code',
 		),
 		code: normalizeNonEmptyString(input.code, 'code'),
-		idempotencyKey: normalizeNonEmptyString(
-			input.idempotencyKey,
-			'idempotencyKey',
-		),
+		idempotencyKey,
 		runAt,
 		planDate: input.planDate?.trim() || createPackageWorkflowPlanDate(runAt),
 		...(params === undefined ? {} : { params }),
@@ -330,12 +346,13 @@ function createDynamicPackageWorkflowPayload(input: {
 	sourceId: string
 	workflowName?: string
 	exportName: string
-	idempotencyKey: string
-	runAt: string | Date
+	idempotencyKey?: string
+	runAt?: string | Date
 	params?: PackageWorkflowParams | null
 	planDate?: string | null
 }): DynamicCallableWorkflowPayload {
 	const runAt = normalizeRunAt(input.runAt)
+	const idempotencyKey = normalizeWorkflowIdempotencyKey(input.idempotencyKey)
 	const params = normalizePackageWorkflowParams(input.params)
 	const workflowName = normalizeNonEmptyString(
 		normalizeOptionalWorkflowName(input.workflowName, input.exportName),
@@ -350,10 +367,7 @@ function createDynamicPackageWorkflowPayload(input: {
 		sourceId: normalizeNonEmptyString(input.sourceId, 'sourceId'),
 		workflowName,
 		exportName: normalizeWorkflowExportName(input.exportName),
-		idempotencyKey: normalizeNonEmptyString(
-			input.idempotencyKey,
-			'idempotencyKey',
-		),
+		idempotencyKey,
 		runAt,
 		planDate: input.planDate?.trim() || createPackageWorkflowPlanDate(runAt),
 		...(params === undefined ? {} : { params }),
@@ -499,10 +513,11 @@ async function findWorkflowRunByIdempotencyKey(input: {
 			`SELECT *
 			FROM workflow_runs
 			WHERE user_id = ? AND idempotency_key = ?
+				AND COALESCE(status, '') != ?
 			ORDER BY created_at ASC
 			LIMIT 1`,
 		)
-		.bind(input.userId, trimmedKey)
+		.bind(input.userId, trimmedKey, creatingWorkflowRunStatus)
 		.first<Record<string, unknown>>()
 	if (!result) return null
 	return mapWorkflowRunRow(result)
@@ -513,6 +528,9 @@ async function createInlineWorkflowInstanceId(input: {
 	workflowName: string
 	idempotencyKey: string
 	runAt: string | Date
+	options?: {
+		includeRunAt?: boolean
+	}
 }) {
 	const canonical = canonicalJsonStringify({
 		userId: normalizeNonEmptyString(input.userId, 'userId'),
@@ -522,18 +540,23 @@ async function createInlineWorkflowInstanceId(input: {
 			input.idempotencyKey,
 			'idempotencyKey',
 		),
-		runAt: normalizeRunAt(input.runAt),
+		...(input.options?.includeRunAt === false
+			? {}
+			: { runAt: normalizeRunAt(input.runAt) }),
 	})
 	return `dynwf-${(await sha256Base64Url(canonical)).slice(0, 43)}`
 }
 
 async function createDynamicCallableWorkflowInstanceId(
 	payload: DynamicCallableWorkflowPayload,
+	options?: {
+		includeRunAt?: boolean
+	},
 ) {
 	if (payload.sourceType === 'package') {
-		return await createPackageWorkflowInstanceId(payload)
+		return await createPackageWorkflowInstanceId({ ...payload, options })
 	}
-	return await createInlineWorkflowInstanceId(payload)
+	return await createInlineWorkflowInstanceId({ ...payload, options })
 }
 
 function mapWorkflowRunRow(
@@ -754,7 +777,11 @@ export async function createDynamicCallableWorkflow(input: {
 		}
 	}
 	const payload = await resolveWorkflowPayload(input)
-	const id = await createDynamicCallableWorkflowInstanceId(payload)
+	const id = await createDynamicCallableWorkflowInstanceId(payload, {
+		// An explicit idempotency key must single-flight even before the
+		// workflow_runs projection row is written.
+		includeRunAt: !idempotencyKeyInput,
+	})
 	const existing = await getExistingWorkflowInstance(
 		input.env.DYNAMIC_CALLABLE_WORKFLOWS,
 		id,
@@ -767,6 +794,14 @@ export async function createDynamicCallableWorkflow(input: {
 				payload,
 				status: existing.status ?? null,
 			})
+			if (idempotencyKeyInput) {
+				const projectedRun = await findWorkflowRunByIdempotencyKey({
+					db: input.env.APP_DB,
+					userId: input.userId,
+					idempotencyKey: idempotencyKeyInput,
+				})
+				if (projectedRun) return createWorkflowCreateResultFromRow(projectedRun)
+			}
 		}
 		return createWorkflowCreateResult({ summary: existing, payload })
 	}
@@ -777,6 +812,14 @@ export async function createDynamicCallableWorkflow(input: {
 			email: input.userEmail,
 			resource: 'concurrent_workflows',
 			fallbackLimit: getWorkflowConcurrencyBackstop(input.env as Env),
+		})
+	}
+	if (input.env.APP_DB && idempotencyKeyInput) {
+		await recordWorkflowRun({
+			db: input.env.APP_DB,
+			id,
+			payload,
+			status: creatingWorkflowRunStatus,
 		})
 	}
 	let instance: WorkflowInstance
@@ -796,6 +839,24 @@ export async function createDynamicCallableWorkflow(input: {
 				id,
 			)
 			if (concurrent) {
+				if (input.env.APP_DB) {
+					await recordWorkflowRun({
+						db: input.env.APP_DB,
+						id,
+						payload,
+						status: concurrent.status ?? null,
+					})
+					if (idempotencyKeyInput) {
+						const projectedRun = await findWorkflowRunByIdempotencyKey({
+							db: input.env.APP_DB,
+							userId: input.userId,
+							idempotencyKey: idempotencyKeyInput,
+						})
+						if (projectedRun) {
+							return createWorkflowCreateResultFromRow(projectedRun)
+						}
+					}
+				}
 				return createWorkflowCreateResult({
 					summary: concurrent,
 					payload,
@@ -820,6 +881,14 @@ export async function createDynamicCallableWorkflow(input: {
 			payload,
 			status: summary.status,
 		})
+	}
+	if (input.env.APP_DB && idempotencyKeyInput) {
+		const projectedRun = await findWorkflowRunByIdempotencyKey({
+			db: input.env.APP_DB,
+			userId: input.userId,
+			idempotencyKey: idempotencyKeyInput,
+		})
+		if (projectedRun) return createWorkflowCreateResultFromRow(projectedRun)
 	}
 	return createWorkflowCreateResult({ summary, payload })
 }
