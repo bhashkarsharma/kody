@@ -7,7 +7,6 @@ import {
 test('admin invite signup and email verification happy path', async ({
 	page,
 	seedE2eUser,
-	assignRole,
 	login,
 }) => {
 	const runId = Date.now()
@@ -15,6 +14,7 @@ test('admin invite signup and email verification happy path', async ({
 		email: `invite-admin-${runId}@example.com`,
 		username: `invite-admin-${runId}`,
 		password: 'invite-admin-password',
+		admin: true,
 	})
 	const invitedEmail = `invite-user-${runId}@example.com`
 	const invitedUsername = `invite-user-${runId}`
@@ -25,26 +25,38 @@ test('admin invite signup and email verification happy path', async ({
 	const adminCreatedUsername = `admin-created-${runId}`
 	const adminCreatedPassword = 'admin-created-password'
 
-	await assignRole(adminUser.email, 'admin')
 	await login({
 		email: adminUser.email,
 		password: adminUser.password,
 		mode: 'login',
 	})
 
-	await page.goto('/admin/invites')
-	await expect(
-		page.getByRole('heading', { name: 'Admin invites' }),
-	).toBeVisible()
+	// Parallel E2E workers share one local D1 file; auth/admin reads can
+	// briefly return 500 while another worker is writing fixtures.
+	await expect(async () => {
+		await page.goto('/admin/invites')
+		await expect(
+			page.getByRole('heading', { name: 'Admin invites' }),
+		).toBeVisible({ timeout: 1_000 })
+	}).toPass({ timeout: 15_000 })
 	await page.getByLabel('Code').fill(inviteCode)
 	await page.getByLabel('Note').fill('E2E invite signup verification')
 	await page.getByLabel('Max uses').fill('1')
 	await page.getByRole('button', { name: 'Create', exact: true }).click()
-	await expect(page.getByRole('heading', { name: inviteCode })).toBeVisible()
+	await expect(async () => {
+		await expect(page.getByRole('heading', { name: inviteCode })).toBeVisible({
+			timeout: 1_000,
+		})
+	}).toPass({ timeout: 15_000 })
 
 	await page.getByLabel('User email').fill(adminCreatedEmail)
 	await page.getByLabel('Username (optional)').fill(adminCreatedUsername)
-	await page.getByRole('button', { name: 'Create user', exact: true }).click()
+	await expect(async () => {
+		await page.getByRole('button', { name: 'Create user', exact: true }).click()
+		await expect(
+			page.getByRole('link', { name: 'Open setup link' }),
+		).toBeVisible({ timeout: 1_000 })
+	}).toPass({ timeout: 15_000 })
 	const setupLink =
 		(await page
 			.getByRole('link', { name: 'Open setup link' })
@@ -86,16 +98,18 @@ test('admin invite signup and email verification happy path', async ({
 	).toBeVisible()
 
 	await page.getByRole('button', { name: 'Resend verification email' }).click()
-	await setEmailVerificationTokenInE2eDatabase({
-		email: invitedEmail,
-		token: verificationToken,
-	})
-	await page.goto(
-		`/verify-email?token=${encodeURIComponent(verificationToken)}`,
-	)
-	await expect(
-		page.getByRole('heading', { name: 'Email verified' }),
-	).toBeVisible()
+	await expect(async () => {
+		await setEmailVerificationTokenInE2eDatabase({
+			email: invitedEmail,
+			token: verificationToken,
+		})
+		await page.goto(
+			`/verify-email?token=${encodeURIComponent(verificationToken)}`,
+		)
+		await expect(
+			page.getByRole('heading', { name: 'Email verified' }),
+		).toBeVisible({ timeout: 1_000 })
+	}).toPass({ timeout: 15_000 })
 
 	await page.goto('/account')
 	await expect(

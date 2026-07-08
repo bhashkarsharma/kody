@@ -61,6 +61,7 @@ export async function seedUserInE2eDatabase(input: {
 	email: string
 	username: string
 	password: string
+	admin?: boolean
 }) {
 	const passwordHash = await createPasswordHash(input.password)
 	executeE2eD1Command(
@@ -68,6 +69,7 @@ export async function seedUserInE2eDatabase(input: {
 			email: input.email,
 			username: input.username,
 			passwordHash,
+			admin: input.admin,
 		}),
 	)
 }

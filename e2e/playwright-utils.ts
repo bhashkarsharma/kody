@@ -1,4 +1,4 @@
-import { test as base, type APIRequestContext } from '@playwright/test'
+import { test as base, expect, type APIRequestContext } from '@playwright/test'
 import * as setCookieParser from 'set-cookie-parser'
 import {
 	assignRoleInE2eDatabase,
@@ -21,6 +21,7 @@ export const test = base.extend<{
 		email?: string
 		username?: string
 		password?: string
+		admin?: boolean
 	}): Promise<{ email: string; username: string; password: string }>
 	login(options?: {
 		email?: string
@@ -64,7 +65,12 @@ export const test = base.extend<{
 			const email = options?.email ?? `e2e-user-${runId}@example.com`
 			const username = options?.username ?? `e2e-user-${runId}`
 			const password = options?.password ?? 'e2e-test-password'
-			await seedUserInE2eDatabase({ email, username, password })
+			await seedUserInE2eDatabase({
+				email,
+				username,
+				password,
+				admin: options?.admin,
+			})
 			return { email, username, password }
 		})
 	},
@@ -79,25 +85,28 @@ export const test = base.extend<{
 			const password = options?.password ?? primaryTestUser.password
 			const preferredMode = options?.mode
 
-			clearAuthRateLimitsInE2eDatabase()
-			let response: Awaited<ReturnType<typeof page.request.post>>
-			if (preferredMode === 'login') {
-				response = await page.request.post('/auth', {
-					data: { email, password, mode: 'login' },
-					headers: { 'Content-Type': 'application/json' },
-				})
-				if (!response.ok()) {
-					throw new Error(
-						`Failed to login user (${response.status()}): ${await readResponseDetail(response)}`,
-					)
+			let response!: Awaited<ReturnType<typeof page.request.post>>
+			await expect(async () => {
+				clearAuthRateLimitsInE2eDatabase()
+				if (preferredMode === 'login') {
+					response = await page.request.post('/auth', {
+						data: { email, password, mode: 'login' },
+						headers: { 'Content-Type': 'application/json' },
+					})
+					if (!response.ok()) {
+						throw new Error(
+							`Failed to login user (${response.status()}): ${await readResponseDetail(response)}`,
+						)
+					}
+					return
 				}
-			} else {
+
 				response = await signupOrLoginViaAuth(page.request, {
 					email,
 					username,
 					password,
 				})
-			}
+			}).toPass({ timeout: 15_000 })
 
 			// `page.request` already shares the browser context's cookie jar, so
 			// the session cookie is registered for the 127.0.0.1 base URL by the
