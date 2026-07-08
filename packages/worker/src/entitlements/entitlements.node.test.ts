@@ -6,7 +6,9 @@ import {
 } from './errors.ts'
 import {
 	nullPlanEmailFallbackLimits,
+	parsePlanName,
 	planLimits,
+	planNames,
 	resolvePlanLimit,
 } from './plans.ts'
 import {
@@ -149,6 +151,18 @@ function createEntitlementsTestDb(
 }
 
 const plannedEmail = 'planned@example.com'
+
+test('parsePlanName accepts registered plan names and treats everything else as null', () => {
+	for (const plan of planNames) {
+		expect(parsePlanName(plan)).toBe(plan)
+	}
+	expect(parsePlanName('enterprise')).toBeNull()
+	expect(parsePlanName(' pro ')).toBeNull()
+	expect(parsePlanName('')).toBeNull()
+	expect(parsePlanName(null)).toBeNull()
+	expect(parsePlanName(undefined)).toBeNull()
+	expect(parsePlanName(1)).toBeNull()
+})
 
 test('storage byte entry estimates support net-positive upsert deltas', () => {
 	const existing = {
