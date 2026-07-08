@@ -1,3 +1,5 @@
+import { chunkArray } from '@kody-internal/shared/chunk.ts'
+import { parseTagsJson } from '@kody-internal/shared/tags-json.ts'
 import {
 	type CommunityBanRecord,
 	type CommunityBanRow,
@@ -12,17 +14,6 @@ import {
 	type CommunityReportRow,
 	type CommunityReportStatus,
 } from './types.ts'
-
-function parseTagsJson(raw: unknown) {
-	if (raw == null) return []
-	const parsed = JSON.parse(String(raw)) as unknown
-	return Array.isArray(parsed)
-		? parsed
-				.filter((value): value is string => typeof value === 'string')
-				.map((value) => value.trim())
-				.filter((value) => value.length > 0)
-		: []
-}
 
 function mapCommunityListingRow(
 	row: Record<string, unknown>,
@@ -101,16 +92,8 @@ function listingStatusFilter(includeDelisted: boolean) {
 }
 
 // D1 caps bound parameters per statement, so IN (...) lookups over large id
-// sets are issued in chunks.
+// sets are issued in chunks (90 leaves headroom for fixed bindings).
 const maxSqlBindingsPerChunk = 90
-
-function chunkValues<T>(values: Array<T>, size: number): Array<Array<T>> {
-	const chunks: Array<Array<T>> = []
-	for (let offset = 0; offset < values.length; offset += size) {
-		chunks.push(values.slice(offset, offset + size))
-	}
-	return chunks
-}
 
 const communityListingSearchTextColumns = [
 	'name',
@@ -460,7 +443,7 @@ export async function countCommunityForksByListingIds(
 	const counts: Record<string, number> = Object.fromEntries(
 		listingIds.map((listingId) => [listingId, 0]),
 	)
-	for (const idChunk of chunkValues(listingIds, maxSqlBindingsPerChunk)) {
+	for (const idChunk of chunkArray(listingIds, maxSqlBindingsPerChunk)) {
 		const placeholders = idChunk.map(() => '?').join(', ')
 		const rows = await db
 			.prepare(
@@ -565,7 +548,7 @@ export async function getCommunityRatingAggregatesByListingIds(
 				},
 			]),
 		)
-	for (const idChunk of chunkValues(listingIds, maxSqlBindingsPerChunk)) {
+	for (const idChunk of chunkArray(listingIds, maxSqlBindingsPerChunk)) {
 		const placeholders = idChunk.map(() => '?').join(', ')
 		const rows = await db
 			.prepare(

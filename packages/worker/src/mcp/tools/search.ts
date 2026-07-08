@@ -29,7 +29,7 @@ import {
 	describeValue,
 	parseValueEntityId,
 } from '#mcp/tools/search-entities.ts'
-import { listValues } from '#mcp/values/service.ts'
+import { getValue, listValues } from '#mcp/values/service.ts'
 import { type ValueMetadata } from '#mcp/values/types.ts'
 import {
 	getSavedPackageByKodyId,
@@ -1664,7 +1664,7 @@ function shouldIncludeRemoteConnectorStatus(status: RemoteConnectorStatus) {
 	return status.state !== 'connected' || status.toolCount === 0
 }
 
-function serializeRemoteConnectorStatus(status: RemoteConnectorStatus): {
+export function serializeRemoteConnectorStatus(status: RemoteConnectorStatus): {
 	connectorId: string
 	state: string
 	connected: boolean
@@ -1727,27 +1727,27 @@ export async function loadOptionalSearchRows(input: {
 	}
 }
 
-async function loadSearchRowsAndRegistry(input: {
-	agent: McpRegistrationAgent
-	callerContext: ReturnType<McpRegistrationAgent['getCallerContext']>
+export async function loadSearchRowsAndRegistry(input: {
+	env: Env
+	callerContext: McpCallerContext
 	userId: string | null
 }) {
 	const [registry, optionalRows] = await Promise.all([
 		getCapabilityRegistryForContext({
-			env: input.agent.getEnv(),
+			env: input.env,
 			callerContext: input.callerContext,
 		}),
 		loadOptionalSearchRows({
 			userId: input.userId,
 			loadPackages: async () => {
 				const savedPackages = await listSavedPackagesByUserId(
-					input.agent.getEnv().APP_DB,
+					input.env.APP_DB,
 					{
 						userId: input.userId!,
 					},
 				)
 				const packageRows = await buildSavedPackageSearchRows({
-					env: input.agent.getEnv(),
+					env: input.env,
 					baseUrl: input.callerContext.baseUrl,
 					userId: input.userId!,
 					records: savedPackages,
@@ -1756,12 +1756,12 @@ async function loadSearchRowsAndRegistry(input: {
 			},
 			loadUserSecrets: () =>
 				listUserSecretsForSearch({
-					env: input.agent.getEnv(),
+					env: input.env,
 					userId: input.userId!,
 				}),
 			loadUserValues: () =>
 				listValues({
-					env: input.agent.getEnv(),
+					env: input.env,
 					userId: input.userId!,
 					storageContext: {
 						sessionId: input.callerContext.storageContext?.sessionId ?? null,
@@ -1856,9 +1856,24 @@ async function resolveEntityDetail(input: {
 
 	if (ref.type === 'value') {
 		const valueRef = parseValueEntityId(ref.id)
-		const row = input.searchRows.userValueRows.find(
-			(value) => value.scope === valueRef.scope && value.name === valueRef.name,
-		)
+		// The search snapshot only covers buckets visible to the caller's
+		// storage context; fetch directly so entity detail works for values in
+		// scopes the snapshot missed (matching the package path).
+		const row =
+			input.searchRows.userValueRows.find(
+				(value) =>
+					value.scope === valueRef.scope && value.name === valueRef.name,
+			) ??
+			(await getValue({
+				env: input.agent.getEnv(),
+				userId: input.userId,
+				name: valueRef.name,
+				scope: valueRef.scope,
+				storageContext: {
+					sessionId: input.callerContext.storageContext?.sessionId ?? null,
+					appId: input.callerContext.storageContext?.appId ?? null,
+				},
+			}))
 		if (!row) {
 			throw new Error('Persisted value not found for this user.')
 		}
@@ -2025,7 +2040,7 @@ export async function registerSearchTool(agent: McpRegistrationAgent) {
 						: Promise.resolve({ results: [], warnings: [] })
 				const [searchRows] = await Promise.all([
 					loadSearchRowsAndRegistry({
-						agent,
+						env: agent.getEnv(),
 						callerContext,
 						userId,
 					}),
