@@ -304,6 +304,28 @@ export type AccountIntegrationsLoaderData = {
 	integrations: Array<AccountIntegrationListItem>
 }
 
+export type AccountMcpServerListItem = {
+	id: string
+	name: string
+	url: string
+	enabled: boolean
+	state: string
+	connected: boolean
+	toolCount: number
+	authUrl: string | null
+	error: string | null
+	tools: Array<string>
+	createdAt: string
+	updatedAt: string
+}
+
+export type AccountMcpServersLoaderData = {
+	ok: true
+	email: string
+	username: string
+	servers: Array<AccountMcpServerListItem>
+}
+
 export type AccountRemoteConnectorListItem = {
 	id: string
 	instanceId: string
@@ -421,6 +443,7 @@ export type AppLoaderData = {
 	accountTwoFactor?: AccountTwoFactorLoaderData
 	accountPasskeys?: AccountPasskeysLoaderData
 	accountIntegrations?: AccountIntegrationsLoaderData
+	accountMcpServers?: AccountMcpServersLoaderData
 	accountRemoteConnectors?: AccountRemoteConnectorsLoaderData
 	accountPackageInvocationTokens?: AccountPackageInvocationTokensLoaderData
 	accountSecrets?: AccountSecretsLoaderData
