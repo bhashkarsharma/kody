@@ -94,5 +94,16 @@
     "packages/shared",
     "packages/worker",
     "packages/mock-servers/*"
-  ]
+  ],
+  "allowScripts": {
+    "@sentry/cli": true,
+    "core-js-pure": true,
+    "esbuild": true,
+    "fsevents": true,
+    "msw": true,
+    "nx": true,
+    "sharp": true,
+    "unrs-resolver": true,
+    "workerd": true
+  }
 }
