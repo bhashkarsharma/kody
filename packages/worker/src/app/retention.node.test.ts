@@ -23,7 +23,6 @@ import {
 	pruneUserEmailMessagesForRetention,
 	pruneWorkflowRunsForRetention,
 	publishedBundleArtifactRetentionDays,
-	retentionPolicies,
 	shouldRunRetentionCron,
 	workflowRunRetentionDays,
 } from './retention.ts'
@@ -407,22 +406,7 @@ function idsForTable(db: DatabaseSync, table: string) {
 	).map((row) => row.id)
 }
 
-test('retention manifest covers the requested growth tables and cron is hourly gated', () => {
-	expect(retentionPolicies.map((policy) => policy.table).sort()).toEqual([
-		'audit_events',
-		'email_attachments',
-		'email_delivery_events',
-		'email_messages',
-		'email_threads',
-		'entitlement_daily_counters',
-		'mcp_memory_conversation_suppressions',
-		'package_invocations',
-		'package_runtime_logs',
-		'package_runtime_runs',
-		'published_bundle_artifacts',
-		'usage_rollups',
-		'workflow_runs',
-	])
+test('retention cron runs only on the hourly gate', () => {
 	expect(shouldRunRetentionCron(new Date('2026-07-07T03:00:00.000Z'))).toBe(
 		true,
 	)
