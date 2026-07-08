@@ -156,6 +156,52 @@ server-side policy in `@kody-internal/shared/password-policy.ts`
 advisory only. Login does **not** re-check length so pre-existing accounts are
 never locked out.
 
+## Two-factor authentication and passkeys
+
+Both are opt-in and adapted from the Epic Stack.
+
+**TOTP two-factor** (`packages/worker/src/app/two-factor.ts`):
+
+- The `verifications` table (Epic Stack shape: `type` + `target` with TOTP
+  config) stores secrets. An active row with `type = '2fa'` and
+  `target = <db user id>` is the "two-factor enabled" flag; a `2fa-verify` row
+  holds a pending setup that only activates once the user confirms a generated
+  code at `/account/two-factor` (managed by
+  `packages/worker/src/app/handlers/account-two-factor.ts`).
+- When a 2FA account logs in (password or passkey), the handler does **not**
+  issue `kody_session`. It sets the short-lived signed `kody_verify` cookie
+  (`packages/worker/src/app/verify-session.ts`, 10 minutes) and the client
+  redirects to `/verify`. `POST /verify/2fa.json`
+  (`packages/worker/src/app/handlers/verify.ts`) checks the TOTP code and only
+  then issues the real session cookie.
+- Disabling 2FA requires a fresh code. The inline OAuth password form
+  (`packages/worker/src/oauth-handlers.ts`) rejects 2FA accounts and directs
+  them to establish a browser session first, since that flow has no TOTP step.
+
+**Passkeys / WebAuthn** (`packages/worker/src/app/webauthn.ts`,
+`packages/worker/src/app/passkeys.ts`):
+
+- Registration and authentication ceremonies live in
+  `packages/worker/src/app/handlers/webauthn.ts` using `@simplewebauthn/server`;
+  challenges ride in the short-lived signed `kody_webauthn_challenge` cookie, so
+  no server-side ceremony state exists.
+- The relying party id/origin derive from the request host. WebAuthn requires a
+  registrable domain, so Playwright passkey tests navigate via `localhost`
+  rather than `127.0.0.1`.
+- Passkeys are stored per user in the `passkeys` table and managed at
+  `/account/passkeys`. Passkey sign-in is an alternative first factor: accounts
+  with TOTP enabled still get the `/verify` challenge.
+- `POST /verify/2fa.json`, `POST /account/two-factor.json`, and
+  `POST /webauthn/authentication` share the per-IP auth rate-limit bucket with
+  the other credential-accepting endpoints (`packages/worker/src/index.ts`).
+- Re-enrolling a new authenticator while two-factor is active is rejected; users
+  must disable first (which requires a current code), so a hijacked session
+  cannot silently swap the second factor.
+- Known limitation: sessions are stateless signed cookies, so enabling
+  two-factor (like changing a password) cannot revoke session cookies issued
+  earlier; they stay valid until they expire. Starting a new login does clear
+  that browser's session cookie while the second factor is pending.
+
 ## Account deletion
 
 `POST /account/delete` is implemented by
