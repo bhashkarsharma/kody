@@ -11,17 +11,17 @@ export default mergeConfig(
 		resolve: {
 			alias: [
 				{
-					find: '#worker/community/og-image-assets.ts',
+					find: '#worker/og/og-image-assets.ts',
 					replacement: resolve(
 						rootDir,
-						'packages/worker/src/community/og-image-assets.node.ts',
+						'packages/worker/src/og/og-image-assets.node.ts',
 					),
 				},
 				{
-					find: /\/community\/og-image-assets\.ts$/,
+					find: /\/og\/og-image-assets\.ts$/,
 					replacement: resolve(
 						rootDir,
-						'packages/worker/src/community/og-image-assets.node.ts',
+						'packages/worker/src/og/og-image-assets.node.ts',
 					),
 				},
 				{

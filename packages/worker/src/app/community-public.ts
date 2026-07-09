@@ -1,4 +1,3 @@
-import { html, type SafeHtml } from 'remix/html-template'
 import { type PublicCommunityListing } from '#app/community-public-types.ts'
 import { type CommunityListingWithAggregates } from '#worker/community/types.ts'
 
@@ -36,38 +35,6 @@ export function toPublicCommunityListing(
 		averageAdaptationEffort: listing.averageAdaptationEffort,
 		forkCount: listing.forkCount,
 	}
-}
-
-export function buildCommunityIndexOgHead(): SafeHtml {
-	return html`
-		<meta property="og:title" content="Community packages — Kody" />
-		<meta
-			property="og:description"
-			content="Browse community packages shared by Kody users."
-		/>
-		<meta property="og:type" content="website" />
-		<meta name="twitter:card" content="summary" />
-	`
-}
-
-export function buildCommunityDetailOgHead(input: {
-	title: string
-	description: string
-	canonicalUrl: string
-	ogImageUrl: string
-}): SafeHtml {
-	return html`
-		<meta property="og:title" content="${input.title}" />
-		<meta property="og:description" content="${input.description}" />
-		<meta property="og:image" content="${input.ogImageUrl}" />
-		<meta property="og:type" content="website" />
-		<meta property="og:url" content="${input.canonicalUrl}" />
-		<meta name="twitter:card" content="summary_large_image" />
-		<meta name="twitter:title" content="${input.title}" />
-		<meta name="twitter:description" content="${input.description}" />
-		<meta name="twitter:image" content="${input.ogImageUrl}" />
-		<link rel="canonical" href="${input.canonicalUrl}" />
-	`
 }
 
 export function buildForkPrompt(input: { name: string; listingId: string }) {

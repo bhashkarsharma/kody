@@ -10,7 +10,7 @@ import {
 	toPublicCommunityListing,
 } from '#app/community-public.ts'
 import { loadCommunityDetailData } from '#app/community-data.ts'
-import { CommunityDetailOgHead } from '#app/ssr-document.tsx'
+import { OgHead } from '#app/ssr-document.tsx'
 import { handleFrameRequest } from '#app/frame-registry.ts'
 import '#app/frame-registrations.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
@@ -66,7 +66,7 @@ export function createCommunityDetailHandler(env: Env) {
 				env,
 				title: pageTitle,
 				extraHead: (
-					<CommunityDetailOgHead
+					<OgHead
 						title={pageTitle}
 						description={ogDescription}
 						canonicalUrl={canonicalUrl}
@@ -136,7 +136,7 @@ export function createCommunityDetailOgImageHandler(env: Env) {
 				forkCount: publicListing.forkCount,
 			})
 
-			return new Response(png.buffer as ArrayBuffer, {
+			return new Response(png, {
 				status: 200,
 				headers: {
 					'Cache-Control': 'public, max-age=3600',

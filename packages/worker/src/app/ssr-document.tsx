@@ -6,6 +6,7 @@ import {
 	buildClientEntryHref,
 	buildStylesheetHref,
 } from '#app/client-build-id.ts'
+import { publicOgPages, type PublicOgPageId } from '#worker/og/pages.ts'
 
 export const CLIENT_ENTRY_HREF = '/client-entry.js'
 export const STYLESHEET_HREF = '/styles.css'
@@ -68,30 +69,19 @@ export function SsrDocument(handle: Handle<SsrDocumentProps>) {
 	)
 }
 
-export function CommunityIndexOgHead(_handle: Handle) {
-	return () => (
-		<>
-			<meta property="og:title" content="Community packages — Kody" />
-			<meta
-				property="og:description"
-				content="Browse community packages shared by Kody users."
-			/>
-			<meta property="og:type" content="website" />
-			<meta name="twitter:card" content="summary" />
-		</>
-	)
-}
-
-type CommunityDetailOgHeadProps = {
+type OgHeadProps = {
 	title: string
 	description: string
 	canonicalUrl: string
 	ogImageUrl: string
 }
 
-export function CommunityDetailOgHead(
-	handle: Handle<CommunityDetailOgHeadProps>,
-) {
+/**
+ * Open Graph / Twitter card tags for public pages. `ogImageUrl` should point
+ * at a Satori-generated 1200×630 PNG (`/og/:page.png` for static pages,
+ * `/community/:listingId/og.png` for community packages).
+ */
+export function OgHead(handle: Handle<OgHeadProps>) {
 	return () => (
 		<>
 			<meta property="og:title" content={handle.props.title} />
@@ -106,4 +96,24 @@ export function CommunityDetailOgHead(
 			<link rel="canonical" href={handle.props.canonicalUrl} />
 		</>
 	)
+}
+
+/**
+ * Build the `extraHead` node for a registered public page (see
+ * `#worker/og/pages.ts`). Kept here so plain `.ts` handlers can attach OG
+ * tags without needing JSX.
+ */
+export function createPageOgHeadNode(input: {
+	origin: string
+	pageId: PublicOgPageId
+}): RemixNode {
+	const page = publicOgPages[input.pageId]
+	return (
+		<OgHead
+			title={page.ogTitle}
+			description={page.ogDescription}
+			canonicalUrl={`${input.origin}${page.path}`}
+			ogImageUrl={`${input.origin}/og/${input.pageId}.png`}
+		/>
+	) as RemixNode
 }
