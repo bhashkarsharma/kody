@@ -83,9 +83,14 @@ export type DynamicCallableWorkflowPayload =
 			params?: PackageWorkflowParams
 	  }
 	| {
-			version: 2
+			version: 3
 			sourceType: 'inline'
 			userId: string
+			packageContext: {
+				packageId: string
+				kodyId: string
+				sourceId?: string | null
+			} | null
 			workflowName: string
 			code: string
 			idempotencyKey: string
@@ -269,6 +274,11 @@ function normalizeWorkflowIdempotencyKey(idempotencyKey: string | undefined) {
 
 function createInlineWorkflowPayload(input: {
 	userId: string
+	packageContext?: {
+		packageId: string
+		kodyId: string
+		sourceId?: string | null
+	} | null
 	workflowName?: string
 	code: string
 	idempotencyKey?: string
@@ -280,9 +290,10 @@ function createInlineWorkflowPayload(input: {
 	const idempotencyKey = normalizeWorkflowIdempotencyKey(input.idempotencyKey)
 	const params = normalizePackageWorkflowParams(input.params)
 	return {
-		version: 2,
+		version: 3,
 		sourceType: 'inline',
 		userId: normalizeNonEmptyString(input.userId, 'userId'),
+		packageContext: input.packageContext ?? null,
 		workflowName: normalizeOptionalWorkflowName(
 			input.workflowName,
 			'inline-code',
@@ -342,8 +353,47 @@ function validateDynamicCallableWorkflowPayload(
 		record['params'] as PackageWorkflowParams | null | undefined,
 	)
 	if (sourceType === 'inline') {
+		if (record['version'] !== 3) {
+			throw new Error('Inline workflow payload version must be 3.')
+		}
+		const rawPackageContext = record['packageContext']
+		if (
+			rawPackageContext !== null &&
+			(!rawPackageContext ||
+				typeof rawPackageContext !== 'object' ||
+				Array.isArray(rawPackageContext))
+		) {
+			throw new Error(
+				'Inline workflow payload packageContext must be an object or null.',
+			)
+		}
+		const packageContext = rawPackageContext
+			? {
+					packageId: normalizeNonEmptyString(
+						String(
+							(rawPackageContext as Record<string, unknown>)['packageId'] ?? '',
+						),
+						'packageContext.packageId',
+					),
+					kodyId: normalizeNonEmptyString(
+						String(
+							(rawPackageContext as Record<string, unknown>)['kodyId'] ?? '',
+						),
+						'packageContext.kodyId',
+					),
+					sourceId:
+						typeof (rawPackageContext as Record<string, unknown>)[
+							'sourceId'
+						] === 'string'
+							? String(
+									(rawPackageContext as Record<string, unknown>)['sourceId'],
+								)
+							: null,
+				}
+			: null
 		return createInlineWorkflowPayload({
 			userId: String(record['userId'] ?? ''),
+			packageContext,
 			workflowName:
 				typeof record['workflowName'] === 'string'
 					? record['workflowName']
@@ -661,6 +711,7 @@ async function resolveWorkflowPayload(input: {
 	if (code) {
 		return createInlineWorkflowPayload({
 			userId: input.userId,
+			packageContext: input.packageContext,
 			workflowName: input.body.workflowName,
 			code,
 			idempotencyKey: input.body.idempotencyKey,
@@ -1080,6 +1131,11 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 	private async invokeInlineWorkflowCode(
 		payload: Extract<DynamicCallableWorkflowPayload, { sourceType: 'inline' }>,
 	): Promise<JsonValue> {
+		if (payload.packageContext === undefined) {
+			throw new Error(
+				'Inline workflow payload is missing required package security context.',
+			)
+		}
 		const [{ runModuleWithRegistry }, { createMcpCallerContext }] =
 			await Promise.all([
 				import('#mcp/run-kody-registry.ts'),
@@ -1101,10 +1157,21 @@ export class DynamicCallableWorkflowBase extends WorkflowEntrypoint<
 					username: undefined,
 					displayName: `workflow:${payload.workflowName}`,
 				},
+				storageContext: payload.packageContext
+					? {
+							sessionId: null,
+							appId: payload.packageContext.packageId,
+							packageId: payload.packageContext.packageId,
+							storageId: null,
+						}
+					: null,
 				remoteConnectors,
 			}),
 			payload.code,
 			payload.params,
+			{
+				packageContext: payload.packageContext,
+			},
 		)
 		if (result.error) {
 			throw new Error(result.error)

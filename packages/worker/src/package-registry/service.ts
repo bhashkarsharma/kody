@@ -40,6 +40,10 @@ import {
 	assertWithinStorageBytesEntitlement,
 	estimateEntitlementStorageEntryByteDelta,
 } from '#worker/entitlements/service.ts'
+import {
+	deleteAllPackageScopedSecrets,
+	removeAllSecretApprovalsForPackage,
+} from '#mcp/secrets/service.ts'
 
 function logPackageRetrieverProjectionError(input: {
 	action: 'refresh' | 'delete'
@@ -375,6 +379,16 @@ export async function deleteSavedPackageProjection(input: {
 			await deleteJobRow(input.env.APP_DB, input.userId, row.id)
 		}
 	}
+	await deleteAllPackageScopedSecrets({
+		env: input.env,
+		userId: input.userId,
+		packageId: input.packageId,
+	})
+	await removeAllSecretApprovalsForPackage({
+		env: input.env,
+		userId: input.userId,
+		packageId: input.packageId,
+	})
 	await deleteSavedPackage(input.env.APP_DB, {
 		userId: input.userId,
 		packageId: input.packageId,

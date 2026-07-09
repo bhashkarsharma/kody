@@ -2,12 +2,19 @@ import { expect, test } from 'vitest'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
 import { planLimits } from '#worker/entitlements/plans.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
-import { listSecrets, resolveSecret, saveSecret } from './service.ts'
+import {
+	listPackageSecretsByPackageIds,
+	listSecrets,
+	resolveSecret,
+	saveSecret,
+	setSecretAllowedPackages,
+	updateUserSecretForPackage,
+} from './service.ts'
 
 type SecretBucketRow = {
 	id: string
 	user_id: string
-	scope: 'session' | 'app' | 'user'
+	scope: 'session' | 'package' | 'user'
 	binding_key: string
 	expires_at: string | null
 	created_at: string
@@ -21,6 +28,7 @@ type SecretEntryRow = {
 	encrypted_value: string
 	allowed_hosts: string
 	allowed_capabilities: string
+	allowed_packages: string
 	created_at: string
 	updated_at: string
 }
@@ -111,8 +119,45 @@ function createSecretTestDb(
 						},
 						async all<T>() {
 							if (
+								normalizedQuery.includes('from secret_buckets b') &&
+								normalizedQuery.includes("b.scope = 'package'")
+							) {
+								const [userId, ...packageIdsAndNow] = params as Array<string>
+								const packageIds = new Set(packageIdsAndNow.slice(0, -1))
+								const results = Array.from(entries.values())
+									.flatMap((entry) => {
+										const bucket = Array.from(buckets.values()).find(
+											(candidate) => candidate.id === entry.bucket_id,
+										)
+										if (
+											!bucket ||
+											bucket.user_id !== userId ||
+											bucket.scope !== 'package' ||
+											!packageIds.has(bucket.binding_key)
+										) {
+											return []
+										}
+										return [
+											{
+												scope: bucket.scope,
+												binding_key: bucket.binding_key,
+												name: entry.name,
+												description: entry.description,
+												allowed_hosts: entry.allowed_hosts,
+												allowed_capabilities: entry.allowed_capabilities,
+												allowed_packages: entry.allowed_packages,
+												created_at: entry.created_at,
+												updated_at: entry.updated_at,
+												expires_at: bucket.expires_at,
+											},
+										]
+									})
+									.sort((left, right) => left.name.localeCompare(right.name))
+								return { results: results as Array<T>, meta: { changes: 0 } }
+							}
+							if (
 								normalizedQuery.startsWith(
-									'select ? as scope, ? as binding_key, name, description, allowed_hosts, allowed_capabilities, created_at, updated_at, ? as expires_at from secret_entries',
+									'select ? as scope, ? as binding_key, name, description, allowed_hosts, allowed_capabilities, allowed_packages, created_at, updated_at, ? as expires_at from secret_entries',
 								)
 							) {
 								const [scope, bindingKey, expiresAt, bucketId] =
@@ -127,6 +172,7 @@ function createSecretTestDb(
 										description: entry.description,
 										allowed_hosts: entry.allowed_hosts,
 										allowed_capabilities: entry.allowed_capabilities,
+										allowed_packages: entry.allowed_packages,
 										created_at: entry.created_at,
 										updated_at: entry.updated_at,
 										expires_at: expiresAt,
@@ -136,6 +182,34 @@ function createSecretTestDb(
 							return { results: [] as Array<T>, meta: { changes: 0 } }
 						},
 						async run() {
+							if (
+								normalizedQuery.startsWith(
+									'update secret_entries set description = ?',
+								)
+							) {
+								const [
+									description,
+									encryptedValue,
+									updatedAt,
+									name,
+									userId,
+									packageId,
+								] = params as Array<string>
+								const bucket = buckets.get(getBucketKey(userId, 'user', ''))
+								const entry = bucket
+									? entries.get(getEntryKey(bucket.id, name))
+									: null
+								const allowedPackages = entry
+									? (JSON.parse(entry.allowed_packages) as Array<string>)
+									: []
+								if (!entry || !allowedPackages.includes(packageId)) {
+									return { meta: { changes: 0 } }
+								}
+								entry.description = description
+								entry.encrypted_value = encryptedValue
+								entry.updated_at = updatedAt
+								return { meta: { changes: 1 } }
+							}
 							if (normalizedQuery.startsWith('insert into secret_buckets')) {
 								const [
 									id,
@@ -171,6 +245,7 @@ function createSecretTestDb(
 									encryptedValue,
 									allowedHosts,
 									allowedCapabilities,
+									allowedPackages,
 									createdAt,
 									updatedAt,
 								] = params as Array<string>
@@ -183,6 +258,7 @@ function createSecretTestDb(
 									encrypted_value: encryptedValue,
 									allowed_hosts: allowedHosts,
 									allowed_capabilities: allowedCapabilities,
+									allowed_packages: allowedPackages,
 									created_at: existing?.created_at ?? createdAt,
 									updated_at: updatedAt,
 								})
@@ -218,6 +294,7 @@ function createSecretTestDb(
 			encrypted_value: 'ciphertext',
 			allowed_hosts: '[]',
 			allowed_capabilities: '[]',
+			allowed_packages: '[]',
 			created_at: '2026-01-01T00:00:00.000Z',
 			updated_at: '2026-01-01T00:00:00.000Z',
 		})
@@ -273,8 +350,9 @@ test('resolveSecret returns the first scope hit in precedence order', async () =
 	const secretName = 'shared-secret'
 	const storageContext = {
 		sessionId: 'session-abc',
-		appId: 'app-xyz',
-		storageId: 'app-xyz',
+		appId: null,
+		packageId: 'package-xyz',
+		storageId: 'package-xyz',
 	}
 
 	await saveSecret({
@@ -287,9 +365,9 @@ test('resolveSecret returns the first scope hit in precedence order', async () =
 	await saveSecret({
 		env,
 		userId,
-		scope: 'app',
+		scope: 'package',
 		name: secretName,
-		value: 'app-value',
+		value: 'package-value',
 		storageContext,
 	})
 	await saveSecret({
@@ -319,6 +397,99 @@ test('resolveSecret returns the first scope hit in precedence order', async () =
 	})
 })
 
+test('listPackageSecretsByPackageIds groups package-owned secrets', async () => {
+	const testDb = createSecretTestDb()
+	const env = {
+		APP_DB: testDb.db,
+		COOKIE_SECRET: 'test-cookie-secret',
+		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+	}
+	const storageContext = {
+		sessionId: null,
+		appId: null,
+		packageId: 'package-1',
+		storageId: null,
+	}
+	await saveSecret({
+		env,
+		userId: 'user-123',
+		scope: 'package',
+		name: 'package-token',
+		value: 'package-value',
+		storageContext,
+	})
+
+	const grouped = await listPackageSecretsByPackageIds({
+		env,
+		userId: 'user-123',
+		packageIds: ['package-1', 'package-2'],
+	})
+
+	expect(grouped.get('package-1')).toEqual([
+		expect.objectContaining({
+			name: 'package-token',
+			scope: 'package',
+			packageId: 'package-1',
+		}),
+	])
+	expect(grouped.has('package-2')).toBe(false)
+})
+
+test('updateUserSecretForPackage atomically requires an existing package approval', async () => {
+	const testDb = createSecretTestDb()
+	const env = {
+		APP_DB: testDb.db,
+		COOKIE_SECRET: 'test-cookie-secret',
+		SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
+	}
+	await saveSecret({
+		env,
+		userId: 'user-123',
+		scope: 'user',
+		name: 'shared-token',
+		value: 'old-value',
+	})
+	await setSecretAllowedPackages({
+		env,
+		userId: 'user-123',
+		scope: 'user',
+		name: 'shared-token',
+		allowedPackages: ['package-1'],
+	})
+
+	await expect(
+		updateUserSecretForPackage({
+			env,
+			userId: 'user-123',
+			packageId: 'package-1',
+			name: 'shared-token',
+			value: 'new-value',
+			description: 'Updated by package',
+		}),
+	).resolves.toMatchObject({
+		name: 'shared-token',
+		description: 'Updated by package',
+		allowedPackages: ['package-1'],
+	})
+	await expect(
+		resolveSecret({
+			env,
+			userId: 'user-123',
+			scope: 'user',
+			name: 'shared-token',
+		}),
+	).resolves.toMatchObject({ found: true, value: 'new-value' })
+	await expect(
+		updateUserSecretForPackage({
+			env,
+			userId: 'user-123',
+			packageId: 'package-2',
+			name: 'shared-token',
+			value: 'unauthorized-value',
+		}),
+	).rejects.toThrow('is not approved for package "package-2"')
+})
+
 test('resolveSecret ignores a corrupted lower-precedence entry when a higher scope resolves', async () => {
 	const testDb = createSecretTestDb()
 	const env = {
@@ -330,8 +501,9 @@ test('resolveSecret ignores a corrupted lower-precedence entry when a higher sco
 	const secretName = 'shared-secret'
 	const storageContext = {
 		sessionId: 'session-abc',
-		appId: 'app-xyz',
-		storageId: 'app-xyz',
+		appId: null,
+		packageId: 'package-xyz',
+		storageId: 'package-xyz',
 	}
 
 	await saveSecret({

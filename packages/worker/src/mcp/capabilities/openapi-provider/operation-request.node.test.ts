@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import * as secretService from '#mcp/secrets/service.ts'
+import * as packageRepo from '#worker/package-registry/repo.ts'
 import * as usageModule from '#worker/usage/record-usage.ts'
 import { type OpenApiBinding } from '#worker/openapi/binding-shared.ts'
 import { executeOpenApiOperationRequest } from './operation-request.ts'
@@ -143,6 +144,8 @@ test('builds URL with path params and query serialization', async () => {
 		const result = await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: bindingBase,
 			operation: getWidget,
 			args: {
@@ -177,6 +180,8 @@ test('preserves apiBaseUrl path segments when building operation URLs', async ()
 		const result = await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: {
 				...bindingBase,
 				apiBaseUrl: 'https://api.widgets.example/v1',
@@ -198,6 +203,8 @@ test('rejects absolute and protocol-relative operation paths', async () => {
 			executeOpenApiOperationRequest({
 				env: createEnv(),
 				userId: 'user-1',
+				baseUrl: 'https://app.example.com',
+				storageContext: null,
 				binding: {
 					...bindingBase,
 					apiBaseUrl: 'https://api.widgets.example',
@@ -240,6 +247,8 @@ test('injects auth headers and overrides caller attempts', async () => {
 		await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: {
 				...bindingBase,
 				auth: { kind: 'bearerSecret', secretName: 'apiToken' },
@@ -260,6 +269,8 @@ test('injects auth headers and overrides caller attempts', async () => {
 		await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: {
 				...bindingBase,
 				auth: {
@@ -280,6 +291,8 @@ test('injects auth headers and overrides caller attempts', async () => {
 		await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: {
 				...bindingBase,
 				auth: {
@@ -300,6 +313,77 @@ test('injects auth headers and overrides caller attempts', async () => {
 	}
 })
 
+test('requires package approval before OpenAPI resolves a user secret', async () => {
+	const usageSpy = vi
+		.spyOn(usageModule, 'recordUsage')
+		.mockResolvedValue(undefined)
+	const resolveSpy = vi
+		.spyOn(secretService, 'resolveSecret')
+		.mockResolvedValue({
+			found: true,
+			value: 'resolved-secret',
+			scope: 'user',
+			allowedHosts: ['api.widgets.example'],
+			allowedCapabilities: [],
+			allowedPackages: [],
+		})
+	const packageSpy = vi
+		.spyOn(packageRepo, 'getSavedPackageById')
+		.mockResolvedValue({
+			id: 'package-1',
+			userId: 'user-1',
+			name: '@user/example-package',
+			kodyId: 'example-package',
+			description: '',
+			tags: [],
+			searchText: null,
+			sourceId: 'source-1',
+			hasApp: false,
+			createdAt: '2026-07-09T00:00:00.000Z',
+			updatedAt: '2026-07-09T00:00:00.000Z',
+		})
+	const fetchStub = vi.fn()
+
+	try {
+		const error = await executeOpenApiOperationRequest({
+			env: createEnv(),
+			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: {
+				sessionId: null,
+				appId: 'package-1',
+				packageId: 'package-1',
+				storageId: 'package-1',
+			},
+			binding: {
+				...bindingBase,
+				auth: { kind: 'bearerSecret', secretName: 'apiToken' },
+			},
+			operation: getWidget,
+			args: { params: { widgetId: '1' } },
+			globalFetch: fetchStub as unknown as typeof fetch,
+		}).then(
+			() => null,
+			(thrown: unknown) => thrown,
+		)
+		expect(error).toBeInstanceOf(Error)
+		expect((error as Error).message).toContain(
+			'is not allowed for package "example-package"',
+		)
+		expect((error as Error).message).toContain(
+			'https://app.example.com/account/secrets/user/apiToken',
+		)
+		expect((error as Error).message).not.toContain(
+			'https://api.widgets.example/account/secrets',
+		)
+		expect(fetchStub).not.toHaveBeenCalled()
+	} finally {
+		packageSpy.mockRestore()
+		resolveSpy.mockRestore()
+		usageSpy.mockRestore()
+	}
+})
+
 test('returns truncated flag for oversized non-json bodies', async () => {
 	const usageSpy = vi
 		.spyOn(usageModule, 'recordUsage')
@@ -309,6 +393,8 @@ test('returns truncated flag for oversized non-json bodies', async () => {
 		const result = await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: bindingBase,
 			operation: getWidget,
 			args: { params: { widgetId: '1' } },
@@ -347,7 +433,7 @@ test('integration auth 401 triggers host-side refresh retry', async () => {
 			name: 'spotifyAccessToken',
 			scope: 'user',
 			description: '',
-			appId: null,
+			packageId: null,
 			createdAt: '2026-03-29T00:00:00.000Z',
 			updatedAt: '2026-03-29T00:00:00.000Z',
 			ttlMs: null,
@@ -407,6 +493,8 @@ test('integration auth 401 triggers host-side refresh retry', async () => {
 		const result = await executeOpenApiOperationRequest({
 			env: createEnv(entries),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: {
 				...bindingBase,
 				apiBaseUrl: 'https://api.spotify.com/v1',
@@ -454,6 +542,8 @@ test('passes application/json-seq request bodies through as strings', async () =
 		const result = await executeOpenApiOperationRequest({
 			env: createEnv(),
 			userId: 'user-1',
+			baseUrl: 'https://app.example.com',
+			storageContext: null,
 			binding: bindingBase,
 			operation: {
 				...createWidget,

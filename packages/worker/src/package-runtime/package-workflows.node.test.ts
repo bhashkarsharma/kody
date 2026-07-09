@@ -263,8 +263,10 @@ test('createDynamicCallableWorkflow queues inline code without package context a
 	expect(binding.create).toHaveBeenCalledWith({
 		id: created.id,
 		params: expect.objectContaining({
+			version: 3,
 			sourceType: 'inline',
 			userId: 'user-1',
+			packageContext: null,
 			code: 'export default async function main(p) { return { ok: true, p } }',
 			params: { greeting: 'hello' },
 		}),
@@ -356,6 +358,7 @@ test('DynamicCallableWorkflowBase executes queued inline code and records comple
 			}),
 			'export default async function main(p){ return { ok: true, p }; }',
 			{ greeting: 'hello' },
+			{ packageContext: null },
 		)
 		expect(db.workflowRuns.get(created.id)).toMatchObject({
 			status: 'complete',
@@ -364,6 +367,78 @@ test('DynamicCallableWorkflowBase executes queued inline code and records comple
 	} finally {
 		vi.useRealTimers()
 	}
+})
+
+test('package-created inline workflows retain package secret authorization context', async () => {
+	const binding = createStatefulWorkflowBinding()
+	const env = {
+		APP_DB: createWorkflowRunsDatabase(),
+		DYNAMIC_CALLABLE_WORKFLOWS: binding.workflow,
+		APP_BASE_URL: 'https://app.example.com',
+	} as Env
+	const packageContext = {
+		packageId: 'package-1',
+		kodyId: 'example-package',
+		sourceId: 'source-1',
+	}
+	const created = await createDynamicCallableWorkflow({
+		env,
+		userId: 'user-1',
+		packageContext,
+		body: {
+			code: 'export default async function main(){ return { ok: true }; }',
+			idempotencyKey: 'package-inline-security-context',
+		},
+	})
+	const queued = binding.instances.get(created.id)
+	if (!queued?.params) throw new Error('Expected queued workflow payload.')
+	invocationMocks.runModuleWithRegistry.mockReset()
+	invocationMocks.runModuleWithRegistry.mockResolvedValueOnce({
+		result: { ok: true },
+		logs: [],
+	})
+	const stepDo = vi.fn(
+		async (_name: string, _config: unknown, callback: () => unknown) =>
+			await callback(),
+	)
+	const legacyPayload = {
+		...(queued.params as Record<string, unknown>),
+	}
+	delete legacyPayload['packageContext']
+	await expect(
+		new DynamicCallableWorkflowBase({} as ExecutionContext, env).run(
+			{
+				payload: legacyPayload as never,
+				timestamp: new Date(),
+				instanceId: 'legacy-inline-workflow',
+			},
+			{ sleepUntil: vi.fn(), do: stepDo } as unknown as WorkflowStep,
+		),
+	).rejects.toThrow('packageContext must be an object or null')
+
+	await new DynamicCallableWorkflowBase({} as ExecutionContext, env).run(
+		{
+			payload: queued.params as never,
+			timestamp: new Date(),
+			instanceId: created.id,
+		},
+		{ sleepUntil: vi.fn(), do: stepDo } as unknown as WorkflowStep,
+	)
+
+	expect(invocationMocks.runModuleWithRegistry).toHaveBeenCalledWith(
+		expect.any(Object),
+		expect.objectContaining({
+			storageContext: {
+				sessionId: null,
+				appId: 'package-1',
+				packageId: 'package-1',
+				storageId: null,
+			},
+		}),
+		expect.any(String),
+		undefined,
+		{ packageContext },
+	)
 })
 
 test('DynamicCallableWorkflowBase restores attached remote connectors for inline code and package exports', async () => {
@@ -419,6 +494,7 @@ test('DynamicCallableWorkflowBase restores attached remote connectors for inline
 		expect.objectContaining({ remoteConnectors }),
 		expect.any(String),
 		undefined,
+		{ packageContext: null },
 	)
 
 	const packageBinding = createStatefulWorkflowBinding()
