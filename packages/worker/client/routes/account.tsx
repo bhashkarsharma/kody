@@ -2,6 +2,7 @@ import { type Handle, css } from 'remix/ui'
 import { getOauthLoginErrorMessage } from '#app/oauth-login-errors.ts'
 import { on } from '#client/event-mixin.ts'
 import { readCurrentRouterHref } from '#client/client-router.tsx'
+import { ProviderIcon } from '#client/provider-icons.tsx'
 import {
 	startSocialSignIn,
 	type AuthProviderInfo,
@@ -788,10 +789,14 @@ export function AccountRoute(handle: Handle) {
 													<span mix={css({ display: 'grid', gap: spacing.xs })}>
 														<span
 															mix={css({
+																display: 'inline-flex',
+																alignItems: 'center',
+																gap: spacing.sm,
 																fontWeight: typography.fontWeight.medium,
 																color: colors.text,
 															})}
 														>
+															<ProviderIcon providerId={connection.provider} />
 															{connection.label}
 														</span>
 														<span
@@ -843,12 +848,13 @@ export function AccountRoute(handle: Handle) {
 													type="button"
 													disabled={connectionsBusy}
 													mix={[
-														css(secondaryButtonCss),
+														css(providerConnectButtonCss),
 														on('click', () =>
 															handleConnectProvider(provider.id),
 														),
 													]}
 												>
+													<ProviderIcon providerId={provider.id} />
 													Connect {provider.label}
 												</button>
 											))}
@@ -954,3 +960,11 @@ export function AccountRoute(handle: Handle) {
 const primaryButtonCss = getPrimaryButtonCss()
 const secondaryButtonCss = getSecondaryButtonCss()
 const dangerButtonCss = getDangerButtonCss()
+
+const providerConnectButtonCss = {
+	...secondaryButtonCss,
+	display: 'inline-flex',
+	alignItems: 'center',
+	justifyContent: 'center',
+	gap: spacing.sm,
+}

@@ -5,7 +5,11 @@ import { buildAuthLink } from '#client/auth-links.ts'
 import {
 	getPathname,
 	listenToRouterNavigation,
+	readCurrentRouterHref,
 } from '#client/client-router.tsx'
+import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
+import { ProviderIcon } from '#client/provider-icons.tsx'
+import { type RouteLoaderResult } from '#client/route-loader.ts'
 import {
 	readRouterPathname,
 	readRouterSearch,
@@ -70,12 +74,31 @@ function getCurrentRedirectTo(handle: Handle) {
 	return normalizeRedirectTo(getSearchParams(handle).get('redirectTo'))
 }
 
+/**
+ * SPA navigations to /login and /signup prefetch the enabled providers so
+ * the buttons render with the rest of the page (full-document loads embed
+ * the same payload during SSR).
+ */
+export async function authProvidersRouteLoader(
+	_url: URL,
+	signal: AbortSignal,
+): Promise<RouteLoaderResult> {
+	const providers = await fetchEnabledAuthProviders(signal)
+	// A failed fetch yields no loader data, so the route's fallback fetch
+	// retries instead of rendering a permanently button-less page.
+	if (!providers) return {}
+	return { authProviders: { ok: true, providers } }
+}
+
 export function LoginRoute(handle: Handle) {
 	let status: AuthStatus = 'idle'
 	let message: string | null = null
 	let sessionStatus: SessionStatus = 'idle'
 	let sessionEmail = ''
 	let authProviders: Array<AuthProviderInfo> = []
+	// True once the provider list came from SSR-embedded or SPA-preloaded
+	// loader data (the normal paths); the client fetch is a fallback only.
+	let authProvidersReady = false
 	let activeMode = getCurrentAuthMode(handle)
 	let routePath: string | null = null
 
@@ -103,7 +126,7 @@ export function LoginRoute(handle: Handle) {
 
 		const [session, providers] = await Promise.all([
 			fetchSessionInfo(signal),
-			fetchEnabledAuthProviders(signal),
+			authProvidersReady ? null : fetchEnabledAuthProviders(signal),
 		])
 		if (signal.aborted) {
 			// Hydration re-renders abort in-flight queued tasks; reset so the
@@ -112,7 +135,10 @@ export function LoginRoute(handle: Handle) {
 			return
 		}
 		sessionEmail = session?.email ?? ''
-		authProviders = providers
+		if (providers && !authProvidersReady) {
+			authProviders = providers
+			authProvidersReady = true
+		}
 
 		sessionStatus = 'ready'
 		if (sessionEmail) {
@@ -264,6 +290,19 @@ export function LoginRoute(handle: Handle) {
 	}
 
 	return () => {
+		// Loader-data consumption runs during SSR as well, so the provider
+		// buttons are in the server-rendered HTML rather than popping in.
+		if (!authProvidersReady) {
+			const routeData = tryConsumeRouteLoaderData(
+				handle,
+				'authProviders',
+				readCurrentRouterHref(handle),
+			)
+			if (routeData) {
+				authProviders = routeData.providers
+				authProvidersReady = true
+			}
+		}
 		if (typeof document !== 'undefined' && sessionStatus === 'idle') {
 			handle.queueTask(loadSessionAndProviders)
 		}
@@ -445,10 +484,11 @@ export function LoginRoute(handle: Handle) {
 								type="button"
 								disabled={isSubmitting}
 								mix={[
-									css(secondaryButtonCss),
+									css(providerButtonCss),
 									on('click', () => handleProviderSignIn(provider.id)),
 								]}
 							>
+								<ProviderIcon providerId={provider.id} />
 								Continue with {provider.label}
 							</button>
 						))}
@@ -488,6 +528,14 @@ const pageCss = {
 const primaryButtonCss = getPrimaryButtonCss({ size: 'lg', weight: 'semibold' })
 
 const secondaryButtonCss = getSecondaryButtonCss({ size: 'lg' })
+
+const providerButtonCss = {
+	...secondaryButtonCss,
+	display: 'inline-flex',
+	alignItems: 'center',
+	justifyContent: 'center',
+	gap: spacing.sm,
+}
 
 const actionLinkCss = {
 	...primaryLinkCss,
