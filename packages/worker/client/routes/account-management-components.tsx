@@ -150,6 +150,57 @@ export function AccountManagementLinkNav(
 	)
 }
 
+const accountNavItems = [
+	{ href: '/account', label: 'Overview' },
+	{ href: '/account/secrets', label: 'Secrets' },
+	{ href: '/account/integrations', label: 'Integrations' },
+	{ href: '/account/package-invocation-tokens', label: 'Package tokens' },
+	{ href: '/account/remote-connectors', label: 'Connectors' },
+	{ href: '/account/mcp-servers', label: 'MCP servers' },
+] as const
+
+function isAccountNavItemActive(itemHref: string, currentPath: string) {
+	if (itemHref === '/account') return currentPath === '/account'
+	return currentPath === itemHref || currentPath.startsWith(`${itemHref}/`)
+}
+
+type AccountPageHeaderProps = {
+	title: string
+	description: string
+	currentHref: string
+	actions?: AccountManagementSlot
+}
+
+/**
+ * Header plus the account-sections subnav. Account pages use this the same
+ * way admin pages use AdminPageHeader, so user-specific destinations live
+ * under the account layout instead of crowding the top-level nav.
+ */
+export function AccountPageHeader(handle: Handle<AccountPageHeaderProps>) {
+	return () => {
+		const currentPath = new URL(handle.props.currentHref, 'http://localhost')
+			.pathname
+
+		return (
+			<>
+				<AccountManagementHeader
+					title={handle.props.title}
+					description={handle.props.description}
+					actions={handle.props.actions}
+				/>
+				<AccountManagementLinkNav
+					label="Account sections"
+					items={accountNavItems.map((item) => ({
+						href: item.href,
+						label: item.label,
+						active: isAccountNavItemActive(item.href, currentPath),
+					}))}
+				/>
+			</>
+		)
+	}
+}
+
 type AdminPageHeaderProps = {
 	title: string
 	description: string
