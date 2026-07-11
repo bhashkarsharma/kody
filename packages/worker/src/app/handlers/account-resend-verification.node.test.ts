@@ -6,9 +6,21 @@ import {
 } from '#app/auth-session.ts'
 import {
 	consoleError,
+	consoleInfo,
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
 import { createAccountResendVerificationHandler } from './account-resend-verification.ts'
+
+// The handler fires `void logAuditEvent(...)` without awaiting it; those
+// promises can resolve after the test ends and leak `audit-event` lines into
+// the runner output once the console spies are restored. Stub the audit sink.
+vi.mock('#app/audit-log.ts', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('#app/audit-log.ts')>()
+	return {
+		...actual,
+		logAuditEvent: async () => undefined,
+	}
+})
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -160,9 +172,6 @@ test('resend verification requires an authenticated session', async () => {
 })
 
 test('resend verification issues a fresh token for unverified accounts and rate-limits repeats', async () => {
-	// No email sender is configured in this test env, so each resend logs
-	// a send-skipped warning.
-	consoleWarn.mockImplementation(() => {})
 	const testDb = createResendTestDb({ emailVerifiedAt: null })
 	const handler = createAccountResendVerificationHandler(
 		createAppEnv(testDb.db),
@@ -181,7 +190,9 @@ test('resend verification issues a fresh token for unverified accounts and rate-
 	}
 	expect(testDb.state.verificationInserts).toBe(3)
 	expect(testDb.state.verificationDeletes).toBe(3)
-	expect(consoleWarn).toHaveBeenCalledWith(
+	// No email sender is configured in this test env, so each resend logs
+	// the send as skipped at info level.
+	expect(consoleInfo).toHaveBeenCalledWith(
 		'email-verification-send-skipped',
 		expect.any(Number),
 	)
