@@ -85,6 +85,20 @@ non-production runtimes (used by local dev and E2E tests). In GitHub Actions the
 values live under `OAUTH_`-prefixed secret names because Actions reserves
 `GITHUB_*`; the deploy workflow maps them to the unprefixed Worker secrets.
 
+## Kit waiting list
+
+Optional Worker secrets / vars for the public `/signup` waiting-list form
+(`POST /waiting-list`):
+
+- `KIT_API_KEY` — Kit v4 API key (`X-Kit-Api-Key`). Required for production
+  waiting-list joins to succeed; when unset, production returns 503 for the
+  endpoint while the rest of the app stays up. Preview deploys omit the key so
+  joins no-op instead of writing to the production Kit audience.
+- `KIT_WAITLIST_TAG_ID` — optional override for the Kit tag id (defaults to the
+  `waitlist::kody` tag).
+
+See [`architecture/authentication.md`](./architecture/authentication.md).
+
 ## Saved-secret encryption (`SECRET_STORE_KEY`)
 
 Required Worker secret used to derive the AES-GCM key for encrypting saved
