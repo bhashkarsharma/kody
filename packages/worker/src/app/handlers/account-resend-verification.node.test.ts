@@ -10,17 +10,7 @@ import {
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
 import { createAccountResendVerificationHandler } from './account-resend-verification.ts'
-
-// The handler fires `void logAuditEvent(...)` without awaiting it; those
-// promises can resolve after the test ends and leak `audit-event` lines into
-// the runner output once the console spies are restored. Stub the audit sink.
-vi.mock('#app/audit-log.ts', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('#app/audit-log.ts')>()
-	return {
-		...actual,
-		logAuditEvent: async () => undefined,
-	}
-})
+import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -209,6 +199,24 @@ test('resend verification issues a fresh token for unverified accounts and rate-
 	})
 	// No new token is created for rate-limited requests.
 	expect(testDb.state.verificationInserts).toBe(3)
+	// Three successful resends plus the rate-limited attempt are audited.
+	expect(logAuditEventSpy).toHaveBeenCalledTimes(4)
+	expect(logAuditEventSpy).toHaveBeenNthCalledWith(
+		3,
+		expect.objectContaining({
+			category: 'auth',
+			action: 'email_verification_resend',
+			result: 'success',
+		}),
+	)
+	expect(logAuditEventSpy).toHaveBeenNthCalledWith(
+		4,
+		expect.objectContaining({
+			category: 'auth',
+			action: 'email_verification_resend',
+			result: 'rate_limited',
+		}),
+	)
 })
 
 test('resend verification rejects already-verified accounts', async () => {
@@ -269,6 +277,15 @@ test('resend verification surfaces send failures without pretending success', as
 	expect(consoleWarn).toHaveBeenCalledWith(
 		'cloudflare-email-api-failed',
 		expect.any(String),
+	)
+	expect(logAuditEventSpy).toHaveBeenCalledTimes(1)
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'email_verification_resend',
+			result: 'failure',
+			reason: 'send_failed',
+		}),
 	)
 	vi.unstubAllGlobals()
 })

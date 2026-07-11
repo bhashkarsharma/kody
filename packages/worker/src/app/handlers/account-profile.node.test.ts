@@ -5,17 +5,7 @@ import {
 	type AuthSession,
 } from '#app/auth-session.ts'
 import { createAccountProfileApiHandler } from './account-profile.ts'
-
-// The handler fires `void logAuditEvent(...)` without awaiting it; those
-// promises can resolve after the test ends and leak `audit-event` lines into
-// the runner output once the console spies are restored. Stub the audit sink.
-vi.mock('#app/audit-log.ts', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('#app/audit-log.ts')>()
-	return {
-		...actual,
-		logAuditEvent: async () => undefined,
-	}
-})
+import { logAuditEventSpy } from '#worker/test-support/audit-log-spy.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -206,6 +196,8 @@ test('account profile API returns email and username for the signed-in user', as
 		username: 'current-user',
 		displayName: 'current-user',
 	})
+	// Reads are not audited.
+	expect(logAuditEventSpy).not.toHaveBeenCalled()
 })
 
 test('account profile API updates username for the signed-in user', async () => {
@@ -233,6 +225,14 @@ test('account profile API updates username for the signed-in user', async () => 
 		displayName: 'next_user',
 	})
 	expect(testDb.users.get(1)?.username).toBe('next_user')
+	expect(logAuditEventSpy).toHaveBeenCalledTimes(1)
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'account',
+			action: 'update_username',
+			result: 'success',
+		}),
+	)
 })
 
 test('account profile API rejects invalid or duplicate usernames', async () => {
@@ -285,4 +285,14 @@ test('account profile API rejects invalid or duplicate usernames', async () => {
 		error: 'Username already registered.',
 	})
 	expect(testDb.users.get(1)?.username).toBe('current-user')
+	// Only the duplicate attempt is audited; validation rejections are not.
+	expect(logAuditEventSpy).toHaveBeenCalledTimes(1)
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'account',
+			action: 'update_username',
+			result: 'failure',
+			reason: 'username_exists',
+		}),
+	)
 })

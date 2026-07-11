@@ -8,17 +8,10 @@ import {
 	consoleInfo,
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
-
-// The auth handler fires `void logAuditEvent(...)` without awaiting it; those
-// promises can resolve after the test ends and leak `audit-event` lines into
-// the runner output once the console spies are restored. Stub the audit sink.
-vi.mock('#app/audit-log.ts', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('#app/audit-log.ts')>()
-	return {
-		...actual,
-		logAuditEvent: async () => undefined,
-	}
-})
+import {
+	auditEventSummaries,
+	logAuditEventSpy,
+} from '#worker/test-support/audit-log-spy.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -370,6 +363,14 @@ test('auth handler login and signup workflow', async () => {
 	expect(await unknownUserLoginResponse.json()).toEqual({
 		error: 'Invalid email or password.',
 	})
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'login',
+			result: 'failure',
+			reason: 'invalid_credentials',
+		}),
+	)
 
 	const blockedSignupResponse = await productionContext.request({
 		email: 'new@example.com',
@@ -400,6 +401,21 @@ test('auth handler login and signup workflow', async () => {
 	})
 	expect(productionContext.testDb.users.has('invited@example.com')).toBe(true)
 	expect(productionContext.testDb.invites.get('PROD-INVITE')?.use_count).toBe(1)
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'signup',
+			result: 'success',
+			email: 'invited@example.com',
+		}),
+	)
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'invite_use',
+			result: 'success',
+		}),
+	)
 
 	const weakPasswordSignupResponse = await signupContext.request({
 		email: 'weak@example.com',
@@ -504,6 +520,14 @@ test('auth handler login and signup workflow', async () => {
 	const loginCookie = loginResponse.headers.get('Set-Cookie') ?? ''
 	expect(loginCookie).toContain('kody_session=')
 	expect(loginCookie).toContain('Max-Age=604800')
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'login',
+			result: 'success',
+			email,
+		}),
+	)
 
 	const rememberMeResponse = await productionContext.request({
 		email,
@@ -524,6 +548,27 @@ test('auth handler login and signup workflow', async () => {
 	expect(secureCookieResponse.headers.get('Set-Cookie') ?? '').toContain(
 		'Secure',
 	)
+	// The full workflow audits exactly these events, in order: the unknown
+	// login, the invite-less production signup, the invited signup (+ invite
+	// use), the weak-password rejection, the open signup, the six username
+	// rejections, and the three successful logins.
+	expect(auditEventSummaries()).toEqual([
+		'login:failure',
+		'signup:failure',
+		'signup:success',
+		'invite_use:success',
+		'signup:failure',
+		'signup:success',
+		'signup:failure',
+		'signup:failure',
+		'signup:failure',
+		'signup:failure',
+		'signup:failure',
+		'signup:failure',
+		'login:success',
+		'login:success',
+		'login:success',
+	])
 })
 
 test('signup fails when the default user role cannot be assigned', async () => {
@@ -543,6 +588,14 @@ test('signup fails when the default user role cannot be assigned', async () => {
 	expect(response.headers.get('Set-Cookie')).toBeNull()
 	// The created user row is rolled back so signup can be retried.
 	expect(context.testDb.users.has('roleless@example.com')).toBe(false)
+	expect(auditEventSummaries()).toEqual(['signup:failure'])
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'signup',
+			result: 'failure',
+		}),
+	)
 })
 
 test('signup rolls back when the verification email cannot be sent', async () => {

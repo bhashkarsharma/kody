@@ -13,17 +13,10 @@ import { createMswNodeServer } from '#worker/test-support/msw-node-server.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { quoteSqlString } from '@kody-internal/shared/sql-literals.ts'
 import { createPasswordHash } from '@kody-internal/shared/password-hash.ts'
-
-// The handlers fire `void logAuditEvent(...)` without awaiting it; those
-// promises can resolve after the test ends and leak `audit-event` lines into
-// the runner output once the console spies are restored. Stub the audit sink.
-vi.mock('#app/audit-log.ts', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('#app/audit-log.ts')>()
-	return {
-		...actual,
-		logAuditEvent: async () => undefined,
-	}
-})
+import {
+	auditEventSummaries,
+	logAuditEventSpy,
+} from '#worker/test-support/audit-log-spy.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -312,6 +305,14 @@ test('github sign-in creates a verified account, then signs it back in', async (
 		)
 		.get() as Record<string, unknown>
 	expect(connection.user_id).toBe(user.id)
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'oauth_signup',
+			result: 'success',
+			reason: 'provider=github',
+		}),
+	)
 
 	// A second sign-in with the same provider identity reuses the account.
 	const secondStart = await startProviderFlow(
@@ -338,6 +339,21 @@ test('github sign-in creates a verified account, then signs it back in', async (
 		.prepare(`SELECT COUNT(*) AS count FROM users`)
 		.get() as { count: number }
 	expect(userCount.count).toBe(1)
+	// The first callback signs the user up and logs them in; the second
+	// callback is a pure login. Nothing else is audited.
+	expect(auditEventSummaries()).toEqual([
+		'oauth_signup:success',
+		'oauth_login:success',
+		'oauth_login:success',
+	])
+	expect(logAuditEventSpy).toHaveBeenCalledWith(
+		expect.objectContaining({
+			category: 'auth',
+			action: 'oauth_login',
+			result: 'success',
+			reason: 'provider=github',
+		}),
+	)
 })
 
 test('google sign-in links a matching verified email to the existing account', async () => {
