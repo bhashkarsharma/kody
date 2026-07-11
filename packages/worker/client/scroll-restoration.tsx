@@ -6,6 +6,7 @@ import {
 	getScrollRestorationTarget,
 	type RouterNavigationEventDetail,
 	type ScrollPosition,
+	type ScrollRestorationTarget,
 } from './router-scroll-state.ts'
 
 const scrollPositionsSessionKey = 'kody:router-scroll-positions'
@@ -82,50 +83,61 @@ function isRouterNavigationEvent(
 	)
 }
 
-function scheduleScrollRestoration(
-	applyScroll: () => void,
-	signal: AbortSignal,
-) {
-	const requestId = ++restoreScrollRequestId
-	const run = () => {
-		if (signal.aborted || requestId !== restoreScrollRequestId) return
-		applyScroll()
+// Async route content (frames, deferred lists, images) can keep the document
+// too short to reach a saved scroll position right after navigation. Retry on
+// animation frames until the position becomes reachable or this deadline
+// hits. Generous on purpose: slow fetches must not strand the old scroll
+// position, and retries stop early on user scroll or the next navigation.
+const scrollRestorationDeadlineMs = 15_000
+
+// Input that signals the user has taken over scrolling; mousedown covers
+// scrollbar drags.
+const userScrollInputEvents = [
+	'wheel',
+	'touchmove',
+	'keydown',
+	'mousedown',
+] as const
+
+function maxWindowScrollPosition(): ScrollPosition {
+	const root = document.documentElement
+	return {
+		x: Math.max(0, root.scrollWidth - window.innerWidth),
+		y: Math.max(0, root.scrollHeight - window.innerHeight),
 	}
-	if (typeof window.requestAnimationFrame === 'function') {
-		window.requestAnimationFrame(run)
-		return
-	}
-	window.setTimeout(run, 0)
 }
 
-function applyWindowScroll(detail: RouterNavigationEventDetail) {
-	const key = getCurrentScrollRestorationKey()
-	const target = getScrollRestorationTarget({
-		historyAction: detail.historyAction,
-		location: detail.location,
-		preventScrollReset: detail.preventScrollReset,
-		savedPosition: key ? savedScrollPositions.get(key) : null,
-	})
-
+function applyWindowScroll(
+	detail: RouterNavigationEventDetail,
+	target: ScrollRestorationTarget,
+	isFinalAttempt: boolean,
+): boolean {
 	switch (target.type) {
-		case 'position':
+		case 'position': {
 			window.scrollTo(target.position.x, target.position.y)
-			return
+			const max = maxWindowScrollPosition()
+			// Report failure while the document is still too short to reach the
+			// saved position so the caller retries once more content rendered.
+			return target.position.y <= max.y && target.position.x <= max.x
+		}
 		case 'hash': {
 			const element = getHashTarget(target.id)
 			if (element) {
 				element.scrollIntoView()
-				return
+				return true
 			}
-			if (detail.preventScrollReset) return
+			// The hash target may render asynchronously; retry until the deadline
+			// before falling back.
+			if (!isFinalAttempt) return false
+			if (detail.preventScrollReset) return true
 			window.scrollTo(0, 0)
-			return
+			return true
 		}
 		case 'preserve':
-			return
+			return true
 		case 'top':
 			window.scrollTo(0, 0)
-			return
+			return true
 		default: {
 			const exhaustive: never = target
 			return exhaustive
@@ -137,7 +149,55 @@ function restoreWindowScroll(
 	detail: RouterNavigationEventDetail,
 	signal: AbortSignal,
 ) {
-	scheduleScrollRestoration(() => applyWindowScroll(detail), signal)
+	const key = getCurrentScrollRestorationKey()
+	const target = getScrollRestorationTarget({
+		historyAction: detail.historyAction,
+		location: detail.location,
+		preventScrollReset: detail.preventScrollReset,
+		savedPosition: key ? savedScrollPositions.get(key) : null,
+	})
+	const requestId = ++restoreScrollRequestId
+	const startedAt = Date.now()
+	// Restoration must never fight manual scrolling, but layout-driven shifts
+	// (scroll anchoring, async content replacing nodes above the viewport) can
+	// move the position between attempts without any user involvement. Watch
+	// for real input instead of comparing positions across attempts.
+	let userInteracted = false
+	const markUserInteraction = () => {
+		userInteracted = true
+	}
+	for (const eventName of userScrollInputEvents) {
+		window.addEventListener(eventName, markUserInteraction, { passive: true })
+	}
+	const stopListening = () => {
+		for (const eventName of userScrollInputEvents) {
+			window.removeEventListener(eventName, markUserInteraction)
+		}
+	}
+	const schedule = (run: () => void) => {
+		if (typeof window.requestAnimationFrame === 'function') {
+			window.requestAnimationFrame(run)
+			return
+		}
+		window.setTimeout(run, 0)
+	}
+	const attempt = () => {
+		if (
+			signal.aborted ||
+			requestId !== restoreScrollRequestId ||
+			userInteracted
+		) {
+			stopListening()
+			return
+		}
+		const isFinalAttempt = Date.now() - startedAt >= scrollRestorationDeadlineMs
+		if (applyWindowScroll(detail, target, isFinalAttempt) || isFinalAttempt) {
+			stopListening()
+			return
+		}
+		schedule(attempt)
+	}
+	schedule(attempt)
 }
 
 function handleNavigationStart(event: Event) {
