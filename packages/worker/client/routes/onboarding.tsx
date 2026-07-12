@@ -1,9 +1,11 @@
 import { type Handle, css } from 'remix/ui'
+import { normalizeRedirectTo } from '#app/safe-redirect.ts'
 import { CopyTextButton } from '#client/copy-text-button.tsx'
 import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { createRouteLoadLatch } from '#client/route-load-latch.ts'
 import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
 import { consumeStaleNavigationData } from '#client/navigation-data.ts'
+import { readRouterSearch } from '#client/router-location.tsx'
 import {
 	type AccountStatus,
 	readJson,
@@ -18,6 +20,11 @@ import {
 	AccountManagementShell,
 } from '#client/routes/account-management-components.tsx'
 import { renderByokExplainer } from '#client/routes/byok-explainer.tsx'
+import {
+	onboardingPath,
+	resolveOnboardingLoginPath,
+	resolveOnboardingPendingVerificationPath,
+} from '#client/routes/onboarding-redirect.ts'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import {
 	cardCss,
@@ -34,31 +41,44 @@ export type OnboardingPayload = {
 	mcpServerUrl: string
 	setupPrompt: string
 	hasMcpClient: boolean
+	emailVerified: boolean
 	needsOnboarding: boolean
 }
 
 export const onboardingApiPath = '/onboarding.json'
-export const onboardingPath = '/onboarding'
+export { onboardingPath }
 
 function isOnboardingPath(href: string) {
 	return new URL(href, 'http://localhost').pathname === onboardingPath
 }
 
+function readOnboardingRedirectTo(handle: Handle) {
+	return normalizeRedirectTo(
+		new URLSearchParams(readRouterSearch(handle)).get('redirectTo'),
+	)
+}
+
 export async function onboardingRouteLoader(
-	_url: URL,
+	url: URL,
 	signal: AbortSignal,
 ): Promise<RouteLoaderResult> {
+	const redirectTo = normalizeRedirectTo(url.searchParams.get('redirectTo'))
 	const response = await fetch(onboardingApiPath, {
 		headers: { Accept: 'application/json' },
 		credentials: 'include',
 		signal,
 	})
 	if (response.status === 401) {
-		return routeLoaderRedirect('/login')
+		return routeLoaderRedirect(resolveOnboardingLoginPath(redirectTo))
 	}
 	const payload = await readJson<OnboardingPayload>(response)
 	if (!response.ok || !payload?.ok) {
 		throw new Error('Unable to load onboarding.')
+	}
+	if (!payload.emailVerified) {
+		return routeLoaderRedirect(
+			resolveOnboardingPendingVerificationPath(redirectTo),
+		)
 	}
 	return { onboarding: payload }
 }
@@ -93,6 +113,7 @@ export function OnboardingRoute(handle: Handle) {
 
 	async function loadOnboarding(signal: AbortSignal) {
 		const href = readCurrentRouterHref(handle)
+		const redirectTo = readOnboardingRedirectTo(handle)
 		try {
 			const response = await fetch(onboardingApiPath, {
 				headers: { Accept: 'application/json' },
@@ -101,12 +122,18 @@ export function OnboardingRoute(handle: Handle) {
 			})
 			if (signal.aborted) return
 			if (response.status === 401) {
-				window.location.assign('/login?redirectTo=%2Fonboarding')
+				window.location.assign(resolveOnboardingLoginPath(redirectTo))
 				return
 			}
 			const payload = await readJson<OnboardingPayload>(response)
 			if (!response.ok || !payload?.ok) {
 				throw new Error('Unable to load onboarding.')
+			}
+			if (!payload.emailVerified) {
+				window.location.assign(
+					resolveOnboardingPendingVerificationPath(redirectTo),
+				)
+				return
 			}
 			applyPayload(payload)
 			loadLatch.markLoaded(href)
@@ -125,6 +152,14 @@ export function OnboardingRoute(handle: Handle) {
 		if (!isOnboardingPath(href)) return false
 		const routeData = tryConsumeRouteLoaderData(handle, 'onboarding', href)
 		if (!routeData) return false
+		if (!routeData.emailVerified) {
+			window.location.assign(
+				resolveOnboardingPendingVerificationPath(
+					readOnboardingRedirectTo(handle),
+				),
+			)
+			return true
+		}
 		applyPayload(routeData)
 		loadLatch.markLoaded(href)
 		return true
@@ -200,10 +235,6 @@ export function OnboardingRoute(handle: Handle) {
 								When your agent connects, it starts an OAuth flow. Sign in to
 								Kody if needed, approve the request, and the agent receives a
 								token scoped to your account.
-							</p>
-							<p mix={css(descriptionCss)}>
-								Verify your account email first if you have not already — MCP
-								access stays disabled until the email is verified.
 							</p>
 						</section>
 

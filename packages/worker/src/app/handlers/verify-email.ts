@@ -1,6 +1,7 @@
 import { type Action } from 'remix/router'
 import { getRequestIp, logAuditEvent } from '#app/audit-log.ts'
 import { verifyEmailToken } from '#app/email-verification.ts'
+import { resolveVerifyEmailSuccessCta } from '#app/safe-redirect.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
 import { type routes } from '#app/routes.ts'
 
@@ -62,6 +63,9 @@ export function createVerifyEmailHandler(env: Env) {
 				ip: requestIp,
 				path: url.pathname,
 			})
+			const cta = resolveVerifyEmailSuccessCta(
+				url.searchParams.get('redirectTo'),
+			)
 			return renderAppPage({
 				request,
 				env,
@@ -70,7 +74,9 @@ export function createVerifyEmailHandler(env: Env) {
 					emailVerification: {
 						ok: true,
 						kind: 'email_verify',
-						message: 'Your email address has been verified.',
+						message: cta.message,
+						ctaHref: cta.href,
+						ctaLabel: cta.label,
 					},
 				},
 			})

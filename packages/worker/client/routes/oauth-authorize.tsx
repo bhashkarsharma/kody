@@ -1,10 +1,16 @@
 import { type Handle, css } from 'remix/ui'
+import { normalizeRedirectTo } from '#app/safe-redirect.ts'
 import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { on } from '#client/event-mixin.ts'
 import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
 import { consumeStaleNavigationData } from '#client/navigation-data.ts'
 import { readRouterSearch } from '#client/router-location.tsx'
 import { type RouteLoaderResult } from '#client/route-loader.ts'
+import {
+	renderEmailVerificationPrompt,
+	requestResendVerification,
+} from '#client/routes/email-verification-prompt.tsx'
+import { resolveAuthorizeEmailVerified } from '#client/routes/oauth-authorize-email-verified.ts'
 import {
 	fetchSessionInfo,
 	getSessionDisplayName,
@@ -35,6 +41,7 @@ import {
 type OAuthAuthorizeInfo = {
 	client: { id: string; name: string }
 	scopes: Array<string>
+	emailVerified: boolean | null
 }
 
 type OAuthAuthorizeStatus = 'idle' | 'loading' | 'ready' | 'error'
@@ -69,6 +76,7 @@ export async function oauthAuthorizeRouteLoader(
 				ok: false,
 				error: errorText,
 				allowClientReset: payload?.allowClientReset === true,
+				code: typeof payload?.code === 'string' ? payload.code : undefined,
 			},
 		}
 	}
@@ -77,6 +85,10 @@ export async function oauthAuthorizeRouteLoader(
 			ok: true,
 			client: payload.client,
 			scopes: payload.scopes,
+			emailVerified:
+				typeof payload.emailVerified === 'boolean'
+					? payload.emailVerified
+					: null,
 		},
 	}
 }
@@ -92,6 +104,9 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 	let resetCompleted = false
 	let allowClientReset = false
 	let activeInfoRequestId = 0
+	let resendStatus: 'idle' | 'sending' = 'idle'
+	let resendMessage: string | null = null
+	let resendTone: 'error' | 'info' = 'info'
 
 	function setMessage(next: OAuthAuthorizeMessage | null) {
 		message = next
@@ -130,6 +145,10 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 			info = {
 				client: payload.client,
 				scopes: payload.scopes,
+				emailVerified:
+					typeof payload.emailVerified === 'boolean'
+						? payload.emailVerified
+						: null,
 			}
 			status = 'ready'
 			allowClientReset = false
@@ -174,6 +193,10 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 			info = {
 				client: routeData.client,
 				scopes: routeData.scopes,
+				emailVerified:
+					typeof routeData.emailVerified === 'boolean'
+						? routeData.emailVerified
+						: null,
 			}
 			status = 'ready'
 			allowClientReset = false
@@ -185,6 +208,49 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 			message = { type: 'error', text: routeData.error }
 		}
 		return true
+	}
+
+	function readOAuthResumeTarget() {
+		const currentUrl = new URL(
+			readCurrentRouterHref(handle),
+			'http://localhost',
+		)
+		return normalizeRedirectTo(`${currentUrl.pathname}${currentUrl.search}`)
+	}
+
+	async function handleResendVerification() {
+		resendStatus = 'sending'
+		resendMessage = null
+		resendTone = 'info'
+		handle.update()
+		try {
+			const result = await requestResendVerification(readOAuthResumeTarget())
+			resendTone = result.ok ? 'info' : 'error'
+			resendMessage = result.message
+		} catch {
+			resendTone = 'error'
+			resendMessage = 'Unable to resend the verification email.'
+		} finally {
+			resendStatus = 'idle'
+			handle.update()
+		}
+	}
+
+	async function handleContinueAfterVerify() {
+		session = await fetchSessionInfo()
+		sessionStatus = 'ready'
+		activeInfoRequestId += 1
+		const requestId = activeInfoRequestId
+		await loadInfo(requestId)
+		if (session?.emailVerified) {
+			resendTone = 'info'
+			resendMessage = 'Email verified. You can approve the connection now.'
+		} else {
+			resendTone = 'info'
+			resendMessage =
+				'Still waiting on verification. Keep this page open, finish verification in another tab, then continue.'
+		}
+		handle.update()
 	}
 
 	async function submitDecision(
@@ -230,6 +296,10 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 						? payload.error
 						: 'Unable to complete authorization.'
 				setMessage({ type: 'error', text: errorText })
+				if (payload?.code === 'email_verification_required') {
+					session = await fetchSessionInfo()
+					sessionStatus = 'ready'
+				}
 				submittingDecision = null
 				handle.update()
 				return
@@ -310,10 +380,19 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 		const isSessionLoading =
 			sessionStatus === 'loading' || sessionStatus === 'idle'
 		const isLoggedIn = isSessionReady && Boolean(sessionEmail)
+		const emailVerified = resolveAuthorizeEmailVerified({
+			isSessionReady,
+			sessionEmailVerified: session?.emailVerified,
+			infoEmailVerified: info?.emailVerified,
+		})
+		const needsEmailVerification = isLoggedIn && !emailVerified
 		const showResetClientCard = allowClientReset && !resetCompleted
-		const showAuthorizeForm = !resetCompleted
+		const showAuthorizeForm = !resetCompleted && !needsEmailVerification
 		const actionsDisabled =
-			status !== 'ready' || Boolean(submittingDecision) || isSessionLoading
+			status !== 'ready' ||
+			Boolean(submittingDecision) ||
+			isSessionLoading ||
+			needsEmailVerification
 		const resetClientDisabled =
 			Boolean(submittingDecision) || isSessionLoading || !isLoggedIn
 		const formReady = status === 'ready' && !isSessionLoading
@@ -357,9 +436,42 @@ export function OAuthAuthorizeRoute(handle: Handle) {
 						<p mix={css(descriptionCss)}>
 							{resetCompleted
 								? 'Start the connection again from your client to continue with this account.'
-								: 'Approve to continue with this account.'}
+								: needsEmailVerification
+									? 'Verify your email before approving MCP access. Keep this page open so the original OAuth request is preserved.'
+									: 'Approve to continue with this account.'}
 						</p>
 					</section>
+				) : null}
+				{needsEmailVerification
+					? renderEmailVerificationPrompt({
+							email: sessionEmail,
+							description:
+								'MCP authorization cannot finish until this account email is verified. Resend the link here if needed. Keep this page open, verify in another tab, then continue without restarting the host connection.',
+							resendStatus,
+							resendMessage,
+							resendTone,
+							onResend: () => {
+								void handleResendVerification()
+							},
+							continueLabel: "I've verified - continue",
+							onContinue: () => {
+								void handleContinueAfterVerify()
+							},
+						})
+					: null}
+				{needsEmailVerification && !resetCompleted ? (
+					<div mix={css({ marginBottom: spacing.md })}>
+						<button
+							type="button"
+							disabled={Boolean(submittingDecision) || isSessionLoading}
+							mix={[
+								on('click', () => submitDecision('deny')),
+								css(secondaryButtonCss),
+							]}
+						>
+							Deny
+						</button>
+					</div>
 				) : null}
 				{status === 'loading' ? (
 					<p mix={css(descriptionCss)}>Loading authorization details...</p>

@@ -93,24 +93,57 @@ test('admin invite signup and email verification happy path', async ({
 	await page.getByLabel('Password').fill(invitedPassword)
 	await page.getByLabel('Invite code').fill(inviteCode)
 	await page.getByRole('button', { name: 'Create account' }).click()
-	await expect(page).toHaveURL(/\/account$/)
+	await expect(page).toHaveURL(/\/pending-verification$/)
+	await expect(
+		page.getByRole('heading', { name: 'Check your email' }),
+	).toBeVisible()
 	await expect(
 		page.getByRole('heading', { name: 'Verify your email' }),
 	).toBeVisible()
+	await expect(
+		page.getByRole('heading', { name: 'Add Kody as an MCP server' }),
+	).toHaveCount(0)
+	await expect(page.getByText(/\/mcp/)).toHaveCount(0)
+
+	await page.goto(
+		`/onboarding?redirectTo=${encodeURIComponent('/oauth/authorize?client_id=e2e-onboarding')}`,
+	)
+	await expect(page).toHaveURL(
+		/\/pending-verification\?redirectTo=%2Foauth%2Fauthorize%3Fclient_id%3De2e-onboarding$/,
+	)
+	await expect(
+		page.getByRole('heading', { name: 'Add Kody as an MCP server' }),
+	).toHaveCount(0)
 
 	await page.getByRole('button', { name: 'Resend verification email' }).click()
+	const oauthResume = '/oauth/authorize?client_id=e2e-demo&response_type=code'
 	await expect(async () => {
 		await setEmailVerificationTokenInE2eDatabase({
 			email: invitedEmail,
 			token: verificationToken,
 		})
 		await page.goto(
-			`/verify-email?token=${encodeURIComponent(verificationToken)}`,
+			`/verify-email?token=${encodeURIComponent(verificationToken)}&redirectTo=${encodeURIComponent(oauthResume)}`,
 		)
 		await expect(
 			page.getByRole('heading', { name: 'Email verified' }),
 		).toBeVisible({ timeout: 1_000 })
 	}).toPass({ timeout: 15_000 })
+
+	await expect(page.getByText(/MCP access is now available/i)).toBeVisible()
+	const continueAuthorization = page.getByRole('link', {
+		name: 'Continue authorization',
+	})
+	await expect(continueAuthorization).toHaveAttribute('href', oauthResume)
+	await continueAuthorization.click()
+	await expect(page).toHaveURL(/\/oauth\/authorize/)
+
+	await page.goto('/onboarding')
+	await expect(page).toHaveURL(/\/onboarding$/)
+	await expect(
+		page.getByRole('heading', { name: 'Add Kody as an MCP server' }),
+	).toBeVisible()
+	await expect(page.getByText(/\/mcp/)).toBeVisible()
 
 	await page.goto('/account')
 	await expect(
