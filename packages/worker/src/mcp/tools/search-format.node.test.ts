@@ -489,6 +489,7 @@ test('package entity detail includes exports, jobs, and referenced local types',
 			searchText: null,
 			sourceId: 'source-package-123',
 			hasApp: true,
+			hidden: false,
 			createdAt: '2026-03-20T00:00:00.000Z',
 			updatedAt: '2026-03-20T00:00:00.000Z',
 		},
@@ -537,10 +538,13 @@ export declare function fetch(request: Request): Promise<Response>
 `,
 		},
 	})
+	expect(observedPackageDetail.markdown).toContain('- Has app: yes')
+	expect(observedPackageDetail.markdown).toContain('- Hidden: no')
 	expect(observedPackageDetail.structured).toMatchObject({
 		type: 'package',
 		entityRef: 'observed-package:package',
 		hasApp: true,
+		hidden: false,
 		hostedUrl: 'http://localhost/@test-user/packages/observed-package',
 		appEntry: './src/app.ts',
 		exports: [
@@ -582,6 +586,48 @@ export declare function fetch(request: Request): Promise<Response>
 	})
 })
 
+test('package entity detail markdown includes hidden flag next to has app', () => {
+	const hiddenPackageDetail = formatEntityDetailMarkdown({
+		type: 'package',
+		id: 'hidden-package',
+		title: '@kody/hidden-package',
+		description: 'Hidden package.',
+		baseUrl: 'http://localhost',
+		ownerUsername: 'test-user',
+		hostedUrl: null,
+		record: {
+			id: 'package-hidden',
+			userId: 'user-123',
+			name: '@kody/hidden-package',
+			kodyId: 'hidden-package',
+			description: 'Hidden package.',
+			tags: [],
+			searchText: null,
+			sourceId: 'source-package-hidden',
+			hasApp: false,
+			hidden: true,
+			createdAt: '2026-03-20T00:00:00.000Z',
+			updatedAt: '2026-03-20T00:00:00.000Z',
+		},
+		manifest: {
+			name: '@kody/hidden-package',
+			exports: {
+				'.': './src/index.ts',
+			},
+			kody: {
+				id: 'hidden-package',
+				description: 'Hidden package.',
+				tags: [],
+			},
+		},
+		files: {
+			'package.json': '{}',
+		},
+	})
+	expect(hiddenPackageDetail.markdown).toContain('- Has app: no')
+	expect(hiddenPackageDetail.markdown).toContain('- Hidden: yes')
+})
+
 test('package search formatting keeps runnable actions and hosted URLs in structured output', () => {
 	const [hostedPackageMatch] = toSlimStructuredMatches({
 		baseUrl: 'http://localhost',
@@ -596,6 +642,7 @@ test('package search formatting keeps runnable actions and hosted URLs in struct
 				description: 'Saved package for Spotify playback controls.',
 				tags: ['spotify', 'playback'],
 				hasApp: true,
+				hidden: false,
 				readmeSnippet: {
 					path: 'README.md',
 					snippet:
@@ -610,6 +657,7 @@ test('package search formatting keeps runnable actions and hosted URLs in struct
 		id: 'spotify-playback',
 		entityRef: 'spotify-playback:package',
 		hasApp: true,
+		hidden: false,
 		hostedUrl: 'http://localhost/@test-user/packages/spotify-playback',
 	})
 
@@ -625,6 +673,7 @@ test('package search formatting keeps runnable actions and hosted URLs in struct
 				description: 'Saved package for Spotify playback controls.',
 				tags: ['spotify', 'playback'],
 				hasApp: true,
+				hidden: false,
 				readmeSnippet: null,
 			},
 		],
@@ -632,6 +681,7 @@ test('package search formatting keeps runnable actions and hosted URLs in struct
 	expect(anonymousPackageMatch).toMatchObject({
 		type: 'package',
 		hasApp: true,
+		hidden: false,
 		hostedUrl: null,
 	})
 
@@ -648,6 +698,7 @@ test('package search formatting keeps runnable actions and hosted URLs in struct
 				description: 'Google product helpers.',
 				tags: ['google', 'calendar'],
 				hasApp: true,
+				hidden: false,
 				actionMatches: [
 					{
 						subpath: './calendar',
@@ -702,6 +753,7 @@ test('search markdown summarizes broad results safely and only suggests entity d
 				description: 'Observed package with an app surface.',
 				tags: ['observed'],
 				hasApp: false,
+				hidden: false,
 				readmeSnippet: {
 					path: 'README.md',
 					snippet: truncatedReadmeSnippet,

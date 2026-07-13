@@ -127,6 +127,7 @@ export type SlimSearchMatch =
 			rootImportUsage: string
 			tags: Array<string>
 			hasApp: boolean
+			hidden: boolean
 			hostedUrl: string | null
 			readmeSnippet: {
 				path: string
@@ -236,6 +237,7 @@ export type SearchEntityDetailStructured =
 			name: string
 			tags: Array<string>
 			hasApp: boolean
+			hidden: boolean
 			hostedUrl: string | null
 			appEntry: string | null
 			exports: Array<{
@@ -394,6 +396,7 @@ export type SearchMatch =
 			description: string
 			tags: Array<string>
 			hasApp: boolean
+			hidden: boolean
 			readmeSnippet?: {
 				path: string
 				snippet: string
@@ -756,6 +759,7 @@ export function toSlimStructuredMatches(input: {
 				rootImportUsage,
 				tags: match.tags,
 				hasApp: match.hasApp,
+				hidden: match.hidden,
 				hostedUrl:
 					match.hasApp && input.username
 						? buildPackageHostedUrl(input.baseUrl, input.username, match.kodyId)
@@ -954,6 +958,7 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 			`- Kody id: \`${detail.record.kodyId}\``,
 			`- Tags: ${detail.record.tags.length > 0 ? detail.record.tags.map((tag) => `\`${tag}\``).join(', ') : 'none'}`,
 			`- Has app: ${detail.record.hasApp ? 'yes' : 'no'}`,
+			`- Hidden: ${detail.record.hidden ? 'yes' : 'no'}`,
 			...(detail.hostedUrl ? [`- Hosted URL: \`${detail.hostedUrl}\``] : []),
 		]
 		if (appEntry) {
@@ -1047,6 +1052,7 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 				name: detail.record.name,
 				tags: detail.record.tags,
 				hasApp: detail.record.hasApp,
+				hidden: detail.record.hidden,
 				hostedUrl: detail.hostedUrl,
 				appEntry,
 				exports: exportDetails,
