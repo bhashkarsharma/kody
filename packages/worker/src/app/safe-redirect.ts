@@ -41,6 +41,9 @@ export function resolvePostVerificationRedirect(redirectTo?: string | null) {
 /** Success CTA for `/verify-email`, preserving a safe OAuth (or other) resume target. */
 export function resolveVerifyEmailSuccessCta(redirectTo?: string | null) {
 	const href = resolvePostVerificationRedirect(redirectTo)
+	// Exception to the present-tense docs rule (see docs/contributing/documentation.md):
+	// this copy reports a user-specific state transition right after verification,
+	// so "now" is intentional — MCP was gated until the moment this message appears.
 	if (href === defaultPostVerificationRedirect) {
 		return {
 			href,
