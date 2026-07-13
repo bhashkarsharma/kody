@@ -4,6 +4,7 @@ import { type Action } from 'remix/router'
 import { getRequestIp, logAuditEvent } from '#app/audit-log.ts'
 import { loadAdminUserUsageData } from '#app/admin-user-usage-data.ts'
 import {
+	loadAdminUserByIdOrEmail,
 	loadAdminUsersData,
 	loadRolesByUserIds,
 	adminUserListItemFieldNames,
@@ -57,7 +58,12 @@ export function createAdminUsersHandler(env: Env) {
 				return redirectToLogin(request)
 			}
 
-			const adminUsers = await loadAdminUsersData(env, request.url)
+			// The HTML page always seeds the first window; infinite scroll owns
+			// later pages through the JSON API, so a stale `?page=N` link must
+			// not anchor the list past the rows it can never load.
+			const pageUrl = new URL(request.url)
+			pageUrl.searchParams.delete('page')
+			const adminUsers = await loadAdminUsersData(env, pageUrl.toString())
 
 			return renderAppPage({
 				request,
@@ -208,8 +214,24 @@ async function handleAssignRoleAction(input: {
 		reason: `target_user_id=${targetUserId};role=${roleName}`,
 	})
 
-	const payload = await loadAdminUsersData(input.env, input.request.url)
-	return jsonResponse(payload)
+	return buildMutationResponse(input.env, input.request.url, targetUserId)
+}
+
+/**
+ * Mutation responses carry the refreshed page slice plus the updated target
+ * user, because with infinite scroll the target may live outside the first
+ * page and the client patches it in place instead of resetting the list.
+ */
+async function buildMutationResponse(
+	env: Env,
+	requestUrl: string,
+	targetUserId: number,
+) {
+	const [payload, updatedUser] = await Promise.all([
+		loadAdminUsersData(env, requestUrl),
+		loadAdminUserByIdOrEmail(env.APP_DB, { id: targetUserId }),
+	])
+	return jsonResponse({ ...payload, updatedUser })
 }
 
 async function handleRemoveRoleAction(input: {
@@ -294,8 +316,7 @@ async function handleRemoveRoleAction(input: {
 		reason: `target_user_id=${targetUserId};role=${roleName}`,
 	})
 
-	const payload = await loadAdminUsersData(input.env, input.request.url)
-	return jsonResponse(payload)
+	return buildMutationResponse(input.env, input.request.url, targetUserId)
 }
 
 async function handleUpdatePlanAction(input: {
@@ -340,8 +361,7 @@ async function handleUpdatePlanAction(input: {
 		reason: `target_user_id=${targetUserId};plan=${planUpdate.plan ?? 'null'}`,
 	})
 
-	const payload = await loadAdminUsersData(input.env, input.request.url)
-	return jsonResponse(payload)
+	return buildMutationResponse(input.env, input.request.url, targetUserId)
 }
 
 /**

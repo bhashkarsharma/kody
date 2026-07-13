@@ -6,6 +6,7 @@ import {
 	adminCapabilityAccess,
 	adminUserMetadataSchema,
 	auditAdminCapabilityInvocation,
+	roleNameSchema,
 } from './admin-shared.ts'
 
 const inputSchema = z.object({
@@ -22,6 +23,13 @@ const inputSchema = z.object({
 		.max(100)
 		.optional()
 		.describe('Users per page. Defaults to 20 and maxes at 100.'),
+	query: z
+		.string()
+		.optional()
+		.describe('Case-insensitive substring match on username or email.'),
+	role: roleNameSchema
+		.optional()
+		.describe('Only return users holding this role (for example "admin").'),
 })
 
 const outputSchema = z.object({
@@ -51,6 +59,8 @@ export const adminUserListCapability = defineDomainCapability(
 					if (args.pageSize) {
 						url.searchParams.set('pageSize', String(args.pageSize))
 					}
+					if (args.query) url.searchParams.set('q', args.query)
+					if (args.role) url.searchParams.set('role', args.role)
 					const data = await loadAdminUsersData(ctx.env, url.toString())
 					return {
 						total: data.total,

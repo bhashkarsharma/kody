@@ -86,18 +86,45 @@ test('admin RBAC controls access, role assignment, and privacy boundaries', asyn
 		),
 	).toBe(true)
 
-	const initialUsersApiResponse = await page.request.get(
-		'/admin/users.json?pageSize=100',
+	// Server-side search: typing in the accounts search filters the list,
+	// writes `q` to the URL, and the reported total shrinks to match.
+	const usersSearchInput = page.getByLabel('Search', { exact: true })
+	await usersSearchInput.fill(memberUser.username)
+	await expect(page).toHaveURL(new RegExp(`q=${memberUser.username}`))
+	await expect(
+		page.getByRole('button', { name: memberUser.username }),
+	).toBeVisible()
+	await expect(
+		page.getByRole('button', { name: adminUser.username }),
+	).toHaveCount(0)
+	const searchApiResponse = await page.request.get(
+		`/admin/users.json?q=${memberUser.username}`,
 	)
-	expect(initialUsersApiResponse.ok()).toBe(true)
-	const initialUsersPayload = await initialUsersApiResponse.json()
-	expect(initialUsersPayload.ok).toBe(true)
-	const lastUsersPage = Math.max(
-		1,
-		Math.ceil(Number(initialUsersPayload.total) / 100),
-	)
+	expect(searchApiResponse.ok()).toBe(true)
+	const searchPayload = await searchApiResponse.json()
+	expect(searchPayload.total).toBe(1)
+	expect(searchPayload.users[0].email).toBe(memberUser.email)
 
-	await page.goto(`/admin/users?pageSize=100&page=${lastUsersPage}`)
+	await usersSearchInput.fill(`no-user-matches-${runId}`)
+	await expect(
+		page.getByText('No users match the current filters.'),
+	).toBeVisible()
+
+	// Infinite scroll: with a one-user page size the sentinel is visible in
+	// the under-filled list and auto-loads following pages.
+	await page.goto('/admin/users?pageSize=1')
+	await expect(page.getByRole('heading', { name: 'Admin users' })).toBeVisible()
+	await expect(page.getByText(/Showing ([2-9]|\d{2,}) of \d+/)).toBeVisible()
+
+	// Deep links with `?page=N` must not anchor the list past unreachable
+	// earlier pages: the initial window always seeds from page one.
+	await page.goto('/admin/users?pageSize=1&page=99999')
+	await expect(page.getByRole('heading', { name: 'Admin users' })).toBeVisible()
+	await expect(page.getByText(/Showing [1-9]\d* of \d+/)).toBeVisible()
+
+	// Both rbac users share the `rbac-${runId}` username suffix, so search
+	// pins the list to exactly the accounts this test seeded.
+	await page.goto(`/admin/users?q=rbac-${runId}`)
 	await expect(page.getByRole('heading', { name: 'Admin users' })).toBeVisible()
 	// The first user is auto-selected, so the email can render in both the
 	// list and the detail panel — assert on the list entry specifically.
@@ -109,7 +136,7 @@ test('admin RBAC controls access, role assignment, and privacy boundaries', asyn
 	await expect(page.getByText('super-secret-value')).toHaveCount(0)
 
 	const usersApiResponse = await page.request.get(
-		`/admin/users.json?pageSize=100&page=${lastUsersPage}`,
+		`/admin/users.json?q=rbac-${runId}`,
 	)
 	expect(usersApiResponse.ok()).toBe(true)
 	const usersPayload = await usersApiResponse.json()
@@ -124,7 +151,7 @@ test('admin RBAC controls access, role assignment, and privacy boundaries', asyn
 
 	// The usage drill-down lives on the users page and loads for the
 	// selected account only.
-	await page.goto(`/admin/users?pageSize=100&page=${lastUsersPage}`)
+	await page.goto(`/admin/users?q=rbac-${runId}`)
 	await page.getByRole('button', { name: memberUser.username }).click()
 	await expect(page.getByText('Usage & quotas')).toBeVisible()
 	await expect(
@@ -164,7 +191,7 @@ test('admin RBAC controls access, role assignment, and privacy boundaries', asyn
 	expect(JSON.stringify(insightsPayload)).not.toContain('super-secret-value')
 	expect(JSON.stringify(insightsPayload)).not.toContain(memberUser.email)
 
-	await page.goto(`/admin/users?pageSize=100&page=${lastUsersPage}`)
+	await page.goto(`/admin/users?q=rbac-${runId}`)
 	await page.getByRole('button', { name: memberUser.username }).click()
 	await expect(page.getByText('Account metadata only')).toBeVisible()
 
@@ -174,7 +201,7 @@ test('admin RBAC controls access, role assignment, and privacy boundaries', asyn
 	await page.getByRole('button', { name: 'Save plan' }).click()
 	await expect(planSelect).toHaveValue('pro')
 	const planApiResponse = await page.request.get(
-		`/admin/users.json?pageSize=100&page=${lastUsersPage}`,
+		`/admin/users.json?q=rbac-${runId}`,
 	)
 	expect(planApiResponse.ok()).toBe(true)
 	const planPayload = await planApiResponse.json()
@@ -183,7 +210,22 @@ test('admin RBAC controls access, role assignment, and privacy boundaries', asyn
 	)
 	expect(memberAfterPlan.plan).toBe('pro')
 
-	const roleSelect = page.getByLabel('Role')
+	// Mutations under an active role filter: removing the filtered role must
+	// drop the row from the list and shrink the filtered total in place.
+	await page.goto(`/admin/users?q=rbac-${runId}&role=user`)
+	await expect(page.getByText('Showing 2 of 2 accounts')).toBeVisible()
+	await page.getByRole('button', { name: memberUser.username }).click()
+	const filteredRoleSelect = page.getByLabel('Role', { exact: true })
+	await filteredRoleSelect.selectOption('user')
+	await page.getByRole('button', { name: 'Remove', exact: true }).click()
+	await expect(
+		page.getByRole('button', { name: memberUser.username }),
+	).toHaveCount(0)
+	await expect(page.getByText('Showing 1 of 1 account')).toBeVisible()
+
+	await page.goto(`/admin/users?q=rbac-${runId}`)
+	await page.getByRole('button', { name: memberUser.username }).click()
+	const roleSelect = page.getByLabel('Role', { exact: true })
 	await roleSelect.selectOption('admin')
 	await page.getByRole('button', { name: 'Assign', exact: true }).click()
 	await page.context().clearCookies()
