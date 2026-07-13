@@ -8,7 +8,7 @@ package or package app that depends on the resulting integration or tokens.
 
 ## Default path: `/connect/oauth`
 
-Send the signed-in user to `/connect/oauth` on your deployment host with query
+Send the signed-in user to `https://heykody.dev/connect/oauth` with query
 parameters that describe the provider. The page runs authorize -> callback ->
 token exchange in a full browser context and persists access and refresh tokens
 through the account secrets flow.
@@ -17,15 +17,28 @@ This path does not require package-app-specific OAuth code.
 
 Example shape:
 
-`https://<your-kody-origin>/connect/oauth?provider=...&authorizeUrl=...&tokenUrl=...`
+`https://heykody.dev/connect/oauth?provider=...&authorizeUrl=...&tokenUrl=...`
 
 ## Redirect URI
 
-Register this redirect URI in the provider console:
+The redirect URI is:
 
-`{origin}/connect/oauth`
+`https://heykody.dev/connect/oauth`
 
-Use the same origin the user uses to open Kody.
+Register it in the provider console exactly as written. Users connect to Kody at
+`https://heykody.dev`, so connect URLs use `https://heykody.dev/...`. The
+`/connect/oauth` page shows the redirect URI for the current origin with a copy
+button. A self-hosted deployment uses its own origin plus `/connect/oauth`.
+
+## Provider setup checklist
+
+The provider-side setup is the same for every provider:
+
+1. Create an OAuth app in the provider's developer console.
+2. Register the exact redirect URI above.
+3. Enable any APIs and scopes the integration needs.
+4. Paste the client ID (and client secret for confidential flows) into the
+   `/connect/oauth` setup form in Kody.
 
 ## Required query parameters
 
@@ -127,8 +140,10 @@ routes) are for clients authenticating to Kody itself.
 ## Agent checklist
 
 1. Confirm OAuth is the right auth shape.
-2. Build the `/connect/oauth` URL with the required params.
-3. Tell the user the exact redirect URI to register.
+2. Build the connect URL with the required params:
+   `https://heykody.dev/connect/oauth?...`.
+3. Tell the user the exact redirect URI to register:
+   `https://heykody.dev/connect/oauth`. The page shows it with a copy button.
 4. Have the user open the URL while signed in and wait for success.
 5. Run the authenticated smoke test from `integration_bootstrap`.
 6. Continue with the package or package app only after the smoke test passes.
