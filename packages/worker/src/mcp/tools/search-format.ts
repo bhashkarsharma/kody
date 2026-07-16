@@ -102,6 +102,14 @@ export type SearchResultStructuredContent = {
 	}>
 }
 
+export type RelatedCapabilityOperation = {
+	name: string
+	entityRef: string
+	description: string
+	method?: string
+	path?: string
+}
+
 export type SlimSearchMatch =
 	| {
 			type: 'capability'
@@ -114,6 +122,8 @@ export type SlimSearchMatch =
 			remoteConnector?: CapabilitySpec['remoteConnector']
 			mcpServer?: CapabilitySpec['mcpServer']
 			openApi?: CapabilitySpec['openApi']
+			inputTypeDefinition?: string
+			inputTypeDefinitionTruncated?: boolean
 	  }
 	| {
 			type: 'package'
@@ -223,6 +233,7 @@ export type SearchEntityDetailStructured =
 			openApi?: CapabilitySpec['openApi']
 			inputTypeDefinition: string
 			outputTypeDefinition?: string
+			relatedOperations?: Array<RelatedCapabilityOperation>
 	  }
 	| {
 			kind: 'entity'
@@ -240,6 +251,10 @@ export type SearchEntityDetailStructured =
 			hidden: boolean
 			hostedUrl: string | null
 			appEntry: string | null
+			maintain: {
+				gitLane: string
+				publish: string
+			}
 			exports: Array<{
 				subpath: string
 				importSpecifier: string
@@ -341,6 +356,7 @@ export type SearchEntityDetail =
 			title: string
 			description: string
 			spec: CapabilitySpec
+			relatedOperations?: Array<RelatedCapabilityOperation>
 	  }
 	| {
 			type: 'package'
@@ -386,6 +402,8 @@ export type SearchMatch =
 			remoteConnector?: CapabilitySpec['remoteConnector']
 			mcpServer?: CapabilitySpec['mcpServer']
 			openApi?: CapabilitySpec['openApi']
+			inputTypeDefinition?: string
+			inputTypeDefinitionTruncated?: boolean
 	  }
 	| {
 			type: 'package'
@@ -470,7 +488,7 @@ function buildNamespacedKodyAccessor(input: {
 	return `${entryAccessor}[${JSON.stringify(input.toolName)}]`
 }
 
-function buildKodyCapabilityAccessor(spec: {
+export function buildKodyCapabilityAccessor(spec: {
 	name: string
 	source?: CapabilitySpec['source']
 	remoteConnector?: CapabilitySpec['remoteConnector']
@@ -503,6 +521,29 @@ function buildKodyCapabilityAccessor(spec: {
 		return `kody.${name}`
 	}
 	return `kody[${JSON.stringify(name)}]`
+}
+
+export const inlineCapabilityInputTypeMaxLength = 500
+
+export function compactCapabilityInputTypeDefinition(
+	inputTypeDefinition: string,
+	maxLength = inlineCapabilityInputTypeMaxLength,
+): { definition: string; truncated: boolean } {
+	const collapsed = formatInlineTypeDefinition(inputTypeDefinition)
+	if (collapsed.length <= maxLength) {
+		return { definition: collapsed, truncated: false }
+	}
+	return {
+		definition: `${collapsed.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`,
+		truncated: true,
+	}
+}
+
+export function buildPackageMaintainSnippets(kodyId: string) {
+	return {
+		gitLane: `package_get_git_remote({ kody_id: ${JSON.stringify(kodyId)} })`,
+		publish: `package_publish_external_push({ kody_id: ${JSON.stringify(kodyId)} })`,
+	}
 }
 
 function buildCapabilityExecuteExample(spec: CapabilitySpec) {
@@ -656,7 +697,15 @@ export function formatSearchMarkdown(input: {
 function formatMatchListItem(match: SearchMatch, index: number) {
 	if (match.type === 'capability') {
 		const entityRef = buildEntityRef(match.name, 'capability')
-		return `${String(index + 1)}. **capability** ${formatMarkdownInlineCode(match.name)} — ${escapeMarkdownText(formatOneLineSentence(match.description))} Entity: ${formatMarkdownInlineCode(entityRef)}`
+		const mainLine = `${String(index + 1)}. **capability** ${formatMarkdownInlineCode(match.name)} — ${escapeMarkdownText(formatOneLineSentence(match.description))} Entity: ${formatMarkdownInlineCode(entityRef)}`
+		if (!match.inputTypeDefinition) {
+			return mainLine
+		}
+		const accessor = buildKodyCapabilityAccessor(match)
+		const truncatedNote = match.inputTypeDefinitionTruncated
+			? '; use entity detail for the full definition'
+			: ''
+		return `${mainLine}\n   ${formatMarkdownInlineCode(`${accessor}(args)`)} — ${formatMarkdownInlineCode(match.inputTypeDefinition)}${truncatedNote}`
 	}
 	if (match.type === 'package') {
 		const entityRef = buildEntityRef(match.kodyId, 'package')
@@ -709,6 +758,12 @@ export function toSlimStructuredMatches(input: {
 					: {}),
 				...(match.mcpServer ? { mcpServer: match.mcpServer } : {}),
 				...(match.openApi ? { openApi: match.openApi } : {}),
+				...(match.inputTypeDefinition
+					? { inputTypeDefinition: match.inputTypeDefinition }
+					: {}),
+				...(match.inputTypeDefinitionTruncated
+					? { inputTypeDefinitionTruncated: true }
+					: {}),
 			}
 		}
 		if (match.type === 'package') {
@@ -838,6 +893,7 @@ export function toSlimStructuredMatches(input: {
 
 export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 	if (detail.type === 'capability') {
+		const relatedOperations = detail.relatedOperations ?? []
 		const lines = [
 			`# Capability — \`${detail.spec.name}\``,
 			'',
@@ -872,6 +928,18 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 				: []),
 			'```',
 		]
+		if (relatedOperations.length > 0) {
+			lines.push('', '## Related operations (same provider)', '')
+			for (const related of relatedOperations) {
+				const openApiSuffix =
+					related.method && related.path
+						? ` — ${formatMarkdownInlineCode(`${related.method.toUpperCase()} ${related.path}`)}`
+						: ''
+				lines.push(
+					`- ${formatMarkdownInlineCode(related.name)}${openApiSuffix} — ${escapeMarkdownText(formatOneLineSentence(related.description))} Entity: ${formatMarkdownInlineCode(related.entityRef)}`,
+				)
+			}
+		}
 		return {
 			markdown: lines.join('\n'),
 			structured: {
@@ -897,6 +965,7 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 				...(detail.spec.outputTypeDefinition
 					? { outputTypeDefinition: detail.spec.outputTypeDefinition }
 					: {}),
+				...(relatedOperations.length > 0 ? { relatedOperations } : {}),
 			} satisfies SearchEntityDetailStructured,
 		}
 	}
@@ -945,6 +1014,7 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 		const readme = buildPackageReadmeDetail({
 			files: detail.files,
 		})
+		const maintain = buildPackageMaintainSnippets(detail.record.kodyId)
 		const lines = [
 			`# Package — \`${detail.record.kodyId}\``,
 			'',
@@ -960,6 +1030,11 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 			`- Has app: ${detail.record.hasApp ? 'yes' : 'no'}`,
 			`- Hidden: ${detail.record.hidden ? 'yes' : 'no'}`,
 			...(detail.hostedUrl ? [`- Hosted URL: \`${detail.hostedUrl}\``] : []),
+			'',
+			'## Maintain',
+			'',
+			`- Git lane: \`${maintain.gitLane}\` → clone → edit → push → \`${maintain.publish}\``,
+			'- Tool-only: `package_save` / repo sessions; full guide: `coding_guide_get({ guide: "package_authoring" })`',
 		]
 		if (appEntry) {
 			lines.push(
@@ -1055,6 +1130,7 @@ export function formatEntityDetailMarkdown(detail: SearchEntityDetail) {
 				hidden: detail.record.hidden,
 				hostedUrl: detail.hostedUrl,
 				appEntry,
+				maintain,
 				exports: exportDetails,
 				jobs,
 				retrievers,
