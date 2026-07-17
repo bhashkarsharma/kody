@@ -19,6 +19,12 @@ This project uses the following resources:
 - Cloudflare Email Routing for inbound mail
   - Configure MX records and selected route aliases in the Cloudflare dashboard.
   - Route only aliases that should persist inbound mail to the Worker.
+- Cloudflare Queue for Email Sending delivery events
+  - Production CI ensures `kody-email-delivery` and `kody-email-delivery-dlq`,
+    then reconciles an `email.sending` event subscription for the configured
+    user email domain.
+  - The API token needs `Workers Queues:Edit`; the domain must already be
+    enabled for Cloudflare Email Sending.
 - Vectorize indexes for MCP capability search (`CAPABILITY_VECTOR_INDEX`)
   - Production: `kody-capabilities-prod`
   - Preview: `kody-capabilities-preview`
@@ -188,6 +194,11 @@ How to get/set each value:
   - Do not also upload `APP_BASE_URL` through `wrangler secret bulk` or pass it
     as a deploy-time `--var`, because Wrangler treats that as a conflicting
     binding name.
+- `USER_EMAIL_DOMAIN` (optional GitHub Actions **variable**; overrides
+  `inbox.<APP_BASE_URL hostname>` for user inboxes, outbound senders, and the
+  Email Sending event subscription).
+  - In GitHub: **Settings → Secrets and variables → Actions → Variables**, add
+    it only when the production user email domain differs from the default.
 - `AI_GATEWAY_ID`
   - Create a Cloudflare AI Gateway in the dashboard and copy its production
     gateway ID. The Worker uses this for Workers AI embedding calls when set;
