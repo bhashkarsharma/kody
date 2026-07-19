@@ -2,7 +2,11 @@ import {
 	buildCapabilityRegistry,
 	type BuiltCapabilityRegistry,
 } from './build-capability-registry.ts'
-import { filterCapabilityRegistryForCaller } from './access-control.ts'
+import {
+	filterCapabilityRegistryForCaller,
+	resolveCallerFeatureFlags,
+	type CallerFeatureFlags,
+} from './access-control.ts'
 import { builtinDomains } from './builtin-domains.ts'
 import { synthesizeRemoteToolDomain } from './remote-connector/index.ts'
 import { synthesizeMcpServerToolDomain } from './mcp-server/index.ts'
@@ -187,8 +191,28 @@ async function buildCapabilityRegistryForDynamicSources(input: {
 function filterRegistryForContext(input: {
 	registry: BuiltCapabilityRegistry
 	callerContext: McpCallerContext
+	featureFlags: CallerFeatureFlags | null
 }) {
-	return filterCapabilityRegistryForCaller(input.registry, input.callerContext)
+	return filterCapabilityRegistryForCaller(
+		input.registry,
+		input.callerContext,
+		input.featureFlags,
+	)
+}
+
+async function resolveFeatureFlagsForRegistry(input: {
+	env: Env
+	callerContext: McpCallerContext
+	registry: BuiltCapabilityRegistry
+}): Promise<CallerFeatureFlags | null> {
+	// Skip the D1 reads when nothing in this registry is gated by a flag.
+	// `callerCanAccessCapability` already fails closed on a missing map.
+	if (
+		!input.registry.capabilityList.some((capability) => capability.featureFlag)
+	) {
+		return null
+	}
+	return resolveCallerFeatureFlags(input.env, input.callerContext)
 }
 
 async function loadEnabledMcpServerRefs(input: {
@@ -253,9 +277,15 @@ export async function getCapabilityRegistryForContext(input: {
 	const refs = normalizeRemoteConnectorRefs(input.callerContext)
 	const userId = input.callerContext.user?.userId ?? null
 	if (!userId) {
+		const registry = getStaticRegistry()
 		return filterRegistryForContext({
-			registry: getStaticRegistry(),
+			registry,
 			callerContext: input.callerContext,
+			featureFlags: await resolveFeatureFlagsForRegistry({
+				env: input.env,
+				callerContext: input.callerContext,
+				registry,
+			}),
 		})
 	}
 	const [mcpServerRefs, openApiBindings] = await Promise.all([
@@ -273,9 +303,15 @@ export async function getCapabilityRegistryForContext(input: {
 		mcpServerRefs.length === 0 &&
 		openApiBindings.length === 0
 	) {
+		const registry = getStaticRegistry()
 		return filterRegistryForContext({
-			registry: getStaticRegistry(),
+			registry,
 			callerContext: input.callerContext,
+			featureFlags: await resolveFeatureFlagsForRegistry({
+				env: input.env,
+				callerContext: input.callerContext,
+				registry,
+			}),
 		})
 	}
 	const [snapshots, mcpServerSnapshots] = await Promise.all([
@@ -318,6 +354,11 @@ export async function getCapabilityRegistryForContext(input: {
 	return filterRegistryForContext({
 		registry,
 		callerContext: input.callerContext,
+		featureFlags: await resolveFeatureFlagsForRegistry({
+			env: input.env,
+			callerContext: input.callerContext,
+			registry,
+		}),
 	})
 }
 

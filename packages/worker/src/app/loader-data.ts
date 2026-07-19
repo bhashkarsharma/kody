@@ -3,6 +3,9 @@ import {
 	type PublicCommunityListing,
 } from '#app/community-public-types.ts'
 import { type PermissionString, type RoleName } from '#app/permissions.ts'
+import { type AdminFeatureFlag } from '#worker/feature-flags/types.ts'
+
+export type { AdminFeatureFlag }
 
 export type CommunityIndexLoaderData = {
 	ok: true
@@ -111,6 +114,11 @@ export type AdminInviteListItem = {
 export type AdminInvitesLoaderData = {
 	ok: true
 	invites: Array<AdminInviteListItem>
+}
+
+export type AdminFeatureFlagsLoaderData = {
+	ok: true
+	featureFlags: Array<AdminFeatureFlag>
 }
 
 export type AdminUsageMetric =
@@ -628,6 +636,7 @@ export type AppLoaderData = {
 	adminRoles?: AdminRolesLoaderData
 	adminCommunityReports?: AdminCommunityReportsLoaderData
 	adminInvites?: AdminInvitesLoaderData
+	adminFeatureFlags?: AdminFeatureFlagsLoaderData
 	adminInsights?: AdminInsightsLoaderData
 	adminPlatformFeedback?: AdminPlatformFeedbackLoaderData
 	adminSystemEmail?: AdminSystemEmailLoaderData
