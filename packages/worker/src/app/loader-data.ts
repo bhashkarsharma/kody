@@ -316,6 +316,40 @@ export type AdminSystemEmailLoaderData = {
 	total: number
 }
 
+export type AdminPlatformFeedbackListItem = {
+	id: string
+	submitter_user_id: string
+	category: 'friction' | 'bug' | 'experience' | 'suggestion' | 'other'
+	summary_untrusted: string
+	status: 'open' | 'triaged' | 'resolved' | 'dismissed'
+	reviewed_by_user_id: string | null
+	reviewed_at: string | null
+	created_at: string
+	updated_at: string
+}
+
+export type AdminPlatformFeedbackDetail = AdminPlatformFeedbackListItem & {
+	details_untrusted: string
+	admin_note: string | null
+	submitter: {
+		user_id: string
+		username: string | null
+		email: string | null
+	} | null
+}
+
+export type AdminPlatformFeedbackLoaderData = {
+	ok: true
+	feedback: Array<AdminPlatformFeedbackListItem>
+	selectedFeedback: AdminPlatformFeedbackDetail | null
+	content_warning: string
+	page: number
+	pageSize: number
+	total: number
+	statusFilter: AdminPlatformFeedbackListItem['status'] | null
+	categoryFilter: AdminPlatformFeedbackListItem['category'] | null
+}
+
 export type AdminCreatedUserSetup = {
 	userId: number
 	email: string
@@ -595,6 +629,7 @@ export type AppLoaderData = {
 	adminCommunityReports?: AdminCommunityReportsLoaderData
 	adminInvites?: AdminInvitesLoaderData
 	adminInsights?: AdminInsightsLoaderData
+	adminPlatformFeedback?: AdminPlatformFeedbackLoaderData
 	adminSystemEmail?: AdminSystemEmailLoaderData
 	accountProfile?: AccountProfileLoaderData
 	accountConnections?: AccountConnectionsLoaderData

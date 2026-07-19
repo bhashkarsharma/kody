@@ -35,16 +35,29 @@ Normal third-party or authentication failures do not automatically become
 platform feedback, though you can ask to submit any Kody-related issue.
 
 Feedback is attributed to your authenticated account and is not anonymous. Admin
-list results intentionally omit the full submission. An admin can open the
-approved submission to read and triage it, but that does not grant access to
-your packages, memories, email, secrets, or other account content. Agents must
-omit secrets and unrelated private content from the feedback they prepare.
+list results intentionally omit the full submission. Once you approve, the exact
+approved summary and details and your account user id, username, and email may
+be delivered immediately to admin review tools and admin-configured
+notifications such as Discord. No unrelated account content is delivered.
+Notifications can deep-link an admin to the read-only platform-feedback review
+surface. An admin can open the approved submission to read and triage it, but
+that does not grant access to your packages, memories, email, secrets, or other
+account content. Agents must omit secrets and unrelated private content from the
+feedback they prepare.
 
 Each account can create at most 10 feedback submissions in a rolling 24-hour
 period and have at most 100 active submissions (open or triaged). Open and
 triaged feedback remains until it is resolved, dismissed, or your account is
 deleted. Resolved and dismissed feedback is removed 365 days after its last
 update. Account deletion removes any remaining submissions.
+
+When a notification is still queued, Kody rechecks that the feedback exists
+immediately before delivery and cancels it after account deletion when possible.
+Kody cannot recall a notification copy that was already delivered outside Kody.
+Admin notification copies, including Discord messages, may remain after Kody
+account deletion under the deployment operator's retention and deletion
+controls. Those copies contain only the exact approved feedback and its
+attribution described above, never unrelated account content.
 
 Your account export includes your own submissions and their status. Internal
 reviewer identity, notes, and timestamps are not included. If an admin who

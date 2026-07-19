@@ -4,24 +4,37 @@ import {
 	buildPlatformFeedbackSubmittedEvent,
 	platformFeedbackSubmittedTopic,
 } from './subscription-event.ts'
-import { type PlatformFeedbackRecord } from './types.ts'
+import { PlatformFeedbackDispatchCancelledError } from './errors.ts'
+import { getPlatformFeedbackForAdmin } from './service.ts'
 
 const platformFeedbackSubscriptionActorTokenId =
 	'internal:platform-feedback-subscriptions'
 
 export async function dispatchPlatformFeedbackSubmittedSubscriptionEvent(input: {
 	env: Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV' | 'APP_BASE_URL'>
-	feedback: PlatformFeedbackRecord
+	feedbackId: string
 }) {
-	const payload = buildPlatformFeedbackSubmittedEvent(input.feedback)
+	const baseUrl = getAppBaseUrl({ env: input.env })
 	return await dispatchAdminPackageSubscriptionEvent({
 		env: input.env,
-		baseUrl: getAppBaseUrl({ env: input.env }),
+		baseUrl,
 		topic: platformFeedbackSubmittedTopic,
-		getParams: () => payload as Record<string, unknown>,
+		getParams: async () => {
+			const feedback = await getPlatformFeedbackForAdmin({
+				db: input.env.APP_DB,
+				feedbackId: input.feedbackId,
+			})
+			if (!feedback) {
+				throw new PlatformFeedbackDispatchCancelledError(input.feedbackId)
+			}
+			return buildPlatformFeedbackSubmittedEvent({
+				baseUrl,
+				feedback,
+			}) as Record<string, unknown>
+		},
 		source: 'platform-feedback',
 		buildIdempotencyKey: (savedPackage) =>
-			`platform-feedback:${input.feedback.id}:${savedPackage.id}:${platformFeedbackSubmittedTopic}`,
+			`platform-feedback:${input.feedbackId}:${savedPackage.id}:${platformFeedbackSubmittedTopic}`,
 		actorTokenId: platformFeedbackSubscriptionActorTokenId,
 		retryDiscoveryFailures: true,
 		retryInvocationInfrastructureFailures: true,

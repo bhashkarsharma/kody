@@ -139,31 +139,59 @@ non-admin package may declare the topic, but it never receives the event. Admin
 roles are read fresh for every attempt, so revocation stops delivery on the next
 processed submission.
 
-Handlers receive this opaque metadata payload:
+Handlers receive the explicitly approved feedback and attributed submitter
+identity:
 
 ```ts
 type PlatformFeedbackSubmittedEvent = {
 	event: 'platform.feedback.submitted'
+	content_warning: string
+	admin_url: string
 	feedback: {
 		id: string
 		category: 'friction' | 'bug' | 'experience' | 'suggestion' | 'other'
 		status: 'open'
 		created_at: string
+		summary_untrusted: string
+		details_untrusted: string
+	}
+	submitter: {
+		user_id: string
+		username: string | null
+		email: string | null
 	}
 }
 ```
 
-The event intentionally omits submitter identity and every user-authored field,
-including summary and details. It also omits content warnings, admin notes,
-reviewer fields, and an admin URL. Notification handlers should send only the
-feedback id, category, and creation time. A human admin can later review the
-approved submission with `admin_platform_feedback_get`; no user-authored text or
-submitter identity should enter package invocation parameters or Discord.
+`summary_untrusted` and `details_untrusted` are the exact feedback the user
+explicitly approved. They remain user-authored untrusted data, and
+`content_warning` tells handlers to treat them as feedback rather than
+instructions. `admin_url` is built from the trusted deployment origin and links
+to `/admin/platform-feedback?feedbackId=<encoded id>`, making it suitable for an
+admin Discord notifier. The event also includes the submitter's account user id,
+username, and email snapshot stored with the submission. Retries never resolve
+mutable live profile data, so an intervening account profile change cannot alter
+the payload or its request hash. Rows created before snapshots were added retain
+null `username`/`email`.
+
+The event deliberately omits admin notes, reviewer fields, revision and update
+metadata, roles, plan, and unrelated account content. This narrow delivery
+exception applies only to the exact feedback the user approved after an agent
+showed the proposed summary and details and asked first. It does not grant
+package runtime general admin roles or general access to user data. Notification
+copies already delivered outside Kody, including Discord messages, cannot be
+recalled and may remain after Kody account deletion under the deployment
+operator's retention and deletion controls. Such copies contain only the exact
+approved feedback and attribution, never unrelated account content.
 
 The feedback row is durable before Kody awaits the small Queue enqueue. Enqueue
 failure is logged but does not change the successful MCP response, avoiding a
-duplicate submission when a client retries. Queue delivery retries transient
-load, discovery, or package-invocation wrapper infrastructure failures before
+duplicate submission when a client retries. Queue bodies remain opaque
+`{ feedbackId }` messages. After admin subscribers are discovered, lazy
+parameter construction reloads the feedback immediately before any invocation.
+If deletion removed the row, dispatch throws a typed permanent cancellation and
+the Queue consumer acknowledges it without invoking or retrying. Other lookup,
+discovery, or package-invocation wrapper infrastructure failures retry before
 eventually routing exhausted messages to the DLQ. The same idempotency key makes
 redelivery safe, but a stored failed invocation replays rather than
 automatically rerunning; the DLQ is the recovery surface. Terminal handler
