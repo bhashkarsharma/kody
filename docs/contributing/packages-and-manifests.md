@@ -264,6 +264,26 @@ plus an `admin_url` link to the message in `/admin/system-email`. Handlers run
 as the admin package owner (not the system owner), so user-scoped email reads do
 not apply to the system message.
 
+Successful consent-gated platform-feedback inserts enqueue
+`platform.feedback.submitted` for durable package-subscription delivery. Fan-out
+selects only packages whose owners hold the admin role when the Queue message is
+processed; non-admin declarations are inert, and role revocation applies to the
+next attempt. The opaque payload contains only feedback id, category, open
+status, and creation timestamp. It deliberately omits submitter identity, all
+user-authored text, content warnings, admin notes, reviewer fields, and an admin
+URL. Handlers should notify with the id, category, and creation time, then use
+`admin_platform_feedback_get` for human review. No user-authored text or
+submitter identity should enter package invocation parameters or Discord.
+
+The feedback row is authoritative: submission awaits only Queue enqueue after
+persistence, and enqueue failure is logged without changing the successful
+response. The consumer acknowledges invalid messages and deleted rows, retries
+transient load/discovery and package-invocation wrapper infrastructure failures,
+and routes exhausted messages to the DLQ. Redelivery uses the same idempotency
+key; stored failed invocations replay instead of automatically rerunning, making
+the DLQ the recovery surface. Terminal handler execution failures remain
+isolated from sibling subscribers, and fan-out uses bounded concurrency.
+
 ## Package-owned workflows
 
 Packages declare workflow entrypoints in runtime code, not in

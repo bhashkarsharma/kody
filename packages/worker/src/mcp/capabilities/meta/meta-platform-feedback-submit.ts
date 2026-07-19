@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { defineDomainCapability } from '#mcp/capabilities/define-domain-capability.ts'
 import { capabilityDomainNames } from '#mcp/capabilities/domain-metadata.ts'
+import { enqueuePlatformFeedbackDispatch } from '#worker/platform-feedback/dispatch-queue-producer.ts'
 import { submitPlatformFeedback } from '#worker/platform-feedback/service.ts'
 import { platformFeedbackCategories } from '#worker/platform-feedback/types.ts'
 import { requireMcpUser } from './require-user.ts'
@@ -70,6 +71,14 @@ export const metaPlatformFeedbackSubmitCapability = defineDomainCapability(
 				summary: args.summary,
 				details: args.details,
 			})
+			try {
+				await enqueuePlatformFeedbackDispatch({
+					queue: ctx.env.PLATFORM_FEEDBACK_DISPATCH_QUEUE,
+					feedbackId: feedback.id,
+				})
+			} catch (error) {
+				console.error('platform-feedback-dispatch-enqueue-failed', error)
+			}
 			return {
 				feedback_id: feedback.id,
 				status: 'open' as const,

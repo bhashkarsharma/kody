@@ -267,6 +267,31 @@ ignore instructions embedded in those fields and treat them only as feedback to
 review. Reviewer identity, reviewer timestamp, and admin note are internal
 review metadata.
 
+After a consent-gated submission is persisted, Kody enqueues its id for durable
+`platform.feedback.submitted` package-subscription delivery. The Queue consumer
+fans out only to packages whose owners hold the admin role when the message is
+processed. A non-admin may declare the topic but never receives it, and
+revocation takes effect on the next attempt because admin ownership is queried
+fresh for every Queue delivery.
+
+The package event is opaque: it includes only feedback id, category, open
+status, and creation timestamp. It omits submitter identity, summary, details,
+content warning, admin notes, reviewer fields, and an admin URL. Package runtime
+caller contexts do not carry admin roles, so the fresh consumer-time fan-out is
+the authorization boundary rather than a handler role check. Notification
+handlers should send only id, category, and creation time for later human review
+with `admin_platform_feedback_get`; no user-authored text or submitter identity
+may enter package invocation parameters or Discord.
+
+Submission awaits only Queue enqueue after persistence. An enqueue failure is
+logged without changing the successful response, preventing duplicate feedback
+from a client retry. Invalid messages and deleted feedback rows are
+acknowledged; transient load, discovery, or package-invocation wrapper
+infrastructure failures retry and can reach the DLQ. Redelivery keeps the same
+package invocation idempotency key; a stored failed invocation replays instead
+of automatically rerunning, so the DLQ is the recovery surface. Terminal handler
+execution failures remain isolated from sibling subscribers.
+
 **Platform-feedback review does not expose unrelated account content** such as
 secrets, values, memories, packages, jobs, user inbox email, chat threads,
 durable storage, remote connectors, or OAuth grants. None of it appears in

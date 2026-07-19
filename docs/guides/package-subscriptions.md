@@ -129,3 +129,43 @@ Handlers run as the admin package owner, so the user-scoped email capabilities
 and the `email` runtime helper cannot read the system message — use the metadata
 and `admin_url` for notifications, and the admin `admin_system_email_get`
 capability for full contents.
+
+## `platform.feedback.submitted` (admins)
+
+A successful, consent-gated `meta_platform_feedback_submit` insert enqueues a
+durable `platform.feedback.submitted` attempt. The Queue consumer dispatches to
+packages saved by users who hold the admin role when the message is processed. A
+non-admin package may declare the topic, but it never receives the event. Admin
+roles are read fresh for every attempt, so revocation stops delivery on the next
+processed submission.
+
+Handlers receive this opaque metadata payload:
+
+```ts
+type PlatformFeedbackSubmittedEvent = {
+	event: 'platform.feedback.submitted'
+	feedback: {
+		id: string
+		category: 'friction' | 'bug' | 'experience' | 'suggestion' | 'other'
+		status: 'open'
+		created_at: string
+	}
+}
+```
+
+The event intentionally omits submitter identity and every user-authored field,
+including summary and details. It also omits content warnings, admin notes,
+reviewer fields, and an admin URL. Notification handlers should send only the
+feedback id, category, and creation time. A human admin can later review the
+approved submission with `admin_platform_feedback_get`; no user-authored text or
+submitter identity should enter package invocation parameters or Discord.
+
+The feedback row is durable before Kody awaits the small Queue enqueue. Enqueue
+failure is logged but does not change the successful MCP response, avoiding a
+duplicate submission when a client retries. Queue delivery retries transient
+load, discovery, or package-invocation wrapper infrastructure failures before
+eventually routing exhausted messages to the DLQ. The same idempotency key makes
+redelivery safe, but a stored failed invocation replays rather than
+automatically rerunning; the DLQ is the recovery surface. Terminal handler
+execution failures are isolated without preventing attempts for sibling
+subscribers.
