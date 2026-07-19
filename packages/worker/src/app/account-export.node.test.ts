@@ -143,6 +143,77 @@ test('account export documents and excludes operator-owned system email rows', a
 	])
 })
 
+test('account export includes submitted feedback but excludes reviewer-only relationships', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO platform_feedback (
+			id, submitter_user_id, category, summary, details, status,
+			reviewed_by_user_id, reviewed_at, admin_note, created_at, updated_at
+		) VALUES
+			(
+				'feedback-submitted-by-a',
+				'user-aaa',
+				'friction',
+				'Setup is confusing',
+				'The setup flow needs clearer guidance.',
+				'triaged',
+				'admin-other',
+				'2026-07-05',
+				'Needs setup review.',
+				'2026-07-04',
+				'2026-07-05'
+			),
+			(
+				'feedback-reviewed-by-a',
+				'user-bbb',
+				'bug',
+				'Private feedback from B',
+				'This record belongs only in user B exports.',
+				'triaged',
+				'user-aaa',
+				'2026-07-05',
+				'Reviewer-only relationship.',
+				'2026-07-04',
+				'2026-07-05'
+			);
+	`)
+
+	const accountExport = await createAccountExport({
+		env: { APP_DB: db } as Env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		generatedAt: '2026-07-05T00:00:00.000Z',
+	})
+
+	const feedbackRows = accountExport.d1.platform_feedback.rows
+	expect(feedbackRows).toEqual([
+		expect.objectContaining({
+			id: 'feedback-submitted-by-a',
+			submitter_user_id: 'user-aaa',
+			category: 'friction',
+			summary: 'Setup is confusing',
+			details: 'The setup flow needs clearer guidance.',
+			status: 'triaged',
+			created_at: '2026-07-04',
+			updated_at: '2026-07-05',
+		}),
+	])
+	expect(feedbackRows[0]).not.toHaveProperty('reviewed_by_user_id')
+	expect(feedbackRows[0]).not.toHaveProperty('reviewed_at')
+	expect(feedbackRows[0]).not.toHaveProperty('admin_note')
+	expect(feedbackRows.some((row) => row.id === 'feedback-reviewed-by-a')).toBe(
+		false,
+	)
+	expect(accountExport.d1.platform_feedback.redactedColumns).toEqual([
+		'admin_note',
+		'reviewed_at',
+		'reviewed_by_user_id',
+	])
+	expect(
+		accountExport.manifest.sections['d1.platform_feedback']?.redactedColumns,
+	).toEqual(['admin_note', 'reviewed_at', 'reviewed_by_user_id'])
+})
+
 test('createAccountExport redacts secrets and credential-equivalent hashes', async () => {
 	const { sqlite, db } = createMigratedDb()
 	sqlite.exec(`
