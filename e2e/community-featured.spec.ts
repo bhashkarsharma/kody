@@ -1,5 +1,8 @@
 import { expect, test } from './playwright-utils.ts'
-import { seedCommunityListingInE2eDatabase } from './d1-utils.ts'
+import {
+	executeE2eD1Command,
+	seedCommunityListingInE2eDatabase,
+} from './d1-utils.ts'
 
 test('admins can feature trusted listings and members see them in onboarding', async ({
 	page,
@@ -10,6 +13,11 @@ test('admins can feature trusted listings and members see them in onboarding', a
 	const trustedListingId = `e2e-featured-listing-${runId}`
 	const trustedListingName = `@kody/featured-package-${runId}`
 	const untrustedListingId = `e2e-unfeaturable-listing-${runId}`
+	// Clear leftover featured marks from interrupted prior runs so this test
+	// starts from an empty onboarding starter list.
+	executeE2eD1Command(
+		'UPDATE community_listings SET featured_at = NULL WHERE featured_at IS NOT NULL;',
+	)
 	const adminUser = await seedE2eUser({
 		email: `featured-admin-${runId}@example.com`,
 		username: `featured-admin-${runId}`,
@@ -77,23 +85,56 @@ test('admins can feature trusted listings and members see them in onboarding', a
 		page.getByRole('button', { name: 'Feature in onboarding' }),
 	).toBeDisabled()
 
-	// Members now see the featured listing as an onboarding starter package.
+	// Members now see the featured listing as an onboarding starter package
+	// and can install it without leaving /onboarding. Mock install JSON: local
+	// e2e lacks Cloudflare credentials for repo-backed source persistence.
 	await page.context().clearCookies()
 	await login({
 		email: memberUser.email,
 		password: memberUser.password,
 		mode: 'login',
 	})
+	await page.route(
+		(url) => url.pathname === `/community/${trustedListingId}/install.json`,
+		async (route) => {
+			if (route.request().method() !== 'POST') {
+				await route.continue()
+				return
+			}
+			await route.fulfill({
+				status: 200,
+				contentType: 'application/json',
+				body: JSON.stringify({
+					ok: true,
+					status: 'installed',
+					packageId: 'pkg-e2e-onboarding-install',
+					sourceId: 'src-e2e-onboarding-install',
+					targetName: `@${memberUser.username}/featured-package-${runId}`,
+					agentPrompt:
+						'Finish setup for the installed onboarding starter package.',
+				}),
+			})
+		},
+	)
 	await page.goto('/onboarding')
 	await expect(page.getByTestId('onboarding-starter-packages')).toBeVisible()
-	const starterLink = page.getByTestId(`onboarding-starter-${trustedListingId}`)
-	await expect(starterLink).toBeVisible()
-	await expect(starterLink).toContainText(trustedListingName)
-	await starterLink.click()
-	await expect(page).toHaveURL(new RegExp(`/community/${trustedListingId}$`))
+	const starterCard = page.getByTestId(`onboarding-starter-${trustedListingId}`)
+	await expect(starterCard).toBeVisible()
+	await expect(starterCard).toContainText(trustedListingName)
+	await page
+		.getByTestId(`onboarding-starter-install-${trustedListingId}`)
+		.click()
 	await expect(
-		page.getByRole('button', { name: 'Install', exact: true }),
+		page.getByTestId(`onboarding-starter-copy-${trustedListingId}`),
 	).toBeVisible()
+	await expect(
+		page.getByTestId(`onboarding-starter-status-${trustedListingId}`),
+	).toContainText('Installed as')
+	await expect(
+		page.getByTestId(`onboarding-starter-copy-${trustedListingId}`),
+	).toHaveText('Copy prompt')
+	await starterCard.getByRole('link', { name: trustedListingName }).click()
+	await expect(page).toHaveURL(new RegExp(`/community/${trustedListingId}$`))
 
 	// Removing the mark pulls the listing from onboarding again.
 	await page.context().clearCookies()
