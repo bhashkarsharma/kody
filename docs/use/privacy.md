@@ -12,8 +12,8 @@ configuration, OAuth grants, package invocation tokens, community social graph
 edges (follows, listing stars, and stored activity events), and any platform
 feedback you approve for submission. All of this remains scoped to your account
 except for content you deliberately make public (community listings and a public
-profile) and the narrow admin review of approved platform feedback described
-below.
+profile), the narrow admin review of approved platform feedback, and the
+community activity metadata described below.
 
 When profile visibility is **public**, display name, bio, public package
 metadata, follow counts, and public activity are visible on `/@username` and
@@ -36,10 +36,12 @@ lists users and roles; it does not expose account content.
 Platform feedback you explicitly approve for admin review is a narrow
 user-content exception.
 
-Admins also moderate public community listings and attributed community reports.
-That review covers content deliberately published or reported through community
-features, not private package source, private profiles, or unrelated account
-content.
+Admins also moderate public community listings and attributed community reports,
+and can see who forked or rated a public listing, when, and the rating scores.
+One-click installs appear as forks because both use the same activity record.
+This activity view never includes private package source, rating notes, email,
+stable user ids, private profiles, secrets, or unrelated account content.
+Admin-configured notification packages may receive the same metadata.
 
 ## Platform feedback
 

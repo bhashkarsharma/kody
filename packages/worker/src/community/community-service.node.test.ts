@@ -3,6 +3,7 @@ import type * as CommunityRepo from './repo.ts'
 import { type CommunityListingRecord } from './types.ts'
 
 const mockModule = vi.hoisted(() => ({
+	enqueueCommunityActivityDispatch: vi.fn(),
 	getSavedPackageById: vi.fn(),
 	loadPackageSourceBySourceId: vi.fn(),
 	getCommunityBan: vi.fn(),
@@ -36,6 +37,11 @@ const mockModule = vi.hoisted(() => ({
 	deleteCommunitySnapshot: vi.fn(),
 	setCommunityListingStatus: vi.fn(),
 	resolveCommunityReportRow: vi.fn(),
+}))
+
+vi.mock('./activity-dispatch-queue-producer.ts', () => ({
+	enqueueCommunityActivityDispatch: (...args: Array<unknown>) =>
+		mockModule.enqueueCommunityActivityDispatch(...args),
 }))
 
 vi.mock('#worker/package-registry/repo.ts', () => ({
@@ -163,12 +169,16 @@ const testCommunityAssets = {
 		truncated: false,
 	})),
 } as unknown as R2Bucket
+const testCommunityActivityQueue = {
+	send: vi.fn(),
+} as unknown as Queue
 
 function createEnv() {
 	return {
 		APP_DB: {} as D1Database,
 		BUNDLE_ARTIFACTS_KV: testBundleArtifactsKv,
 		COMMUNITY_ASSETS: testCommunityAssets,
+		COMMUNITY_ACTIVITY_DISPATCH_QUEUE: testCommunityActivityQueue,
 	} as Env
 }
 
@@ -727,6 +737,16 @@ test('rateCommunityListing rejects owner self-ratings and persists valid ratings
 		targetKodyId: 'discord-gateway',
 		createdAt: '2026-07-01T00:00:00.000Z',
 	})
+	mockModule.upsertCommunityRating.mockResolvedValue({
+		id: 'rating-1',
+		listingId: 'listing-1',
+		userId: 'user-2',
+		stars: 5,
+		adaptationEffort: 2,
+		note: null,
+		createdAt: '2026-07-01T00:00:00.000Z',
+		updatedAt: '2026-07-01T00:00:00.000Z',
+	})
 
 	await expect(
 		rateCommunityListing({
@@ -767,6 +787,11 @@ test('rateCommunityListing rejects owner self-ratings and persists valid ratings
 			adaptation_effort: 2,
 		}),
 	)
+	expect(mockModule.enqueueCommunityActivityDispatch).toHaveBeenCalledWith({
+		queue: expect.anything(),
+		kind: 'rating',
+		activityId: 'rating-1',
+	})
 })
 
 test('forkCommunityListing creates inert source without saved package row', async () => {
@@ -830,8 +855,15 @@ test('forkCommunityListing creates inert source without saved package row', asyn
 		expect.anything(),
 		expect.objectContaining({
 			target_kody_id: 'my-discord-gateway',
+			listing_name: '@owner/discord-gateway',
+			listing_kody_id: 'discord-gateway',
 		}),
 	)
+	expect(mockModule.enqueueCommunityActivityDispatch).toHaveBeenCalledWith({
+		queue: expect.anything(),
+		kind: 'fork',
+		activityId: expect.any(String),
+	})
 })
 
 test('forkCommunityListing rejects repeat fork without a new kody_id', async () => {

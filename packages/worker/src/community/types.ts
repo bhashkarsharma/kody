@@ -133,6 +133,29 @@ export type CommunityStargazer = {
 export type CommunityListingWithAggregates = CommunityListingRecord &
 	CommunityListingAggregates
 
+export const communityActivityKinds = ['fork', 'rating'] as const
+
+export type CommunityActivityKind = (typeof communityActivityKinds)[number]
+
+type CommunityActivityRecordBase = {
+	id: string
+	listingId: string
+	listingName: string
+	listingKodyId: string
+	actingUsername: string | null
+	occurredAt: string
+}
+
+export type CommunityActivityRecord =
+	| (CommunityActivityRecordBase & {
+			kind: 'fork'
+	  })
+	| (CommunityActivityRecordBase & {
+			kind: 'rating'
+			stars: number
+			adaptationEffort: number
+	  })
+
 export type CommunityForkRow = {
 	id: string
 	listing_id: string

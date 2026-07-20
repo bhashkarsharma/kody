@@ -38,6 +38,16 @@ This project uses the following resources:
     infrastructure failures before routing exhausted messages to the DLQ. Stored
     failures replay under the same idempotency key rather than automatically
     rerunning; terminal handler execution failures stay isolated.
+- Cloudflare Queue for durable community-activity subscription dispatch
+  - Producer binding: `COMMUNITY_ACTIVITY_DISPATCH_QUEUE`
+  - Queue: `kody-community-activity-dispatch`
+  - Dead-letter queue: `kody-community-activity-dispatch-dlq`
+  - The production consumer uses the same batch, retry, and DLQ settings as
+    platform-feedback dispatch. Production CI ensures both resources.
+  - Queue messages contain only `{ eventId, kind, activityId }`. The consumer
+    reloads the metadata-only activity projection, acknowledges invalid or
+    deleted activity, and retries transient lookup, subscription-discovery, or
+    package-invocation infrastructure failures.
 - Vectorize indexes for MCP capability search (`CAPABILITY_VECTOR_INDEX`)
   - Production: `kody-capabilities-prod`
   - Preview: `kody-capabilities-preview`
@@ -123,7 +133,8 @@ automatically:
   and `preview` — so Artifacts repos are partitioned by deploy environment.)
 - `AI_GATEWAY_ID` (optional Worker secret; routes Workers AI embedding calls
   through the configured Cloudflare AI Gateway when set)
-- `CAPABILITY_REINDEX_SECRET` (optional Worker secret; bearer auth for
+- `CAPABILITY_REINDEX_SECRET` (required in production; bearer auth for the
+  stable-user-id deployment migration and
   `POST /__maintenance/reindex-capabilities` to refresh all capability-search
   vectors in Vectorize: built-in kody, memories, jobs, and saved packages. Saved
   package projections also refresh when packages are saved or published.)
@@ -160,19 +171,19 @@ Configure these GitHub Actions secrets and variables for workflows:
   both this zone id and the domain)
 - `COOKIE_SECRET` (same format as local)
 - `SECRET_STORE_KEY` (same format as local; required for deploys)
-- `APP_BASE_URL` (optional GitHub Actions **variable**, used by the production
-  deploy as the fallback public app origin when no request URL is available —
-  workflows, password-reset email sender hostname — and written into the
-  generated Worker `vars` config before deploy. Request-scoped MCP/app URLs use
-  the inbound request origin.)
+- `APP_BASE_URL` (required GitHub Actions **variable** for the production
+  stable-user-id migration and used by the deployed Worker as the fallback
+  public app origin when no request URL is available — workflows, password-reset
+  email sender hostname — and written into the generated Worker `vars` config
+  before deploy. Request-scoped MCP/app URLs use the inbound request origin.)
 - `AI_GATEWAY_ID` (optional for production deploys; enables AI Gateway routing
   for Workers AI embeddings)
 - `AI_GATEWAY_ID_PREVIEW` (optional for preview deploys; enables AI Gateway
   routing for Workers AI embeddings)
 - `SENTRY_DSN` (optional; create a JavaScript/Cloudflare project in Sentry and
   paste the DSN; syncs to the Worker as a secret when set in GitHub Actions)
-- `CAPABILITY_REINDEX_SECRET` (optional; triggers post-deploy Vectorize reindex
-  when set; synced like other optional secrets)
+- `CAPABILITY_REINDEX_SECRET` (required for production deploys; authenticates
+  the pre-deploy stable-user-id migration and post-deploy maintenance calls)
 - `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET`,
   `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET`, `OAUTH_X_CLIENT_ID` /
   `OAUTH_X_CLIENT_SECRET` (optional; social login provider app credentials. The
