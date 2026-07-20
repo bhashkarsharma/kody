@@ -2352,6 +2352,132 @@ test('runBundledModuleWithRegistry injects OAuth helper prelude when execute hel
 	}
 })
 
+test('runBundledModuleWithRegistry rewrites guard-less unbound runtime helper errors with a bound-context hint', async () => {
+	silenceIncidentalRuntimeWarnings()
+	const env = {} as Env
+	const callerContext = createMcpCallerContext({
+		baseUrl: 'https://heykody.dev',
+		user: { userId: 'user-123' },
+	})
+	// Mirrors a saved-package export imported statically into an ad hoc
+	// execute call: the bundled module imports `storage` through the rewritten
+	// virtual runtime path and calls it without a falsiness guard.
+	const bundle = {
+		mainModule: 'entry.js',
+		modules: {
+			'entry.js': `import { storage } from './.__kody_virtual__/runtime.js'
+
+export default async function main() {
+	const result = await storage.sql('select count(*) as count from skills')
+	return result.rows
+}`,
+		},
+	}
+	const bareTypeError = "Cannot read properties of undefined (reading 'sql')"
+	const createExecuteExecutorSpy = vi
+		.spyOn(await import('#mcp/executor.ts'), 'createExecuteExecutor')
+		.mockReturnValue({
+			async execute() {
+				return {
+					result: undefined,
+					error: bareTypeError,
+					logs: [],
+				}
+			},
+		} as never)
+
+	try {
+		const unboundResult = await runBundledModuleWithRegistry(
+			env,
+			callerContext,
+			bundle,
+			undefined,
+			{
+				skipCapabilityRegistry: true,
+			},
+		)
+		expect(unboundResult.error).toContain(bareTypeError)
+		expect(unboundResult.error).toContain(
+			'The optional kody:runtime export "storage" is not bound in this execution context',
+		)
+		expect(
+			mcpExecutor.getExecutionErrorDetails(unboundResult.error),
+		).toMatchObject({
+			kind: 'runtime_helper_unbound',
+			helperName: 'storage',
+			nextStep: expect.stringContaining('packages.invokeChecked'),
+		})
+
+		// With storage bound, the same TypeError is an ordinary user-code bug
+		// and keeps its bare message.
+		const boundEnv = {
+			STORAGE_RUNNER: {
+				idFromName: () => 'storage-runner-id',
+				get: () => ({}),
+			},
+		} as unknown as Env
+		const boundResult = await runBundledModuleWithRegistry(
+			boundEnv,
+			callerContext,
+			bundle,
+			undefined,
+			{
+				skipCapabilityRegistry: true,
+				storageTools: {
+					userId: 'user-123',
+					storageId: 'storage-1',
+					writable: false,
+				},
+			},
+		)
+		expect(boundResult.error).toBe(bareTypeError)
+
+		// Guard-less access inside a dynamically hydrated package module
+		// (literal dynamic `import("kody:@...")` target) must be matched too:
+		// the original bundle has no runtime import, only the hydrated module
+		// graph the sandbox actually executed does.
+		const hydrateSpy = vi
+			.spyOn(
+				await import('#worker/package-runtime/module-graph.ts'),
+				'hydrateKodyRuntimeModules',
+			)
+			.mockResolvedValue({
+				'entry.js': `export default async function main() {
+	const mod = await import('kody:@scope/skills/skill-list')
+	return await mod.default({})
+}`,
+				'.__kody_dynamic__/scope/skills/skill-list.js': `import { storage } from '../../.__kody_virtual__/runtime.js'
+export default async () => (await storage.sql('select 1')).rows`,
+			})
+		try {
+			const hydratedResult = await runBundledModuleWithRegistry(
+				env,
+				callerContext,
+				{
+					mainModule: 'entry.js',
+					modules: {
+						'entry.js': `export default async function main() {
+	const mod = await import('kody:@scope/skills/skill-list')
+	return await mod.default({})
+}`,
+					},
+				},
+				undefined,
+				{
+					skipCapabilityRegistry: true,
+				},
+			)
+			expect(hydratedResult.error).toContain(
+				'The optional kody:runtime export "storage" is not bound in this execution context',
+			)
+		} finally {
+			hydrateSpy.mockRestore()
+		}
+	} finally {
+		createExecuteExecutorSpy.mockRestore()
+	}
+})
+
 test('runKodyWithRegistry expression path omits OAuth helper prelude without execute helper capabilities', async () => {
 	silenceIncidentalRuntimeWarnings()
 	const env = {} as Env
