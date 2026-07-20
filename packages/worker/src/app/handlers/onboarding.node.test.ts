@@ -5,7 +5,10 @@ import {
 	createOnboardingApiHandler,
 	createOnboardingHandler,
 } from '#app/handlers/onboarding.ts'
-import { buildOnboardingSetupPrompt } from '#app/onboarding-data.ts'
+import {
+	buildDiscoveryPrompt,
+	buildOnboardingSetupPrompt,
+} from '#app/onboarding-data.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -35,6 +38,10 @@ test('onboarding serves public setup content to anonymous visitors', async () =>
 		loggedIn: false,
 		mcpServerUrl: 'https://example.com/mcp',
 		setupPrompt: buildOnboardingSetupPrompt(),
+		discoveryPrompt: buildDiscoveryPrompt({
+			env,
+			requestUrl: 'https://example.com/onboarding.json',
+		}),
 		hasMcpClient: false,
 		emailVerified: false,
 		needsOnboarding: true,
