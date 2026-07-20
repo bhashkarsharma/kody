@@ -155,6 +155,21 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 		matchColumn: 'resolved_by_user_id',
 		nullColumns: ['resolved_by_user_id', 'resolved_at', 'resolution_note'],
 	},
+	// A grant dies with its scope owner or grantee, but survives deletion of
+	// the admin who created it (the grant remains valid; only attribution is
+	// anonymized, matching community_bans).
+	{
+		kind: 'user_columns',
+		table: 'package_scope_grants',
+		columns: ['scope_owner_user_id', 'grantee_user_id'],
+	},
+	{
+		kind: 'replace_user_column',
+		table: 'package_scope_grants',
+		matchColumn: 'created_by_user_id',
+		setColumn: 'created_by_user_id',
+		value: 'deleted-user',
+	},
 	{
 		kind: 'user_columns',
 		table: 'community_bans',
