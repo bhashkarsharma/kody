@@ -757,9 +757,7 @@ export type AccountBillingLoaderData = {
 	effectivePlan: AdminPlanName | null
 	hasStripeCustomer: boolean
 	cancelAt: string | null
-	paymentLinks: {
-		pro?: string
-	}
+	checkoutAvailable: boolean
 	error?: string
 }
 
