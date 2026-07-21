@@ -112,6 +112,28 @@ each chokepoint records exactly one event per metered unit, so sums are safe.
    The rollup is the cheap read path a future quota/entitlements layer will
    consume: one point lookup per user, metric, and month.
 
+## Agent package popularity (MCP instructions hint)
+
+Separate from `usage_rollups`, D1 table `agent_package_conversation_uses`
+(migration `0073-agent-package-conversation-uses.sql`) tracks **distinct
+conversations** in which a signed-in user’s agents used a saved package via MCP
+`execute` (`packages.invoke*` with execute provenance, plus static/dynamic
+`kody:@…` deps attributed to that execute call’s `conversationId`).
+
+- Key: `(user_id, package_id, conversation_id)` — upsert updates `last_used_at`;
+  the same package in the same conversation counts once. Stored
+  `conversation_id` values are SHA-256 hex digests of the MCP conversation id
+  (cardinality only; not reversible to the raw id).
+- Read path: count conversations with `last_used_at` in the last 30 days, join
+  `saved_packages` for `kody_id` + description, top 8 for
+  `buildMcpServerInstructions`. Cold start (no rows) omits the section. List
+  failures (missing table, transient D1 errors) return `[]` so MCP init stays up
+  during migration rollout.
+- Writes are best-effort and never throw into the invoke path (same spirit as
+  `recordUsage`). Do **not** widen `usage_rollups` for conversation cardinality.
+
+Helpers live in `packages/worker/src/usage/agent-package-conversation-uses.ts`.
+
 ## Helper contract
 
 ```ts
