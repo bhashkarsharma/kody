@@ -53,21 +53,34 @@ export default async () => {
 		'/pages/',
 	]
 	const assertAllowedPath = (path) => {
-		const p = path.trim()
-		if (!p.startsWith('/')) {
+		if (path !== path.trim()) {
+			throw new Error('path must not have leading or trailing whitespace')
+		}
+		if (!path.startsWith('/') || path.startsWith('//')) {
 			throw new Error('path must start with / and must not include a host')
 		}
-		if (!PREFIXES.some((prefix) => p.startsWith(prefix))) {
+		if (path.length > 2048) throw new Error('path exceeds maximum length')
+		if (/[\s#]/.test(path))
+			throw new Error('path contains disallowed characters')
+		if (path.includes('..') || /%2e/i.test(path)) {
+			throw new Error('path must not contain ..')
+		}
+		if (!PREFIXES.some((prefix) => path.startsWith(prefix))) {
 			throw new Error(`path must start with one of: ${PREFIXES.join(', ')}`)
 		}
-		if (p.includes('..')) throw new Error('path must not contain ..')
-		if (/[\s#]/.test(p)) throw new Error('path contains disallowed characters')
-		if (p.length > 2048) throw new Error('path exceeds maximum length')
+		const url = new URL(path, ORIGIN)
+		if (url.origin !== ORIGIN) {
+			throw new Error('path must stay on developers.cloudflare.com')
+		}
+		const pathname = url.pathname
+		if (!PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+			throw new Error(`path must start with one of: ${PREFIXES.join(', ')}`)
+		}
+		return url
 	}
 
 	const path = '/api/resources/accounts/'
-	assertAllowedPath(path)
-	const url = new URL(path, ORIGIN).toString()
+	const url = assertAllowedPath(path).toString()
 	const res = await fetch(url, { headers: { Accept: MARKDOWN_ACCEPT } })
 	const body = await res.text()
 	return {
