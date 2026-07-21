@@ -24,6 +24,25 @@ const mockModule = vi.hoisted(() => ({
 	listUserSecretsForSearch: vi.fn(async () => []),
 	listValues: vi.fn(async () => []),
 	loadRelevantMemoriesForTool: vi.fn(async () => null),
+	acknowledgeToolMemories: vi.fn(async () => undefined),
+	buildMemoryRetrievalQuery: vi.fn(
+		(
+			input?: {
+				task?: string
+				query?: string
+				entities?: Array<string>
+				constraints?: Array<string>
+			} | null,
+		) =>
+			[
+				input?.task,
+				input?.query,
+				...(input?.entities ?? []),
+				...(input?.constraints ?? []),
+			]
+				.filter(Boolean)
+				.join('\n'),
+	),
 	runPackageRetrievers: vi.fn(async () => ({ results: [], warnings: [] })),
 }))
 
@@ -53,6 +72,10 @@ vi.mock('#mcp/values/service.ts', () => ({
 vi.mock('#mcp/tools/memory-tool-context.ts', () => ({
 	loadRelevantMemoriesForTool: (...args: Array<unknown>) =>
 		mockModule.loadRelevantMemoriesForTool(...args),
+	acknowledgeToolMemories: (...args: Array<unknown>) =>
+		mockModule.acknowledgeToolMemories(...args),
+	buildMemoryRetrievalQuery: (...args: Array<unknown>) =>
+		mockModule.buildMemoryRetrievalQuery(...args),
 }))
 
 vi.mock('#worker/package-retrievers/service.ts', () => ({
