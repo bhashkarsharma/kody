@@ -35,7 +35,7 @@ vi.mock('#worker/repo/repo-session-do.ts', () => ({
 const { repoOpenSessionCapability } = await import('./repo-open-session.ts')
 
 function createEntitlementsDatabase(input: {
-	users: Array<{ email: string; plan: string | null }>
+	users: Array<{ email: string; plan: string | null; stable_user_id: string }>
 	repoSessionCount: number
 }) {
 	return {
@@ -45,7 +45,18 @@ function createEntitlementsDatabase(input: {
 					return {
 						async first<T>() {
 							if (query.includes('SELECT plan, stripe_plan FROM users')) {
-								const user = input.users.find((row) => row.email === params[0])
+								const email = params[0]
+								const stableUserId = params[1]
+								if (
+									typeof email !== 'string' ||
+									typeof stableUserId !== 'string'
+								) {
+									return null as T | null
+								}
+								const user = input.users.find(
+									(row) =>
+										row.email === email && row.stable_user_id === stableUserId,
+								)
 								return (user ? { plan: user.plan } : null) as T | null
 							}
 							if (
@@ -163,7 +174,7 @@ test('repo_open_session enforces the repo sessions entitlement for plan users op
 	}
 	const env = {
 		APP_DB: createEntitlementsDatabase({
-			users: [{ email, plan: 'pro' }],
+			users: [{ email, plan: 'pro', stable_user_id: userId }],
 			repoSessionCount: limit,
 		}),
 	} as Env
@@ -224,7 +235,7 @@ test('repo_open_session resumes an existing active session without enforcing the
 	}
 	const env = {
 		APP_DB: createEntitlementsDatabase({
-			users: [{ email, plan: 'pro' }],
+			users: [{ email, plan: 'pro', stable_user_id: userId }],
 			repoSessionCount: limit,
 		}),
 	} as Env
@@ -272,9 +283,9 @@ test('repo_open_session resumes an existing active session without enforcing the
 	expect(resumeRpc.openSession).not.toHaveBeenCalled()
 })
 
-test('repo_open_session stays unlimited for users without a plan', async () => {
+test('repo_open_session stays unlimited for unlimited plan users', async () => {
 	resetMocks()
-	const email = 'legacy@example.com'
+	const email = 'unlimited@example.com'
 	const userId = await createStableUserIdFromEmail(email)
 	const limit = planLimits.pro.maxRepoSessions
 	if (limit === null) {
@@ -282,7 +293,7 @@ test('repo_open_session stays unlimited for users without a plan', async () => {
 	}
 	const env = {
 		APP_DB: createEntitlementsDatabase({
-			users: [{ email, plan: null }],
+			users: [{ email, plan: 'unlimited', stable_user_id: userId }],
 			repoSessionCount: limit + 1,
 		}),
 	} as Env
@@ -293,7 +304,7 @@ test('repo_open_session stays unlimited for users without a plan', async () => {
 			user: {
 				userId,
 				email,
-				displayName: 'Legacy User',
+				displayName: 'Unlimited User',
 			},
 		}),
 	}
