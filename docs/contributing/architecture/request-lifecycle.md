@@ -49,6 +49,9 @@ Requests are handled in this order:
 
 7. Static assets:
    - Served from `ASSETS` for `GET` and `HEAD` when available
+   - Matching files under `packages/worker/public/` are asset-first at the edge
+     (they do not enter this Worker list). That includes OpenAI Apps domain
+     verification at `/.well-known/openai-apps-challenge`.
 8. App server routes:
    - Everything else is handled by `packages/worker/src/app/handler.ts`
 
