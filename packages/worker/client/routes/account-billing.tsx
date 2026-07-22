@@ -64,7 +64,7 @@ const planTiers: Array<{
 	},
 ]
 
-/** Mirrors server rank: free < pro < partner. */
+/** Mirrors server rank: free < pro < partner < unlimited. */
 function getPlanRank(plan: AdminPlanName): number {
 	switch (plan) {
 		case 'free':
@@ -73,6 +73,8 @@ function getPlanRank(plan: AdminPlanName): number {
 			return 1
 		case 'partner':
 			return 2
+		case 'unlimited':
+			return 3
 		default: {
 			const exhaustive: never = plan
 			throw new Error(`Unknown plan: ${String(exhaustive)}`)
@@ -84,8 +86,13 @@ function isBillingPath(href: string) {
 	return new URL(href, 'http://localhost').pathname === billingPath
 }
 
-function formatPlanLabel(plan: AdminPlanName | null) {
-	if (plan == null) return 'Legacy / unlimited'
+/** Stripe missing → "None"; manual/effective compatibility missing → "Unlimited". */
+function formatPlanLabel(
+	plan: AdminPlanName | null,
+	missingLabel: 'None' | 'Unlimited',
+) {
+	if (plan == null) return missingLabel
+	if (plan === 'unlimited') return 'Unlimited'
 	return plan.charAt(0).toUpperCase() + plan.slice(1)
 }
 
@@ -100,7 +107,7 @@ function planCoversTier(
 	effectivePlan: AdminPlanName | null,
 	tier: PlanTier,
 ): boolean {
-	if (effectivePlan == null) return true
+	if (effectivePlan == null || effectivePlan === 'unlimited') return true
 	return getPlanRank(effectivePlan) >= getPlanRank(tier)
 }
 
@@ -241,11 +248,11 @@ export function AccountBillingRoute(handle: Handle) {
 				? [
 						{
 							label: 'Granted plan',
-							value: formatPlanLabel(billing.manualPlan),
+							value: formatPlanLabel(billing.manualPlan, 'Unlimited'),
 						},
 						{
 							label: 'Subscription plan',
-							value: formatPlanLabel(billing.stripePlan),
+							value: formatPlanLabel(billing.stripePlan, 'None'),
 						},
 					]
 				: []
@@ -290,7 +297,7 @@ export function AccountBillingRoute(handle: Handle) {
 									color: colors.text,
 								})}
 							>
-								{formatPlanLabel(billing.effectivePlan)}
+								{formatPlanLabel(billing.effectivePlan, 'Unlimited')}
 							</p>
 							{currentPlanItems.length > 0 ? (
 								<MetadataGrid items={currentPlanItems} />
