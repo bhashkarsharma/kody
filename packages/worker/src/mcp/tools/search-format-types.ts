@@ -23,6 +23,7 @@ type SearchMatchType =
 	| 'integration'
 	| 'secret'
 	| 'retriever_result'
+	| 'domain'
 
 export type PackageActionMatch = {
 	subpath: string
@@ -131,11 +132,22 @@ export type RelatedIntegrationPackageSuggestion =
 
 export type SlimSearchMatch =
 	| {
+			type: 'domain'
+			id: string
+			name: string
+			title: string
+			description: string
+			capabilityCount: number
+			sampleCapabilities: Array<string>
+			usage: string
+	  }
+	| {
 			type: 'capability'
 			id: string
 			entityRef: string
 			title: string
 			description: string
+			domain: string
 			usage: string
 			source?: CapabilitySpec['source']
 			remoteConnector?: CapabilitySpec['remoteConnector']
@@ -416,9 +428,18 @@ export type SearchEntityDetail =
 
 export type SearchMatch =
 	| {
+			type: 'domain'
+			name: string
+			title: string
+			description: string
+			capabilityCount: number
+			sampleCapabilities: Array<string>
+	  }
+	| {
 			type: 'capability'
 			name: string
 			description: string
+			domain: string
 			source?: CapabilitySpec['source']
 			remoteConnector?: CapabilitySpec['remoteConnector']
 			mcpServer?: CapabilitySpec['mcpServer']

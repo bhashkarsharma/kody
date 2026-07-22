@@ -54,6 +54,7 @@ test('search entity registry preserves candidate order and entity-backed types',
 		'integration',
 		'secret',
 		'retriever_result',
+		'domain',
 	])
 	expect(entityDetailTypes).toEqual([
 		'capability',
@@ -103,6 +104,12 @@ test('search entity registry preserves candidate order and entity-backed types',
 		{
 			type: 'retriever_result',
 			hasCandidates: true,
+			hasSlimFormatter: true,
+			hasDetailFormatter: false,
+		},
+		{
+			type: 'domain',
+			hasCandidates: false,
 			hasSlimFormatter: true,
 			hasDetailFormatter: false,
 		},

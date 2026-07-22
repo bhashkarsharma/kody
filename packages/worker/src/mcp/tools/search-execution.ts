@@ -44,7 +44,10 @@ export async function executeSearchList(input: {
 	userId: string | null
 	includeHiddenPackages: boolean
 	memoryContext?: SearchToolArgs['memoryContext']
+	/** Optional capability domain id; scopes ranked results to that domain's capabilities. */
+	domain?: string
 }): Promise<SearchListExecutionResult> {
+	const domainFilter = input.domain?.trim() || undefined
 	const username = await resolvePublicUsername({
 		db: input.env.APP_DB,
 		username: input.callerContext.user?.username ?? null,
@@ -59,16 +62,19 @@ export async function executeSearchList(input: {
 	})
 	const memoryEnrichmentPromise = memoryLaunch?.promise ?? Promise.resolve(null)
 	const memoryEnrichmentLaunchedAtMs = memoryLaunch?.launchedAtMs
-	const identityResolution = input.query
-		? await resolvePackageIdentitySearch({
-				db: input.env.APP_DB,
-				userId: input.userId,
-				query: input.query,
-				baseUrl: input.callerContext.baseUrl,
-				username,
-				includeHiddenPackages: input.includeHiddenPackages,
-			})
-		: { recognized: false as const }
+	// Domain-scoped searches rank capabilities only; exact package identity
+	// resolution does not apply.
+	const identityResolution =
+		input.query && !domainFilter
+			? await resolvePackageIdentitySearch({
+					db: input.env.APP_DB,
+					userId: input.userId,
+					query: input.query,
+					baseUrl: input.callerContext.baseUrl,
+					username,
+					includeHiddenPackages: input.includeHiddenPackages,
+				})
+			: { recognized: false as const }
 	const phaseTimings: Partial<SearchPhaseTimings> = {}
 	let warnings: Array<string> = []
 	let result: SearchUnifiedResult
@@ -117,7 +123,7 @@ export async function executeSearchList(input: {
 	})
 	const retrieversStart = performance.now()
 	const retrieverRunPromise =
-		input.userId && input.query
+		input.userId && input.query && !domainFilter
 			? runPackageRetrievers({
 					env: input.env,
 					baseUrl: input.callerContext.baseUrl,
@@ -156,6 +162,7 @@ export async function executeSearchList(input: {
 		registry: searchRows.registry,
 		optionalRows: searchRows,
 		retrieverResults: retrieverRun.results,
+		...(domainFilter ? { domain: domainFilter } : {}),
 	})
 	capabilityGuidance = result.guidance
 	const memorySettlement = await settleSearchMemoryEnrichment({

@@ -2,6 +2,7 @@ export const charsPerToken = 4
 export const maxTokens = 6_000
 export const maxChars = maxTokens * charsPerToken
 export const defaultSearchLimit = 15
+export const domainBrowseDefaultLimit = 100
 export const defaultMaxResponseSize = 4_000
 export const topCapabilityInlineCallShapeCount = 3
 export const maxRelatedCapabilityOperations = 20

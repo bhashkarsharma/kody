@@ -17,8 +17,15 @@ before \`execute\`.
 
 **query** — compact ranked markdown + structured matches (order matters). Query
 markdown is summary-only: type, title/name, one-line description, and entity ref.
+Broad/exploratory queries ("what can you do with email") return compact
+**domain summaries** instead of individual hits; drill in with \`domain\`.
 If nothing useful returns, rephrase or call \`meta_list_capabilities\`; \`entity\`
 does not fix an empty ranked list.
+
+**domain** — optional capability domain id (e.g. \`email\`, \`jobs\`,
+\`remote:home\`, \`mcp:linear\`). With \`query\`, ranks only that domain's
+capabilities. Without \`query\`, lists the domain's capabilities in curated
+order. Domain ids appear on every capability hit and in domain summaries.
 
 An entire saved-package UUID, kody id, current-origin account package URL, or
 owner-matching hosted package URL resolves as exact user-scoped package identity
@@ -43,6 +50,8 @@ If results look incomplete: \`meta_list_capabilities\` (full registry) or
 Optional **limit** (default 15) and **maxResponseSize** trim low-ranked results.
 Example arguments:
 - \`{ "query": "saved github automation package", "limit": 10 }\`
+- \`{ "query": "send a message", "domain": "email" }\`
+- \`{ "domain": "jobs" }\`
 - \`{ "entity": "coding_guide_get:capability" }\`
 - \`{ "entity": ["openapi:canva:createdesignexportjob:capability", "openapi:canva:getdesignexportjob:capability"] }\`
 - \`{ "entity": "user:preferred_org:value" }\`
@@ -75,6 +84,13 @@ export const searchToolInputSchema = {
 		.describe(
 			'Optional exact entity reference "{id}:{type}" (capability, package, secret, value, or integration), or an array of 1–10 refs to batch related detail lookups.',
 		),
+	domain: z
+		.string()
+		.min(1)
+		.optional()
+		.describe(
+			'Optional capability domain id (for example "email" or "remote:home"). With "query", ranks only that domain\'s capabilities; without "query", lists the domain\'s capabilities.',
+		),
 	limit: z
 		.number()
 		.int()
@@ -103,6 +119,7 @@ export const searchToolInputSchema = {
 export type SearchToolArgs = {
 	query?: string
 	entity?: string | Array<string>
+	domain?: string
 	limit?: number
 	maxResponseSize?: number
 	conversationId?: string

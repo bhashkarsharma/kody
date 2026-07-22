@@ -18,9 +18,16 @@ export function formatSearchMarkdown(input: {
 	includePreamble?: boolean
 }) {
 	const lines: Array<string> = ['# Search results', '']
+	const hasDomainMatch = input.matches.some((match) => match.type === 'domain')
 	const hasEntityBackedMatch = input.matches.some(
-		(match) => match.type !== 'retriever_result',
+		(match) => match.type !== 'retriever_result' && match.type !== 'domain',
 	)
+	if (hasDomainMatch) {
+		lines.push(
+			'Domain overview for a broad query. Drill in with `search({ query: "<task>", domain: "<name>" })`, or list every capability in one domain with `search({ domain: "<name>" })`.',
+			'',
+		)
+	}
 	if ((input.includePreamble ?? true) && hasEntityBackedMatch) {
 		lines.push(
 			'For full detail on entity-backed hits, call `search` with `entity: "{id}:{type}"`.',
@@ -49,10 +56,25 @@ export function formatSearchMarkdown(input: {
 	return lines.join('\n').trim()
 }
 
+/**
+ * Domain overview lines stay shorter than regular hits so a full all-domain
+ * map fits inside the default `maxResponseSize` without trimming.
+ */
+const domainOverviewDescriptionMaxLength = 110
+
 function formatMatchListItem(match: SearchMatch, index: number) {
+	if (match.type === 'domain') {
+		const sample =
+			match.sampleCapabilities.length > 0
+				? ` e.g. ${match.sampleCapabilities
+						.map((name) => formatMarkdownInlineCode(name))
+						.join(', ')}.`
+				: ''
+		return `${String(index + 1)}. **domain** ${formatMarkdownInlineCode(match.name)} (${String(match.capabilityCount)} ${match.capabilityCount === 1 ? 'capability' : 'capabilities'}) — ${escapeMarkdownText(formatOneLineSentence(match.description, domainOverviewDescriptionMaxLength))}${sample}`
+	}
 	if (match.type === 'capability') {
 		const entityRef = buildEntityRef(match.name, 'capability')
-		const mainLine = `${String(index + 1)}. **capability** ${formatMarkdownInlineCode(match.name)} — ${escapeMarkdownText(formatOneLineSentence(match.description))} Entity: ${formatMarkdownInlineCode(entityRef)}`
+		const mainLine = `${String(index + 1)}. **capability** ${formatMarkdownInlineCode(match.name)} (${formatMarkdownInlineCode(match.domain)}) — ${escapeMarkdownText(formatOneLineSentence(match.description))} Entity: ${formatMarkdownInlineCode(entityRef)}`
 		if (!match.inputTypeDefinition) {
 			return mainLine
 		}

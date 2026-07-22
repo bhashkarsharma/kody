@@ -13,6 +13,7 @@ import {
 	formatOneLineSentence,
 } from '../search-format-helpers.ts'
 import { type SearchEntityPlugin } from '../search-entity-plugin.ts'
+import { type SearchMatch } from '../search-format-types.ts'
 import { buildCandidateBaseScore } from '../search-scoring.ts'
 import {
 	type SearchCandidate,
@@ -73,23 +74,28 @@ function getSynthesizedProviderIdentity(spec: CapabilitySpec):
 	}
 }
 
+export function toCapabilitySearchMatch(
+	spec: CapabilitySpec,
+): Extract<SearchMatch, { type: 'capability' }> {
+	return {
+		type: 'capability',
+		name: spec.name,
+		description: spec.description,
+		domain: spec.domain,
+		source: spec.source,
+		...(spec.remoteConnector ? { remoteConnector: spec.remoteConnector } : {}),
+		...(spec.mcpServer ? { mcpServer: spec.mcpServer } : {}),
+		...(spec.openApi ? { openApi: spec.openApi } : {}),
+	}
+}
+
 function capabilityMatchToCandidate(
 	match: SearchCapabilityMatch,
 	spec: CapabilitySpec,
 ): SearchCandidate {
 	const providerIdentity = getSynthesizedProviderIdentity(spec)
 	return {
-		match: {
-			type: 'capability',
-			name: spec.name,
-			description: spec.description,
-			source: spec.source,
-			...(spec.remoteConnector
-				? { remoteConnector: spec.remoteConnector }
-				: {}),
-			...(spec.mcpServer ? { mcpServer: spec.mcpServer } : {}),
-			...(spec.openApi ? { openApi: spec.openApi } : {}),
-		},
+		match: toCapabilitySearchMatch(spec),
 		type: 'capability',
 		id: spec.name,
 		title: spec.name,
@@ -173,6 +179,7 @@ export const capabilitySearchEntityPlugin = {
 				'description' in match && typeof match.description === 'string'
 					? match.description
 					: '',
+			domain: match.domain,
 			usage: buildCapabilityUsage(match),
 			...(match.source ? { source: match.source } : {}),
 			...(match.remoteConnector

@@ -1,4 +1,5 @@
 import { capabilitySearchEntityPlugin } from './search-entity-plugins/capability.ts'
+import { domainSearchEntityPlugin } from './search-entity-plugins/domain.ts'
 import { integrationSearchEntityPlugin } from './search-entity-plugins/integration.ts'
 import { packageSearchEntityPlugin } from './search-entity-plugins/package.ts'
 import { retrieverResultSearchEntityPlugin } from './search-entity-plugins/retriever-result.ts'
@@ -16,6 +17,7 @@ export const searchEntityPlugins = [
 	integrationSearchEntityPlugin,
 	secretSearchEntityPlugin,
 	retrieverResultSearchEntityPlugin,
+	domainSearchEntityPlugin,
 ] as const
 
 type RegisteredSearchEntityPlugin = (typeof searchEntityPlugins)[number]

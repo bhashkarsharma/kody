@@ -114,8 +114,8 @@ function formatOneLineSummary(value: string, maxLength = 180) {
 	return `${summary.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
 }
 
-export function formatOneLineSentence(value: string) {
-	const summary = formatOneLineSummary(value)
+export function formatOneLineSentence(value: string, maxLength?: number) {
+	const summary = formatOneLineSummary(value, maxLength)
 	if (!summary) return 'No description.'
 	return /[.!?]$/.test(summary) ? summary : `${summary}.`
 }

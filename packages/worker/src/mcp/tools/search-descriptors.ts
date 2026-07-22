@@ -36,6 +36,9 @@ export function buildRecommendedNextStep(
 	input: SearchGuidanceContext,
 ): string | undefined {
 	const [topMatch] = input.matches
+	if (topMatch?.type === 'domain') {
+		return `Broad query answered with a domain overview. Rerun with a task query scoped to one domain, e.g. \`search({ query: "<task>", domain: "${topMatch.name}" })\`, or list a full domain with \`search({ domain: "${topMatch.name}" })\`.`
+	}
 	const topPackage = input.matches.find((match) => match.type === 'package')
 	const topIntegration = input.matches.find(
 		(match) => match.type === 'integration',

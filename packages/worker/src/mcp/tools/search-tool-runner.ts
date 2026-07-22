@@ -15,6 +15,7 @@ import {
 import {
 	defaultMaxResponseSize,
 	defaultSearchLimit,
+	domainBrowseDefaultLimit,
 	maxChars,
 } from './search-constants.ts'
 import { resolveEntityDetail } from './search-detail.ts'
@@ -57,7 +58,11 @@ export async function runSearchTool(input: {
 	const { baseUrl, hasUser } = callerContextFields(callerContext)
 	const userId = callerContext.user?.userId ?? null
 	const includeHiddenPackages = !!args.includeHiddenPackages
-	if (!args.query && !args.entity) {
+	const domainFilter = args.domain?.trim() || undefined
+	// Whitespace-only queries stay valid (memory enrichment may still run) but
+	// count as "no query" for the domain-browse limit default.
+	const trimmedQuery = args.query?.trim() ?? ''
+	if (!args.query && !args.entity && !domainFilter) {
 		const timing = finishToolTiming(timingStart)
 		logMcpEvent({
 			category: 'mcp',
@@ -69,8 +74,8 @@ export async function runSearchTool(input: {
 			hasUser,
 			sandboxError: false,
 			errorName: 'ValidationError',
-			errorMessage: 'Provide either "query" or "entity".',
-			message: 'Search request missing both query and entity.',
+			errorMessage: 'Provide "query", "entity", or "domain".',
+			message: 'Search request missing query, entity, and domain.',
 			context: {
 				failurePhase: 'validation_error',
 			},
@@ -79,18 +84,24 @@ export async function runSearchTool(input: {
 			content: prependToolMetadataContent(conversationId, [
 				{
 					type: 'text',
-					text: 'Error: Provide either "query" or "entity".',
+					text: 'Error: Provide "query", "entity", or "domain".',
 				},
 			]),
 			structuredContent: {
 				conversationId,
 				timing,
-				error: 'Provide either "query" or "entity".',
+				error: 'Provide "query", "entity", or "domain".',
 			},
 			isError: true,
 		}
 	}
-	const limit = args.limit ?? defaultSearchLimit
+	// Domain browsing (domain without query) deliberately lists the whole
+	// domain by default instead of cutting at the ranked default.
+	const limit =
+		args.limit ??
+		(domainFilter && !trimmedQuery
+			? domainBrowseDefaultLimit
+			: defaultSearchLimit)
 	const maxResponseSize = args.maxResponseSize ?? defaultMaxResponseSize
 	let warnings: Array<string> = []
 	let remoteConnectorDownStatuses: Array<RemoteConnectorStatus> = []
@@ -98,7 +109,7 @@ export async function runSearchTool(input: {
 	const endToEndPhaseTimings: Partial<SearchPhaseTimings> = {}
 
 	const searchSpan = async () => {
-		const query = args.query?.trim() ?? ''
+		const query = trimmedQuery
 		if (!args.entity) {
 			const execution = await executeSearchList({
 				env: agent.getEnv(),
@@ -110,6 +121,7 @@ export async function runSearchTool(input: {
 				userId,
 				includeHiddenPackages,
 				memoryContext: args.memoryContext,
+				...(domainFilter ? { domain: domainFilter } : {}),
 			})
 			username = execution.username
 			warnings = execution.warnings

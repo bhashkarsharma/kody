@@ -10,7 +10,9 @@ import {
 	buildRecommendedNextStep,
 	buildSearchableEntityDescriptors,
 } from './search-descriptors.ts'
+import { buildDomainOverviewMatches } from './search-domain-overview.ts'
 import { searchEntityPlugins } from './search-entity-registry.ts'
+import { toCapabilitySearchMatch } from './search-entity-plugins/capability.ts'
 import { hydrateTopPackageMatches } from './search-entity-plugins/package.ts'
 import { type SearchMatch } from './search-format.ts'
 import { attachTopCapabilityCallShapes } from './search-related-capabilities.ts'
@@ -79,6 +81,78 @@ export function buildExactPackageSearchResult(input: {
 	}
 }
 
+function listSearchDomainNames(
+	registry: Awaited<ReturnType<typeof getCapabilityRegistryForContext>>,
+): Array<string> {
+	const names = new Set<string>(
+		(registry.capabilityDomains ?? []).map((domain) => domain.name),
+	)
+	for (const spec of Object.values(registry.capabilitySpecs)) {
+		names.add(spec.domain)
+	}
+	return [...names]
+}
+
+function scopeRegistryToDomain(
+	registry: Awaited<ReturnType<typeof getCapabilityRegistryForContext>>,
+	domain: string,
+): Awaited<ReturnType<typeof getCapabilityRegistryForContext>> {
+	return {
+		...registry,
+		capabilitySpecs: Object.fromEntries(
+			Object.entries(registry.capabilitySpecs).filter(
+				([, spec]) => spec.domain === domain,
+			),
+		),
+	}
+}
+
+/** Lists a whole domain's capabilities (in curated registry order) when `domain` is passed without a `query`. */
+function buildDomainBrowseResult(input: {
+	env: Env
+	domain: string
+	registry: Awaited<ReturnType<typeof getCapabilityRegistryForContext>>
+	limit: number
+}): SearchUnifiedResult {
+	const queryUnderstandingStart = performance.now()
+	const intent = understandSearchQuery({ query: '', entities: [] })
+	const queryUnderstandingMs = elapsedMs(queryUnderstandingStart)
+	const domainSpecs = Object.values(input.registry.capabilitySpecs)
+	const matches = domainSpecs
+		.slice(0, Math.max(1, input.limit))
+		.map(toCapabilitySearchMatch)
+	attachTopCapabilityCallShapes({
+		matches,
+		registry: input.registry,
+	})
+	// Large synthesized domains (mcp:*, openapi:*) can exceed the listing
+	// limit; never let a partial listing pass silently as the whole domain.
+	const guidance =
+		matches.length < domainSpecs.length
+			? `Domain listing truncated: showing the first ${String(matches.length)} of ${String(domainSpecs.length)} capabilities in ${JSON.stringify(input.domain)}. Raise "limit" or call meta_list_capabilities({ domain: ${JSON.stringify(input.domain)} }) from execute for the complete list.`
+			: buildRecommendedNextStep({
+					query: '',
+					intent,
+					matches,
+				})
+	return {
+		matches,
+		offline: isCapabilitySearchOffline(input.env),
+		intent,
+		telemetry: buildCandidateTelemetry({
+			intent,
+			candidates: [],
+			matches,
+		}),
+		phaseTimings: {
+			queryUnderstandingMs,
+			candidateGenerationMs: 0,
+			rerankingMs: 0,
+		},
+		...(guidance ? { guidance } : {}),
+	}
+}
+
 export async function searchUnified(input: {
 	env: Env
 	query: string
@@ -91,10 +165,38 @@ export async function searchUnified(input: {
 		'packageRows' | 'userSecretRows' | 'userValueRows'
 	>
 	retrieverResults?: Array<PackageRetrieverSurfaceResult>
+	/** Optional capability domain id; scopes ranked results to that domain's capabilities. */
+	domain?: string
 }): Promise<SearchUnifiedResult> {
 	const offline = isCapabilitySearchOffline(input.env)
 	const query = input.query.trim()
+	const domainFilter = input.domain?.trim() || undefined
+	if (domainFilter) {
+		const availableDomains = listSearchDomainNames(input.registry)
+		if (!availableDomains.includes(domainFilter)) {
+			throw new Error(
+				`Unknown domain "${domainFilter}". Available domains: ${[...availableDomains].sort().join(', ')}.`,
+			)
+		}
+	}
+	const registry = domainFilter
+		? scopeRegistryToDomain(input.registry, domainFilter)
+		: input.registry
+	// Domain scoping is a capability-graph drill-down; user-owned entities
+	// (packages, values, integrations, secrets, retrievers) have no domain.
+	const optionalRows = domainFilter
+		? { packageRows: [], userSecretRows: [], userValueRows: [] }
+		: input.optionalRows
+	const retrieverResults = domainFilter ? [] : (input.retrieverResults ?? [])
 	if (!query) {
+		if (domainFilter) {
+			return buildDomainBrowseResult({
+				env: input.env,
+				domain: domainFilter,
+				registry,
+				limit: input.limit,
+			})
+		}
 		const queryUnderstandingStart = performance.now()
 		const emptyIntent = understandSearchQuery({
 			query,
@@ -120,8 +222,8 @@ export async function searchUnified(input: {
 
 	const limit = Math.max(1, input.limit)
 	const entityDescriptors = buildSearchableEntityDescriptors({
-		registry: input.registry,
-		optionalRows: input.optionalRows,
+		registry,
+		optionalRows,
 	})
 	const queryUnderstandingStart = performance.now()
 	const intent = understandSearchQuery({
@@ -129,6 +231,40 @@ export async function searchUnified(input: {
 		entities: entityDescriptors,
 	})
 	const queryUnderstandingMs = elapsedMs(queryUnderstandingStart)
+	if (!domainFilter) {
+		// Broad/exploratory queries return compact domain summaries instead of
+		// ranked hits. Deliberately not sliced to `limit`: the overview is the
+		// map of the capability graph, and each row is one short line
+		// (`maxResponseSize` still trims oversized responses).
+		const overviewMatches = buildDomainOverviewMatches({
+			intent,
+			capabilityDomains: input.registry.capabilityDomains ?? [],
+			capabilitySpecs: input.registry.capabilitySpecs,
+		})
+		if (overviewMatches) {
+			const overviewGuidance = buildRecommendedNextStep({
+				query,
+				intent,
+				matches: overviewMatches,
+			})
+			return {
+				matches: overviewMatches,
+				offline,
+				intent,
+				telemetry: buildCandidateTelemetry({
+					intent,
+					candidates: [],
+					matches: overviewMatches,
+				}),
+				phaseTimings: {
+					queryUnderstandingMs,
+					candidateGenerationMs: 0,
+					rerankingMs: 0,
+				},
+				...(overviewGuidance ? { guidance: overviewGuidance } : {}),
+			}
+		}
+	}
 	const candidateGenerationStart = performance.now()
 	const queryEmbeddingStart = performance.now()
 	const queryEmbedding = deterministicEmbedding(intent.normalizedQuery)
@@ -140,20 +276,21 @@ export async function searchUnified(input: {
 	const candidateResults = await Promise.all(
 		searchEntityPlugins.map(async (plugin) => {
 			const startedAt = performance.now()
-			const candidates = plugin.buildCandidates
-				? await plugin.buildCandidates({
-						env: input.env,
-						query: intent.normalizedQuery,
-						limit,
-						offline,
-						...(input.userId ? { userId: input.userId } : {}),
-						registry: input.registry,
-						optionalRows: input.optionalRows,
-						retrieverResults: input.retrieverResults ?? [],
-						queryEmbedding,
-						sharedQueryVector,
-					})
-				: []
+			const candidates =
+				'buildCandidates' in plugin && plugin.buildCandidates
+					? await plugin.buildCandidates({
+							env: input.env,
+							query: intent.normalizedQuery,
+							limit,
+							offline,
+							...(input.userId ? { userId: input.userId } : {}),
+							registry,
+							optionalRows,
+							retrieverResults,
+							queryEmbedding,
+							sharedQueryVector,
+						})
+					: []
 			return {
 				plugin,
 				candidates,
@@ -188,12 +325,12 @@ export async function searchUnified(input: {
 	const matches = reranked.map((candidate) => candidate.match)
 	attachTopCapabilityCallShapes({
 		matches,
-		registry: input.registry,
+		registry,
 	})
 	await hydrateTopPackageMatches({
 		query: intent.normalizedQuery,
 		matches,
-		rows: input.optionalRows.packageRows,
+		rows: optionalRows.packageRows,
 	})
 	const rerankingMs = elapsedMs(rerankingStart)
 
