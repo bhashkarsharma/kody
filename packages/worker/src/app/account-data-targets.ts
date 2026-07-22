@@ -1,5 +1,16 @@
 export type UserScopedDataTarget =
-	| { kind: 'user_id'; table: string }
+	| {
+			kind: 'user_id'
+			table: string
+			/**
+			 * When false, account deletion still clears the table by user_id, but
+			 * account export skips the rows. Provide surface/reason so the export
+			 * manifest documents the deliberate omission.
+			 */
+			includeInExport?: boolean
+			surface?: string
+			reason?: string
+	  }
 	| { kind: 'db_user_id'; table: string }
 	// Rows keyed by a `target` column holding the stringified database user id
 	// (Epic Stack-style verifications: 2fa secrets etc).
@@ -32,6 +43,40 @@ export const accountUserDataExcludedOwnerIds = [
 			'Operator-owned inbound mail for reserved platform locals is stored under the reserved system:email owner id. It is not a user account, must not be attributed to any user, and is excluded from per-user account deletion/export while system retention pruning bounds growth.',
 	},
 ] as const
+
+/** Targets that account export should skip (deletion still covers them). */
+export function isExcludedFromAccountExport(
+	target: UserScopedDataTarget,
+): boolean {
+	return 'includeInExport' in target && target.includeInExport === false
+}
+
+/**
+ * Documented D1 surfaces omitted from account export. Includes owner-id
+ * exclusions plus targets marked includeInExport: false with surface/reason.
+ */
+export function getAccountExportExcludedD1Surfaces(): Array<{
+	name: string
+	reason: string
+}> {
+	const surfaces: Array<{ name: string; reason: string }> = [
+		...accountUserDataExcludedOwnerIds.map((exclusion) => ({
+			name: exclusion.surface,
+			reason: exclusion.reason,
+		})),
+	]
+	for (const target of accountUserDataTargets) {
+		if (!isExcludedFromAccountExport(target)) continue
+		if (
+			target.kind === 'user_id' &&
+			typeof target.surface === 'string' &&
+			typeof target.reason === 'string'
+		) {
+			surfaces.push({ name: target.surface, reason: target.reason })
+		}
+	}
+	return surfaces
+}
 
 /**
  * Tables that are scoped by `user_id` (directly or transitively) and should
@@ -82,6 +127,17 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 	{ kind: 'user_id', table: 'entity_sources' },
 	{ kind: 'user_id', table: 'email_delivery_events' },
 	{ kind: 'attachment_parent', table: 'email_attachments' },
+	// Sticky EMAIL_BLOBS orphan cleanup tombstones. Deleted with the account
+	// after best-effort R2 cleanup so object keys / user ids are not retained;
+	// omitted from export (not portable user content).
+	{
+		kind: 'user_id',
+		table: 'email_raw_mime_cleanup_queue',
+		includeInExport: false,
+		surface: 'email_raw_mime_cleanup_queue',
+		reason:
+			'Sticky EMAIL_BLOBS orphan cleanup queue keyed by R2 object key. Operational metadata only (not portable user content); omitted from account export. Account deletion clears these rows after attempting best-effort R2 key cleanup so object keys and user ids are not retained indefinitely.',
+	},
 	{ kind: 'user_id', table: 'email_messages' },
 	{ kind: 'user_id', table: 'email_threads' },
 	{ kind: 'user_id', table: 'email_inbox_addresses' },
