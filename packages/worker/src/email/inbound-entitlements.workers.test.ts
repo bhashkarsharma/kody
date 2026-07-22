@@ -1,9 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { expect, test } from 'vitest'
-import {
-	unlimitedPlanEmailLimits,
-	planLimits,
-} from '#worker/entitlements/plans.ts'
+import { maxPlanEmailLimits, planLimits } from '#worker/entitlements/plans.ts'
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { ensureUsageRollupsTestSchema } from '#worker/usage/test-schema.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
@@ -25,7 +22,7 @@ function createInboundEnv() {
 
 async function seedAccountWithPlan(input: {
 	email: string
-	plan: 'free' | 'unlimited'
+	plan: 'free' | 'max'
 	emailVerifiedAt?: string | null
 }) {
 	const username = `quota-${crypto.randomUUID().slice(0, 8)}`
@@ -281,13 +278,13 @@ test('inbound email enforces free-plan receive, storage, and size limits then st
 	})
 })
 
-test('inbound email applies the unlimited-plan email receive backstop', async () => {
+test('inbound email applies the max-plan email receive backstop', async () => {
 	await ensureEmailTestSchema(env.APP_DB)
 	await ensureUsageRollupsTestSchema(env.APP_DB)
 	const email = `fallback-${crypto.randomUUID()}@example.com`
 	const userId = await createStableUserIdFromEmail(email)
-	const { address } = await seedAccountWithPlan({ email, plan: 'unlimited' })
-	const receiveLimit = unlimitedPlanEmailLimits.email_receives_per_day
+	const { address } = await seedAccountWithPlan({ email, plan: 'max' })
+	const receiveLimit = maxPlanEmailLimits.email_receives_per_day
 	await setDailyReceiveCounter(userId, receiveLimit)
 
 	const message = buildInboundMessage(address)

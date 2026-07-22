@@ -143,9 +143,12 @@ vi.mock('#worker/repo/entity-sources.ts', () => ({
 const { deleteSavedPackageProjection, refreshSavedPackageProjection } =
 	await import('./service.ts')
 
-function createEnv() {
+function createEnv(userId = 'user-1') {
+	// Projection refresh asserts finite storage bytes (default/missing plan →
+	// `max`). Stub DB answers storage SUM queries with 0 so unplanned unit
+	// fixtures keep focusing on job/artifact side effects.
 	return {
-		APP_DB: {},
+		APP_DB: createEntitlementsDatabase({ users: [], userId }),
 		PACKAGE_SERVICE_INSTANCE: mockPackageServiceNamespace(),
 	} as Env
 }
@@ -453,7 +456,7 @@ test('refreshSavedPackageProjection continues best-effort cleanup when dependent
 		start: vi.fn().mockRejectedValue(new Error('service start failed')),
 	})
 	const envAfterServiceFailure = {
-		APP_DB: {},
+		...createEnv(),
 		PACKAGE_SERVICE_INSTANCE: {
 			idFromName(name: string) {
 				return name as unknown as DurableObjectId
@@ -512,13 +515,10 @@ test('deleteSavedPackageProjection resyncs the job manager after removing packag
 		userId: 'user-1',
 		sourceId: 'source-1',
 	})
-	expect(mockModule.deleteEntitySource).toHaveBeenCalledWith(
-		{},
-		{
-			id: 'source-1',
-			userId: 'user-1',
-		},
-	)
+	expect(mockModule.deleteEntitySource).toHaveBeenCalledWith(env.APP_DB, {
+		id: 'source-1',
+		userId: 'user-1',
+	})
 	expect(
 		mockModule.deleteEntitySource.mock.invocationCallOrder[0],
 	).toBeGreaterThan(
@@ -534,7 +534,11 @@ test('deleteSavedPackageProjection resyncs the job manager after removing packag
 		serviceName: 'realtime-supervisor',
 	})
 	expect(mockModule.deleteJobRow).toHaveBeenCalledTimes(1)
-	expect(mockModule.deleteJobRow).toHaveBeenCalledWith({}, 'user-1', 'job-1')
+	expect(mockModule.deleteJobRow).toHaveBeenCalledWith(
+		env.APP_DB,
+		'user-1',
+		'job-1',
+	)
 	expect(mockModule.deleteAllPackageScopedSecrets).toHaveBeenCalledWith({
 		env,
 		userId: 'user-1',
@@ -545,13 +549,10 @@ test('deleteSavedPackageProjection resyncs the job manager after removing packag
 		userId: 'user-1',
 		packageId: 'package-1',
 	})
-	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(
-		{},
-		{
-			userId: 'user-1',
-			packageId: 'package-1',
-		},
-	)
+	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(env.APP_DB, {
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
 	expect(
 		mockModule.removePackageRetrieverManifestCacheEntries,
 	).toHaveBeenCalledWith({
@@ -593,13 +594,10 @@ test('deleteSavedPackageProjection continues best-effort cleanup when dependent 
 		userId: 'user-1',
 		packageId: 'package-1',
 	})
-	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(
-		{},
-		{
-			userId: 'user-1',
-			packageId: 'package-1',
-		},
-	)
+	expect(mockModule.deleteSavedPackage).toHaveBeenCalledWith(env.APP_DB, {
+		userId: 'user-1',
+		packageId: 'package-1',
+	})
 	expect(mockModule.deleteSavedPackageVector).toHaveBeenCalledWith(
 		env,
 		'package-1',
