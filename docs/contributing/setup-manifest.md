@@ -133,11 +133,11 @@ automatically:
   and `preview` — so Artifacts repos are partitioned by deploy environment.)
 - `AI_GATEWAY_ID` (optional Worker secret; routes Workers AI embedding calls
   through the configured Cloudflare AI Gateway when set)
-- `CAPABILITY_REINDEX_SECRET` (required in production; bearer auth for the
-  stable-user-id deployment migration and
-  `POST /__maintenance/reindex-capabilities` to refresh all capability-search
-  vectors in Vectorize: built-in kody, memories, jobs, and saved packages. Saved
-  package projections also refresh when packages are saved or published.)
+- `CAPABILITY_REINDEX_SECRET` (required in production; optional locally and for
+  previews; bearer auth for `POST /__maintenance/reindex-capabilities` to
+  refresh all capability-search vectors in Vectorize: built-in kody, memories,
+  jobs, and saved packages. Saved package projections also refresh when packages
+  are saved or published.)
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID` /
   `GOOGLE_CLIENT_SECRET`, `X_CLIENT_ID` / `X_CLIENT_SECRET` (optional Worker
   secrets; enable the "Sign in with GitHub / Google / X" login buttons. A
@@ -169,19 +169,20 @@ Configure these GitHub Actions secrets and variables for workflows:
   both this zone id and the domain)
 - `COOKIE_SECRET` (same format as local)
 - `SECRET_STORE_KEY` (same format as local; required for deploys)
-- `APP_BASE_URL` (required GitHub Actions **variable** for the production
-  stable-user-id migration and used by the deployed Worker as the fallback
-  public app origin when no request URL is available — workflows, password-reset
-  email sender hostname — and written into the generated Worker `vars` config
-  before deploy. Request-scoped MCP/app URLs use the inbound request origin.)
+- `APP_BASE_URL` (required GitHub Actions **variable** used by the deployed
+  Worker as the fallback public app origin when no request URL is available —
+  workflows, password-reset email sender hostname — and written into the
+  generated Worker `vars` config before deploy. Request-scoped MCP/app URLs use
+  the inbound request origin.)
 - `AI_GATEWAY_ID` (optional for production deploys; enables AI Gateway routing
   for Workers AI embeddings)
 - `AI_GATEWAY_ID_PREVIEW` (optional for preview deploys; enables AI Gateway
   routing for Workers AI embeddings)
 - `SENTRY_DSN` (optional; create a JavaScript/Cloudflare project in Sentry and
   paste the DSN; syncs to the Worker as a secret when set in GitHub Actions)
-- `CAPABILITY_REINDEX_SECRET` (required for production deploys; authenticates
-  the pre-deploy stable-user-id migration and post-deploy maintenance calls)
+- `CAPABILITY_REINDEX_SECRET` (required in production; optional locally and for
+  previews; authenticates post-deploy maintenance calls such as capability
+  reindex)
 - `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET`,
   `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET`, `OAUTH_X_CLIENT_ID` /
   `OAUTH_X_CLIENT_SECRET` (optional; social login provider app credentials. The
@@ -267,7 +268,8 @@ How to get/set each value:
   - In GitHub: **Settings → Secrets and variables → Actions → Variables**, add
     `SENTRY_ORG` and `SENTRY_PROJECT` with your Sentry slugs (for example from
     `npx @sentry/wizard@latest -i sourcemaps`).
-- `CAPABILITY_REINDEX_SECRET` (optional)
+- `CAPABILITY_REINDEX_SECRET` (required in production; optional locally and for
+  previews)
   - Generate a long random secret (for example `openssl rand -hex 32`), store it
     as the repository secret `CAPABILITY_REINDEX_SECRET`, and let the deploy
     workflow sync it to the Worker. After each production deploy, CI POSTs to
@@ -275,7 +277,8 @@ How to get/set each value:
     refresh built-in capability, memory, job, and saved-package embeddings. Run
     the same POST manually after changing the embedding model, pooling, or
     Vectorize index dimensions so existing rows are rebuilt with compatible
-    vectors.
+    vectors. Local and preview environments can omit it; CI skips reindex and
+    execute-smoke when the secret is unset.
 
 Preview deploys for pull requests create a separate Worker per PR named
 `<app-name>-pr-<number>` (for kody: `kody-pr-123`) plus one Worker per mock

@@ -12,16 +12,28 @@ import { adminUserCreateCapability } from './admin-user-create.ts'
 import { adminUserGetCapability } from './admin-user-get.ts'
 import { adminUserListCapability } from './admin-user-list.ts'
 import { adminUserUpdateCapability } from './admin-user-update.ts'
+import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 
 type UserRow = {
 	id: number
 	username: string
 	email: string
+	stable_user_id: string
 	plan?: string | null
 	created_at: string
 	updated_at: string
 	password_hash?: string
 	email_verified_at?: string | null
+}
+
+function adminTestUser(
+	input: Omit<UserRow, 'stable_user_id'> & { stable_user_id?: string },
+): UserRow {
+	return {
+		...input,
+		stable_user_id:
+			input.stable_user_id ?? testStableUserIdFromEmail(input.email),
+	}
 }
 
 type UserRoleRow = {
@@ -282,6 +294,7 @@ function createAdminCapabilityTestDb(input: {
 									username: user.username,
 									email: user.email,
 									plan: user.plan ?? null,
+									stable_user_id: user.stable_user_id,
 								})) as Array<T>,
 						}
 					}
@@ -341,7 +354,21 @@ function createAdminCapabilityTestDb(input: {
 				},
 				async run() {
 					if (normalizedQuery.startsWith('insert into users')) {
-						const [username, email, passwordHash, emailVerifiedAt] = params
+						const [
+							username,
+							email,
+							passwordHash,
+							emailVerifiedAt,
+							stableUserId,
+						] = params
+						if (
+							typeof stableUserId !== 'string' ||
+							stableUserId.trim().length === 0
+						) {
+							throw new Error(
+								'INSERT INTO users requires a non-empty stable_user_id bind parameter',
+							)
+						}
 						if (
 							users.some(
 								(row) =>
@@ -360,10 +387,11 @@ function createAdminCapabilityTestDb(input: {
 							throw new Error('UNIQUE constraint failed: users.username')
 						}
 						const now = new Date().toISOString()
-						const user = {
+						const user: UserRow = {
 							id: nextUserId,
 							username: String(username),
 							email: String(email),
+							stable_user_id: stableUserId,
 							created_at: now,
 							updated_at: now,
 							password_hash: String(passwordHash),
@@ -467,22 +495,22 @@ function createAdminCapabilityContext(db: D1Database) {
 test('admin capabilities list and get account metadata and query sanitized audit rows', async () => {
 	const { db, auditEvents } = createAdminCapabilityTestDb({
 		users: [
-			{
+			adminTestUser({
 				id: 1,
 				username: 'admin',
 				email: 'admin@example.com',
 				email_verified_at: '2026-01-01T00:00:00.000Z',
 				created_at: '2026-01-01 00:00:00',
 				updated_at: '2026-01-02 00:00:00',
-			},
-			{
+			}),
+			adminTestUser({
 				id: 2,
 				username: 'jane',
 				email: 'jane@example.com',
 				email_verified_at: null,
 				created_at: '2026-01-03 00:00:00',
 				updated_at: '2026-01-04 00:00:00',
-			},
+			}),
 		],
 		userRoles: [
 			{ user_id: 1, role_name: 'admin' },
@@ -567,13 +595,13 @@ test('admin capabilities list and get account metadata and query sanitized audit
 test('admin system email capabilities read only system-owned mail and audit reads', async () => {
 	const { db, auditEvents } = createAdminCapabilityTestDb({
 		users: [
-			{
+			adminTestUser({
 				id: 1,
 				username: 'admin',
 				email: 'admin@example.com',
 				created_at: '2026-01-01 00:00:00',
 				updated_at: '2026-01-02 00:00:00',
-			},
+			}),
 		],
 		userRoles: [{ user_id: 1, role_name: 'admin' }],
 		emailInboxAddresses: [
@@ -653,16 +681,49 @@ test('admin system email capabilities read only system-owned mail and audit read
 	})
 })
 
+test('insert into users mock rejects missing stable_user_id bind parameter', async () => {
+	const { db } = createAdminCapabilityTestDb({
+		users: [],
+		userRoles: [],
+	})
+	const insertSql = `INSERT INTO users (username, email, password_hash, email_verified_at, stable_user_id)
+ VALUES (?, ?, ?, ?, ?)`
+
+	await expect(
+		db
+			.prepare(insertSql)
+			.bind('testuser', 'test@example.com', 'hash', '2026-01-01T00:00:00.000Z')
+			.run(),
+	).rejects.toThrow(
+		'INSERT INTO users requires a non-empty stable_user_id bind parameter',
+	)
+
+	await expect(
+		db
+			.prepare(insertSql)
+			.bind(
+				'testuser',
+				'test@example.com',
+				'hash',
+				'2026-01-01T00:00:00.000Z',
+				'   ',
+			)
+			.run(),
+	).rejects.toThrow(
+		'INSERT INTO users requires a non-empty stable_user_id bind parameter',
+	)
+})
+
 test('admin_user_create records audit metadata and assigns the default role', async () => {
-	const { db, auditEvents, userRoles } = createAdminCapabilityTestDb({
+	const { db, auditEvents, userRoles, users } = createAdminCapabilityTestDb({
 		users: [
-			{
+			adminTestUser({
 				id: 1,
 				username: 'admin',
 				email: 'admin@example.com',
 				created_at: '2026-01-01 00:00:00',
 				updated_at: '2026-01-02 00:00:00',
-			},
+			}),
 		],
 		userRoles: [{ user_id: 1, role_name: 'admin' }],
 	})
@@ -677,6 +738,10 @@ test('admin_user_create records audit metadata and assigns the default role', as
 		userId: 2,
 		email: 'person+launch@example.com',
 	})
+	expect(users.find((user) => user.id === 2)).toMatchObject({
+		email: 'person+launch@example.com',
+		stable_user_id: testStableUserIdFromEmail('person+launch@example.com'),
+	})
 	expect(userRoles).toContainEqual({ user_id: 2, role_name: 'user' })
 	expect(auditEvents).toEqual([
 		expect.objectContaining({
@@ -690,14 +755,14 @@ test('admin_user_create records audit metadata and assigns the default role', as
 test('admin_user_update sets and clears the entitlement plan with audit metadata', async () => {
 	const { db, auditEvents, users } = createAdminCapabilityTestDb({
 		users: [
-			{
+			adminTestUser({
 				id: 1,
 				username: 'admin',
 				email: 'admin@example.com',
 				created_at: '2026-01-01 00:00:00',
 				updated_at: '2026-01-02 00:00:00',
-			},
-			{
+			}),
+			adminTestUser({
 				id: 2,
 				username: 'jane',
 				email: 'jane@example.com',
@@ -705,7 +770,7 @@ test('admin_user_update sets and clears the entitlement plan with audit metadata
 				plan: null,
 				created_at: '2026-01-03 00:00:00',
 				updated_at: '2026-01-04 00:00:00',
-			},
+			}),
 		],
 		userRoles: [
 			{ user_id: 1, role_name: 'admin' },
@@ -750,13 +815,13 @@ test('admin_user_update sets and clears the entitlement plan with audit metadata
 test('admin_user_update rejects unknown users and unknown plan names', async () => {
 	const { db, auditEvents } = createAdminCapabilityTestDb({
 		users: [
-			{
+			adminTestUser({
 				id: 1,
 				username: 'admin',
 				email: 'admin@example.com',
 				created_at: '2026-01-01 00:00:00',
 				updated_at: '2026-01-02 00:00:00',
-			},
+			}),
 		],
 		userRoles: [{ user_id: 1, role_name: 'admin' }],
 	})
