@@ -14,6 +14,7 @@ import {
 	safeLog,
 } from './backup-policy.ts'
 import { type BackupEnvironment } from './backup-types.ts'
+import { verifyBackupManifestSignature } from './manifest-signing.ts'
 
 function latestExpectedDate(scheduledAt: Date): Date {
 	const expected = new Date(scheduledAt)
@@ -58,43 +59,45 @@ export async function checkFreshness(
 		throw error
 	}
 	let ageHours: number | undefined
-	let stale = manifest === null
-	if (manifest !== null) {
+	const signatureValid =
+		manifest !== null && (await verifyBackupManifestSignature(env, manifest))
+	let stale = manifest === null || !signatureValid
+	if (manifest !== null && signatureValid) {
 		const validObjectKey = isBookmarkObjectKey(
 			payload.objectPrefix,
-			manifest.objectKey,
+			manifest.payload.sql.objectKey,
 		)
 		const object = validObjectKey
-			? await env.BACKUP_BUCKET.head(manifest.objectKey)
+			? await env.BACKUP_BUCKET.head(manifest.payload.sql.objectKey)
 			: null
 		ageHours =
-			(scheduledAt.valueOf() - new Date(manifest.completedAt).valueOf()) /
+			(scheduledAt.valueOf() -
+				new Date(manifest.payload.export.completedAt).valueOf()) /
 			3_600_000
 		stale =
 			!Number.isFinite(ageHours) ||
 			ageHours < 0 ||
 			ageHours > maxAgeHours ||
-			manifest.source.accountId.toLowerCase() !==
+			manifest.payload.source.accountId.toLowerCase() !==
 				env.SOURCE_ACCOUNT_ID.toLowerCase() ||
-			manifest.source.accountName !== env.SOURCE_ACCOUNT_NAME ||
-			manifest.source.databaseId.toLowerCase() !==
+			manifest.payload.source.databaseId.toLowerCase() !==
 				env.SOURCE_DATABASE_ID.toLowerCase() ||
-			manifest.source.databaseName !== env.SOURCE_DATABASE_NAME ||
+			manifest.payload.source.databaseName !== env.SOURCE_DATABASE_NAME ||
 			!validObjectKey ||
-			manifest.bytes <= 0 ||
-			!/^[0-9a-f]{64}$/.test(manifest.sha256) ||
-			!manifest.r2Etag ||
+			manifest.payload.sql.bytes <= 0 ||
+			!/^[0-9a-f]{64}$/.test(manifest.payload.sql.sha256) ||
+			!manifest.payload.sql.r2Etag ||
 			object === null ||
 			(object !== null &&
-				(object.size !== manifest.bytes ||
+				(object.size !== manifest.payload.sql.bytes ||
 					object.size >= MAXIMUM_SINGLE_BACKUP_OBJECT_BYTES ||
-					object.etag !== manifest.r2Etag))
+					object.etag !== manifest.payload.sql.r2Etag))
 	}
 	safeLog({
 		event: stale ? 'freshness-stale' : 'freshness-success',
 		status: stale ? 'stale-success' : 'success',
 		day: payload.day,
-		objectKey: manifest?.objectKey,
+		objectKey: manifest?.payload.sql.objectKey,
 		manifestKey: payload.manifestKey,
 		ageHours,
 	})

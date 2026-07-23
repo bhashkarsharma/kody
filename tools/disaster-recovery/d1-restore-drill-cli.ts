@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pipeline } from 'node:stream/promises'
+import { Transform } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { isExecutedDirectly, resolveLocalBinary } from '../node-runtime.ts'
 import {
@@ -26,13 +28,19 @@ const applicationMigrationsDirectory = fileURLToPath(
 export const restoreTrustRegistryPath = fileURLToPath(
 	new URL('./trusted-d1-restore-identities.json', import.meta.url),
 )
+export const manifestPublicKeyRegistryPath = fileURLToPath(
+	new URL('./trusted-backup-manifest-public-keys.json', import.meta.url),
+)
+export const restoreBaselineRegistryPath = fileURLToPath(
+	new URL('./trusted-restore-baselines.json', import.meta.url),
+)
 
 type CliArguments = {
 	manifestPath: string
 	manifestSha256: string
 	backupPath: string
-	baselinePath: string
-	postForwardBaselinePath?: string
+	baselineId: string
+	postForwardBaselineId?: string
 	targetAccountId: string
 	targetName: string
 	execute: boolean
@@ -44,10 +52,10 @@ export function parseArguments(argv: ReadonlyArray<string>): CliArguments {
 	const switches = new Set<string>()
 	const valuedArguments = new Set([
 		'--backup',
-		'--baseline',
+		'--baseline-id',
 		'--manifest',
 		'--manifest-sha256',
-		'--post-forward-baseline',
+		'--post-forward-baseline-id',
 		'--target-account-id',
 		'--target-name',
 	])
@@ -80,8 +88,8 @@ export function parseArguments(argv: ReadonlyArray<string>): CliArguments {
 		manifestPath: required('--manifest'),
 		manifestSha256: required('--manifest-sha256'),
 		backupPath: required('--backup'),
-		baselinePath: required('--baseline'),
-		postForwardBaselinePath: values.get('--post-forward-baseline'),
+		baselineId: required('--baseline-id'),
+		postForwardBaselineId: values.get('--post-forward-baseline-id'),
 		targetAccountId: required('--target-account-id'),
 		targetName: required('--target-name'),
 		execute: switches.has('--execute'),
@@ -139,6 +147,128 @@ export async function collectBackupFileEvidence(
 		throw new Error('local SQL file changed while hashing')
 	}
 	return { sizeBytes: size, sha256: hash.digest('hex') }
+}
+
+export type StagedBackupFile = {
+	path: string
+	evidence: BackupFileEvidence
+	cleanup(): Promise<void>
+}
+
+export type StageBackupFileAdapters = {
+	statFile(file: string): Promise<{ size: number }>
+	createTemporaryDirectory(): Promise<string>
+	copyFile(source: string, destination: string): Promise<number>
+	makeDirectoryPrivate(directory: string): Promise<void>
+	makeFileReadOnly(file: string): Promise<void>
+	collectEvidence(
+		file: string,
+		expectedSizeBytes: number,
+	): Promise<BackupFileEvidence>
+	removeDirectory(directory: string): Promise<void>
+}
+
+const defaultStageBackupFileAdapters: StageBackupFileAdapters = {
+	async statFile(file) {
+		return await stat(file)
+	},
+	async createTemporaryDirectory() {
+		return await mkdtemp(path.join(os.tmpdir(), 'kody-d1-sql-'))
+	},
+	async copyFile(source, destination) {
+		let bytes = 0
+		const limit = new Transform({
+			transform(chunk: Buffer, _encoding, callback) {
+				bytes += chunk.byteLength
+				if (bytes >= maximumD1BackupSizeBytes) {
+					callback(
+						new Error('local SQL file exceeds the 5 GiB restore-drill limit'),
+					)
+					return
+				}
+				callback(null, chunk)
+			},
+		})
+		await pipeline(
+			createReadStream(source),
+			limit,
+			createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
+		)
+		return bytes
+	},
+	async makeDirectoryPrivate(directory) {
+		await chmod(directory, 0o700)
+	},
+	async makeFileReadOnly(file) {
+		await chmod(file, 0o400)
+	},
+	async collectEvidence(file, expectedSizeBytes) {
+		return await collectBackupFileEvidence(file, expectedSizeBytes)
+	},
+	async removeDirectory(directory) {
+		await rm(directory, { recursive: true, force: true })
+	},
+}
+
+export async function stageBackupFile(
+	source: string,
+	expectedEvidence: BackupFileEvidence,
+	adapters: StageBackupFileAdapters = defaultStageBackupFileAdapters,
+): Promise<StagedBackupFile> {
+	const expectedSizeBytes = expectedEvidence.sizeBytes
+	const { size } = await adapters.statFile(source)
+	if (!Number.isSafeInteger(size) || size < 0) {
+		throw new Error('local SQL file size is invalid')
+	}
+	if (size >= maximumD1BackupSizeBytes) {
+		throw new Error('local SQL file exceeds the 5 GiB restore-drill limit')
+	}
+	if (size !== expectedSizeBytes) {
+		throw new Error('local SQL file size does not match the manifest')
+	}
+
+	const directory = await adapters.createTemporaryDirectory()
+	const stagedPath = path.join(directory, 'backup.sql')
+	let retained = false
+	try {
+		await adapters.makeDirectoryPrivate(directory)
+		const copiedBytes = await adapters.copyFile(source, stagedPath)
+		if (copiedBytes !== expectedSizeBytes) {
+			throw new Error('local SQL file changed while staging')
+		}
+		await adapters.makeFileReadOnly(stagedPath)
+		const evidence = await adapters.collectEvidence(
+			stagedPath,
+			expectedSizeBytes,
+		)
+		if (evidence.sha256 !== expectedEvidence.sha256) {
+			throw new Error('staged SQL file evidence does not match the manifest')
+		}
+		retained = true
+		return {
+			path: stagedPath,
+			evidence,
+			async cleanup() {
+				await adapters.removeDirectory(directory)
+			},
+		}
+	} finally {
+		if (!retained) await adapters.removeDirectory(directory)
+	}
+}
+
+export async function withStagedBackupFile<T>(
+	source: string,
+	expectedEvidence: BackupFileEvidence,
+	callback: (staged: StagedBackupFile) => Promise<T>,
+	stage: typeof stageBackupFile = stageBackupFile,
+): Promise<T> {
+	const staged = await stage(source, expectedEvidence)
+	try {
+		return await callback(staged)
+	} finally {
+		await staged.cleanup()
+	}
 }
 
 export async function runProcess(
@@ -358,45 +488,59 @@ export function createAdapters(
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
 	const args = parseArguments(argv)
-	const manifestBytes = await readFile(args.manifestPath)
-	const manifest = parseAndVerifyManifest(manifestBytes, args.manifestSha256)
-	const backupFileEvidence = await collectBackupFileEvidence(
-		args.backupPath,
-		manifest.bytes,
-	)
-	const [baseline, trustRegistry] = await Promise.all([
-		readJson(args.baselinePath),
+	const [
+		manifestBytes,
+		manifestPublicKeyRegistry,
+		baselineRegistry,
+		trustRegistry,
+	] = await Promise.all([
+		readFile(args.manifestPath),
+		readJson(manifestPublicKeyRegistryPath),
+		readJson(restoreBaselineRegistryPath),
 		readJson(restoreTrustRegistryPath),
 	])
-	const postForwardBaseline = args.postForwardBaselinePath
-		? await readJson(args.postForwardBaselinePath)
-		: undefined
-	const token = args.execute
-		? process.env[drillTokenEnvironmentVariable]
-		: 'unused-in-dry-run'
-	if (!token) {
-		throw new Error(
-			`${drillTokenEnvironmentVariable} is required for --execute and must be a drill-only D1 Edit token for the target account`,
-		)
-	}
-	const result = await runD1RestoreDrill(
-		{
-			manifestBytes,
-			expectedManifestSha256: args.manifestSha256,
-			backupFileEvidence,
-			backupFile: args.backupPath,
-			baseline,
-			postForwardBaseline,
-			targetAccountId: args.targetAccountId,
-			targetName: args.targetName,
-			trustRegistry,
-			applyForwardMigrations: args.applyForwardMigrations,
-			dryRun: !args.execute,
-		},
-		createAdapters(token, args.targetAccountId),
+	const manifest = parseAndVerifyManifest(
+		manifestBytes,
+		args.manifestSha256,
+		manifestPublicKeyRegistry,
 	)
-	if (result.dryRun) console.log(JSON.stringify(result, null, 2))
-	else console.log('Live-created target passed all restore-drill checks.')
+	await withStagedBackupFile(
+		args.backupPath,
+		{
+			sizeBytes: manifest.payload.sql.bytes,
+			sha256: manifest.payload.sql.sha256,
+		},
+		async (stagedBackup) => {
+			const token = args.execute
+				? process.env[drillTokenEnvironmentVariable]
+				: 'unused-in-dry-run'
+			if (!token) {
+				throw new Error(
+					`${drillTokenEnvironmentVariable} is required for --execute and must be a drill-only D1 Edit token for the target account`,
+				)
+			}
+			const result = await runD1RestoreDrill(
+				{
+					manifestBytes,
+					expectedManifestSha256: args.manifestSha256,
+					manifestPublicKeyRegistry,
+					backupFileEvidence: stagedBackup.evidence,
+					backupFile: stagedBackup.path,
+					baselineId: args.baselineId,
+					postForwardBaselineId: args.postForwardBaselineId,
+					baselineRegistry,
+					targetAccountId: args.targetAccountId,
+					targetName: args.targetName,
+					trustRegistry,
+					applyForwardMigrations: args.applyForwardMigrations,
+					dryRun: !args.execute,
+				},
+				createAdapters(token, args.targetAccountId),
+			)
+			if (result.dryRun) console.log(JSON.stringify(result, null, 2))
+			else console.log('Live-created target passed all restore-drill checks.')
+		},
+	)
 }
 
 if (isExecutedDirectly(import.meta.url)) {

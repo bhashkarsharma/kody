@@ -27,12 +27,16 @@
 		"ENABLE_PRODUCTION_D1_BACKUPS": "false",
 		"BACKUP_BENCHMARK_APPROVED": "false",
 		"SOURCE_ACCOUNT_ID": "REPLACE_WITH_ACCOUNT_UUID",
-		"SOURCE_ACCOUNT_NAME": "REPLACE_WITH_ACCOUNT_NAME",
 		"SOURCE_DATABASE_ID": "REPLACE_WITH_DATABASE_UUID",
 		"SOURCE_DATABASE_NAME": "REPLACE_WITH_DATABASE_NAME",
 		"ALLOWED_SOURCE_ACCOUNT_IDS": "REPLACE_WITH_ACCOUNT_UUID",
 		"ALLOWED_SOURCE_DATABASE_IDS": "REPLACE_WITH_DATABASE_UUID",
 		"BUILD_COMMIT": "REPLACE_AT_DEPLOY_TIME",
+		// Non-secret provenance. The matching PKCS#8 private key is a Worker secret.
+		"BACKUP_MANIFEST_SIGNING_KEY_ID": "replace-with-approved-key-id",
+		"BACKUP_MANIFEST_VERIFYING_PUBLIC_KEY_SPKI_BASE64": "replace-with-base64-spki-public-key",
+		"TRUSTED_RESTORE_BASELINE_ID": "replace-with-approved-baseline-id",
+		"TRUSTED_RESTORE_BASELINE_SHA256": "replace-with-lowercase-canonical-sha256",
 		"BACKUP_MAX_AGE_HOURS": "26",
 		// D1 GET file_size must remain strictly below this single-object ceiling.
 		"BACKUP_MAX_SOURCE_BYTES": "4500000000",
