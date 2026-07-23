@@ -63,6 +63,7 @@ import {
 	aggregateUsageRollups,
 	shouldRunUsageAggregationCron,
 } from '#worker/usage/aggregate-rollups.ts'
+import { OAuthPurgeCoordinator } from './oauth-purge.ts'
 
 export {
 	RepoSession,
@@ -76,6 +77,7 @@ export {
 	DynamicCallableWorkflow,
 	PackageAppRuntimeBridge,
 	StorageRunner,
+	OAuthPurgeCoordinator,
 }
 
 // Immutable caching is only safe when asset URLs are versioned by a real
@@ -540,10 +542,15 @@ const workerHandler = {
 				run: () => refreshStaleStripePlans({ env, now: scheduledAt }),
 			},
 			{
-				// 0.5+ defaults refresh/client TTLs and exposes purgeExpiredData for
-				// defense-in-depth cleanup of orphaned OAUTH_KV grants/tokens.
+				// One global DO serializes invocations and persists independent phase
+				// cursors so neither healthy pages nor overlapping crons lose progress.
 				name: 'oauth_purge_expired',
-				run: () => oauthProvider.purgeExpiredData(env),
+				run: () => {
+					const id = env.OAUTH_PURGE_COORDINATOR.idFromName('global')
+					return env.OAUTH_PURGE_COORDINATOR.get(id).run({
+						scheduledAt: scheduledAt.getTime(),
+					})
+				},
 			},
 		]
 		if (shouldRunRetentionCron(scheduledAt)) {

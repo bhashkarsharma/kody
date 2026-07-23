@@ -1,6 +1,15 @@
 import { expect, test, vi } from 'vitest'
 import * as Sentry from '@sentry/cloudflare'
-import { createExecutionContext, env } from 'cloudflare:test'
+import {
+	createExecutionContext,
+	env,
+	runInDurableObject,
+} from 'cloudflare:test'
+import {
+	oauthPurgeContinuationStorageKey,
+	type OAuthPurgeCoordinator,
+	type PurgeContinuation,
+} from './oauth-purge.ts'
 
 const mocks = vi.hoisted(() => ({
 	reconcileArtifactsPushes: vi.fn(async () => ({})),
@@ -53,6 +62,12 @@ function createController(scheduledTime: number) {
 	} satisfies ScheduledController
 }
 
+function getOAuthPurgeCoordinator() {
+	return env.OAUTH_PURGE_COORDINATOR.get(
+		env.OAUTH_PURGE_COORDINATOR.idFromName('global'),
+	)
+}
+
 test('scheduled runs gated lanes and passes EMAIL_BLOBS to system-email retention', async () => {
 	mocks.shouldRunUsageAggregationCron.mockReturnValueOnce(true)
 	const scheduledTime = Date.parse('2026-07-05T10:00:30.000Z')
@@ -78,6 +93,185 @@ test('scheduled runs gated lanes and passes EMAIL_BLOBS to system-email retentio
 		expect.objectContaining({ now: new Date(scheduledTime) }),
 	)
 	expect(mocks.pruneRetention).not.toHaveBeenCalled()
+})
+
+test('scheduled OAuth purge advances and revokes every grant token before the grant', async () => {
+	const scheduledTime = Date.parse('2026-07-05T10:05:00.000Z')
+	const userId = 'oauth-purge-user'
+	const clientId = 'oauth-purge-client'
+	const healthyGrantIds = Array.from(
+		{ length: 51 },
+		(_, index) => `${index.toString().padStart(3, '0')}-healthy`,
+	)
+	const orphanGrantId = 'zzz-orphan'
+	const orphanGrantKey = `grant:${userId}:${orphanGrantId}`
+	const orphanTokenKeys = Array.from(
+		{ length: 51 },
+		(_, index) =>
+			`token:${userId}:${orphanGrantId}:${index.toString().padStart(3, '0')}`,
+	)
+
+	await runInDurableObject(
+		getOAuthPurgeCoordinator(),
+		async (_instance: OAuthPurgeCoordinator, state) =>
+			state.storage.deleteAll(),
+	)
+	await env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify({ clientId }))
+	await Promise.all(
+		healthyGrantIds.flatMap((grantId) => [
+			env.OAUTH_KV.put(
+				`grant:${userId}:${grantId}`,
+				JSON.stringify({ id: grantId, userId, clientId }),
+			),
+			env.OAUTH_KV.put(
+				`token:${userId}:${grantId}:healthy-token`,
+				JSON.stringify({ userId, grantId }),
+			),
+		]),
+	)
+	await env.OAUTH_KV.put(
+		orphanGrantKey,
+		JSON.stringify({
+			id: orphanGrantId,
+			userId,
+			clientId: 'missing-client',
+		}),
+	)
+	await Promise.all(
+		orphanTokenKeys.map((key) =>
+			env.OAUTH_KV.put(key, JSON.stringify({ userId, grantId: orphanGrantId })),
+		),
+	)
+
+	await worker.scheduled?.(
+		createController(scheduledTime),
+		env,
+		createExecutionContext(),
+	)
+	expect(await env.OAUTH_KV.get(orphanGrantKey)).not.toBeNull()
+	expect(await env.OAUTH_KV.get(orphanTokenKeys[0] ?? '')).not.toBeNull()
+
+	await worker.scheduled?.(
+		createController(scheduledTime + 5 * 60_000),
+		env,
+		createExecutionContext(),
+	)
+	expect(await env.OAUTH_KV.get(orphanGrantKey)).not.toBeNull()
+
+	await worker.scheduled?.(
+		createController(scheduledTime + 10 * 60_000),
+		env,
+		createExecutionContext(),
+	)
+	expect(await env.OAUTH_KV.get(orphanGrantKey)).not.toBeNull()
+	expect(await env.OAUTH_KV.get(orphanTokenKeys[0] ?? '')).toBeNull()
+	expect(await env.OAUTH_KV.get(orphanTokenKeys.at(-1) ?? '')).not.toBeNull()
+
+	await worker.scheduled?.(
+		createController(scheduledTime + 15 * 60_000),
+		env,
+		createExecutionContext(),
+	)
+	expect(await env.OAUTH_KV.get(orphanGrantKey)).not.toBeNull()
+
+	await worker.scheduled?.(
+		createController(scheduledTime + 20 * 60_000),
+		env,
+		createExecutionContext(),
+	)
+	expect(await env.OAUTH_KV.get(orphanGrantKey)).toBeNull()
+	await expect(
+		Promise.all(orphanTokenKeys.map((key) => env.OAUTH_KV.get(key))),
+	).resolves.toEqual(orphanTokenKeys.map(() => null))
+	expect(
+		await env.OAUTH_KV.get(`grant:${userId}:${healthyGrantIds.at(-1)}`),
+	).not.toBeNull()
+	expect(
+		await env.OAUTH_KV.get(
+			`token:${userId}:${healthyGrantIds.at(-1)}:healthy-token`,
+		),
+	).not.toBeNull()
+})
+
+test('OAuth purge resets only invalid persisted cursors', async () => {
+	const coordinator = getOAuthPurgeCoordinator()
+	const invalidCursor = '%%%'
+	await runInDurableObject(
+		coordinator,
+		async (_instance: OAuthPurgeCoordinator, state) => {
+			await state.storage.deleteAll()
+			await state.storage.put<PurgeContinuation>(
+				oauthPurgeContinuationStorageKey,
+				{
+					version: 1,
+					nextPhase: 'grants',
+					grantCursor: invalidCursor,
+				},
+			)
+		},
+	)
+	await env.OAUTH_KV.put(
+		'client:cursor-recovery-client',
+		JSON.stringify({ clientId: 'cursor-recovery-client' }),
+	)
+	await env.OAUTH_KV.put(
+		'grant:cursor-recovery-user:grant',
+		JSON.stringify({ clientId: 'cursor-recovery-client' }),
+	)
+
+	const result = await coordinator.run({
+		scheduledAt: Date.parse('2026-07-05T11:00:00.000Z'),
+	})
+	expect(result.phase).toBe('grants')
+	expect(result.checked).toBeGreaterThan(0)
+	await runInDurableObject(
+		coordinator,
+		async (_instance: OAuthPurgeCoordinator, state) => {
+			const continuation = await state.storage.get<PurgeContinuation>(
+				oauthPurgeContinuationStorageKey,
+			)
+			expect(continuation?.grantCursor).not.toBe(invalidCursor)
+			expect(continuation?.nextPhase).toBe('tokens')
+		},
+	)
+})
+
+test('OAuth purge coordinator serializes overlapping invocations', async () => {
+	const coordinator = getOAuthPurgeCoordinator()
+	await runInDurableObject(
+		coordinator,
+		async (_instance: OAuthPurgeCoordinator, state) =>
+			state.storage.deleteAll(),
+	)
+	await env.OAUTH_KV.put(
+		'client:overlap-client',
+		JSON.stringify({ clientId: 'overlap-client' }),
+	)
+	await Promise.all(
+		Array.from({ length: 51 }, (_, index) =>
+			env.OAUTH_KV.put(
+				`grant:overlap-user:${index.toString().padStart(3, '0')}`,
+				JSON.stringify({ clientId: 'overlap-client' }),
+			),
+		),
+	)
+
+	const [first, second] = await Promise.all([
+		coordinator.run({ scheduledAt: Date.parse('2026-07-05T11:05:00.000Z') }),
+		coordinator.run({ scheduledAt: Date.parse('2026-07-05T11:05:00.000Z') }),
+	])
+
+	expect([first.phase, second.phase]).toEqual(['grants', 'tokens'])
+	await runInDurableObject(
+		coordinator,
+		async (_instance: OAuthPurgeCoordinator, state) => {
+			const continuation = await state.storage.get<PurgeContinuation>(
+				oauthPurgeContinuationStorageKey,
+			)
+			expect(continuation?.nextPhase).toBe('grants')
+			expect(continuation?.grantCursor).toBeTruthy()
+		},
+	)
 })
 
 test('scheduled isolates a failing lane: logs it and keeps siblings and the invocation alive', async () => {
