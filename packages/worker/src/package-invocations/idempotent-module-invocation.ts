@@ -1,8 +1,8 @@
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
-import { withAccountWriteLease } from '#app/account-deletion-state.ts'
 import { persistableExecutionArtifacts } from '#mcp/downstream-mcp-result.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { runBundledModuleWithRegistry } from '#mcp/run-kody-registry.ts'
+import { withAccountWriteLease } from '#app/account-deletion-state.ts'
 import { type PackageRuntimeDebugContext } from '#worker/package-runtime/package-runtime-debug.ts'
 import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
 import { getEntitySourceById } from '#worker/repo/entity-sources.ts'
@@ -24,6 +24,7 @@ import { createRequestHash, resolveExistingInvocation } from './idempotency.ts'
 import {
 	ensureModuleArtifact,
 	isMissingPackageModuleError,
+	isTransientModuleArtifactError,
 } from './module-artifacts.ts'
 import {
 	buildExecutionErrorResponse,
@@ -33,9 +34,19 @@ import {
 import {
 	getPackageInvocationByKey,
 	insertPackageInvocationRow,
+	releasePackageInvocationClaim,
+	tryClaimStalePackageInvocation,
 	updatePackageInvocationResult,
 	type PackageInvocationStoredResponse,
 } from './repo.ts'
+
+export const packageInvocationStaleAfterMs = 15 * 60 * 1000
+const packageInvocationPollIntervalMs = 100
+const packageInvocationPollBudgetMs = 1_000
+
+function isStaleInvocation(updatedAt: string, now: Date) {
+	return Date.parse(updatedAt) <= now.getTime() - packageInvocationStaleAfterMs
+}
 
 export async function invokeSavedPackageModule(input: {
 	env: Env
@@ -63,9 +74,8 @@ export async function invokeSavedPackageModule(input: {
 				source: input.source,
 				topic: input.topic,
 			})
-			let existing: Awaited<ReturnType<typeof getPackageInvocationByKey>>
-			try {
-				existing = await getPackageInvocationByKey({
+			const lookupInvocation = async () =>
+				await getPackageInvocationByKey({
 					db: input.env.APP_DB,
 					userId: input.actor.userId,
 					tokenId: input.actor.tokenId,
@@ -73,6 +83,10 @@ export async function invokeSavedPackageModule(input: {
 					exportName: input.invocationName,
 					idempotencyKey: input.idempotencyKey,
 				})
+			let existing: Awaited<ReturnType<typeof getPackageInvocationByKey>>
+			let executionStarted = false
+			try {
+				existing = await lookupInvocation()
 			} catch (error) {
 				console.error('package invocation idempotency lookup failed', error)
 				return buildJsonErrorResponse({
@@ -83,79 +97,179 @@ export async function invokeSavedPackageModule(input: {
 					idempotencyKey: input.idempotencyKey,
 				})
 			}
+			let invocationId: string = crypto.randomUUID()
+			let claimUpdatedAt: string | null = null
 			if (existing) {
-				return resolveExistingInvocation({
-					record: existing,
-					requestHash,
-					idempotencyKey: input.idempotencyKey,
-				})
-			}
-
-			const invocationId = crypto.randomUUID()
-			let inserted: boolean
-			try {
-				inserted = await insertPackageInvocationRow({
-					db: input.env.APP_DB,
-					row: {
-						id: invocationId,
-						userId: input.actor.userId,
-						tokenId: input.actor.tokenId,
-						packageId: input.savedPackage.id,
-						packageKodyId: input.savedPackage.kodyId,
-						exportName: input.invocationName,
-						idempotencyKey: input.idempotencyKey,
+				if (
+					existing.request_hash !== requestHash ||
+					existing.status !== 'in_progress'
+				) {
+					return resolveExistingInvocation({
+						record: existing,
 						requestHash,
-						source: input.source,
-						topic: input.topic,
-						status: 'in_progress',
-					},
-				})
-			} catch (error) {
-				console.error(
-					'package invocation idempotency persistence failed',
-					error,
-				)
-				return buildJsonErrorResponse({
-					status: 500,
-					code: 'idempotency_persistence_failed',
-					message:
-						'Unable to persist the package invocation idempotency record. Please retry.',
-					idempotencyKey: input.idempotencyKey,
-				})
-			}
-			if (!inserted) {
-				let current: Awaited<ReturnType<typeof getPackageInvocationByKey>>
-				try {
-					current = await getPackageInvocationByKey({
-						db: input.env.APP_DB,
-						userId: input.actor.userId,
-						tokenId: input.actor.tokenId,
-						packageId: input.savedPackage.id,
-						exportName: input.invocationName,
-						idempotencyKey: input.idempotencyKey,
-					})
-				} catch (error) {
-					console.error('package invocation idempotency lookup failed', error)
-					return buildJsonErrorResponse({
-						status: 500,
-						code: 'idempotency_lookup_failed',
-						message:
-							'Unable to look up the package invocation idempotency record. Please retry.',
 						idempotencyKey: input.idempotencyKey,
 					})
 				}
-				if (!current) {
+				const pollDeadline = Date.now() + packageInvocationPollBudgetMs
+				while (
+					existing.status === 'in_progress' &&
+					!isStaleInvocation(existing.updated_at, new Date()) &&
+					Date.now() < pollDeadline
+				) {
+					await new Promise((resolve) =>
+						setTimeout(resolve, packageInvocationPollIntervalMs),
+					)
+					existing = await lookupInvocation()
+					if (!existing) break
+				}
+				if (!existing) {
 					return buildJsonErrorResponse({
 						status: 500,
 						code: 'idempotency_conflict_unresolved',
-						message:
-							'Package invocation idempotency insert conflicted but no existing row was found.',
+						message: 'Package invocation disappeared while polling.',
 						idempotencyKey: input.idempotencyKey,
 					})
 				}
-				return resolveExistingInvocation({
-					record: current,
-					requestHash,
+				if (existing.status !== 'in_progress') {
+					return resolveExistingInvocation({
+						record: existing,
+						requestHash,
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
+				const now = new Date()
+				if (!isStaleInvocation(existing.updated_at, now)) {
+					return resolveExistingInvocation({
+						record: existing,
+						requestHash,
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
+				const reclaimedAt = now.toISOString()
+				const reclaimed = await tryClaimStalePackageInvocation({
+					db: input.env.APP_DB,
+					id: existing.id,
+					userId: input.actor.userId,
+					expectedUpdatedAt: existing.updated_at,
+					staleBefore: new Date(
+						now.getTime() - packageInvocationStaleAfterMs,
+					).toISOString(),
+					now: reclaimedAt,
+				})
+				if (!reclaimed) {
+					const current = await lookupInvocation()
+					if (!current) {
+						return buildJsonErrorResponse({
+							status: 500,
+							code: 'idempotency_conflict_unresolved',
+							message: 'Stale package invocation reclaim conflicted.',
+							idempotencyKey: input.idempotencyKey,
+						})
+					}
+					return resolveExistingInvocation({
+						record: current,
+						requestHash,
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
+				invocationId = existing.id
+				claimUpdatedAt = reclaimedAt
+			}
+
+			if (!claimUpdatedAt) {
+				let insertResult: Awaited<ReturnType<typeof insertPackageInvocationRow>>
+				try {
+					insertResult = await insertPackageInvocationRow({
+						db: input.env.APP_DB,
+						row: {
+							id: invocationId,
+							userId: input.actor.userId,
+							tokenId: input.actor.tokenId,
+							packageId: input.savedPackage.id,
+							packageKodyId: input.savedPackage.kodyId,
+							exportName: input.invocationName,
+							idempotencyKey: input.idempotencyKey,
+							requestHash,
+							source: input.source,
+							topic: input.topic,
+							status: 'in_progress',
+						},
+					})
+				} catch (error) {
+					console.error(
+						'package invocation idempotency persistence failed',
+						error,
+					)
+					return buildJsonErrorResponse({
+						status: 500,
+						code: 'idempotency_persistence_failed',
+						message:
+							'Unable to persist the package invocation idempotency record. Please retry.',
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
+				if (insertResult.inserted) {
+					claimUpdatedAt = insertResult.claimUpdatedAt
+				} else {
+					let current: Awaited<ReturnType<typeof getPackageInvocationByKey>>
+					try {
+						current = await lookupInvocation()
+					} catch (error) {
+						console.error('package invocation idempotency lookup failed', error)
+						return buildJsonErrorResponse({
+							status: 500,
+							code: 'idempotency_lookup_failed',
+							message:
+								'Unable to look up the package invocation idempotency record. Please retry.',
+							idempotencyKey: input.idempotencyKey,
+						})
+					}
+					if (!current) {
+						return buildJsonErrorResponse({
+							status: 500,
+							code: 'idempotency_conflict_unresolved',
+							message:
+								'Package invocation idempotency insert conflicted but no existing row was found.',
+							idempotencyKey: input.idempotencyKey,
+						})
+					}
+					return resolveExistingInvocation({
+						record: current,
+						requestHash,
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
+			}
+			if (!claimUpdatedAt) {
+				throw new Error(
+					'Package invocation claim timestamp was not established.',
+				)
+			}
+			const persistClaimedResult = async (
+				status: 'completed' | 'failed',
+				response: PackageInvocationStoredResponse,
+			) => {
+				const updated = await updatePackageInvocationResult({
+					db: input.env.APP_DB,
+					id: invocationId,
+					userId: input.actor.userId,
+					status,
+					response,
+					claimUpdatedAt,
+				})
+				if (updated) return response
+				const current = await lookupInvocation()
+				if (current) {
+					return resolveExistingInvocation({
+						record: current,
+						requestHash,
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
+				return buildJsonErrorResponse({
+					status: 500,
+					code: 'idempotency_response_unavailable',
+					message: 'Package invocation result lost its recovery claim.',
 					idempotencyKey: input.idempotencyKey,
 				})
 			}
@@ -221,6 +335,7 @@ export async function invokeSavedPackageModule(input: {
 						topic: input.topic,
 					},
 				}
+				executionStarted = true
 				const executionResult = await runBundledModuleWithRegistry(
 					input.env,
 					callerContext,
@@ -375,15 +490,48 @@ export async function invokeSavedPackageModule(input: {
 						logs: executionResult.logs ?? [],
 					})
 				}
-				await updatePackageInvocationResult({
-					db: input.env.APP_DB,
-					id: invocationId,
-					userId: input.actor.userId,
-					status: executionResult.error ? 'failed' : 'completed',
+				return await persistClaimedResult(
+					executionResult.error ? 'failed' : 'completed',
 					response,
-				})
-				return response
+				)
 			} catch (error) {
+				if (
+					!executionStarted &&
+					!isMissingPackageModuleError(error) &&
+					isTransientModuleArtifactError(error)
+				) {
+					const released = await releasePackageInvocationClaim({
+						db: input.env.APP_DB,
+						id: invocationId,
+						userId: input.actor.userId,
+						claimUpdatedAt,
+					})
+					if (!released) {
+						const current = await lookupInvocation()
+						if (current?.status !== 'in_progress') {
+							return current
+								? resolveExistingInvocation({
+										record: current,
+										requestHash,
+										idempotencyKey: input.idempotencyKey,
+									})
+								: buildJsonErrorResponse({
+										status: 500,
+										code: 'idempotency_conflict_unresolved',
+										message:
+											'Transient artifact preparation lost its invocation claim.',
+										idempotencyKey: input.idempotencyKey,
+									})
+						}
+					}
+					return buildJsonErrorResponse({
+						status: 503,
+						code: 'artifact_preparation_failed',
+						message:
+							'Package artifact preparation failed before execution. Please retry.',
+						idempotencyKey: input.idempotencyKey,
+					})
+				}
 				if (isMissingPackageModuleError(error)) {
 					const response = buildJsonErrorResponse({
 						status: 404,
@@ -391,16 +539,10 @@ export async function invokeSavedPackageModule(input: {
 						message: getErrorMessage(error),
 						idempotencyKey: input.idempotencyKey,
 					})
-					await updatePackageInvocationResult({
-						db: input.env.APP_DB,
-						id: invocationId,
-						userId: input.actor.userId,
-						status: 'failed',
-						response,
-					}).catch(() => {
+					return await persistClaimedResult('failed', response).catch(() => {
 						// Best effort; preserve the original invocation error.
+						return response
 					})
-					return response
 				}
 				const response = buildJsonErrorResponse({
 					status: 500,
@@ -408,16 +550,10 @@ export async function invokeSavedPackageModule(input: {
 					message: getErrorMessage(error),
 					idempotencyKey: input.idempotencyKey,
 				})
-				await updatePackageInvocationResult({
-					db: input.env.APP_DB,
-					id: invocationId,
-					userId: input.actor.userId,
-					status: 'failed',
-					response,
-				}).catch(() => {
+				return await persistClaimedResult('failed', response).catch(() => {
 					// Best effort; preserve the original invocation error.
+					return response
 				})
-				return response
 			}
 		},
 	})

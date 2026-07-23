@@ -8,11 +8,28 @@ import {
 type BoundStatement = { sql: string; params: Array<unknown> }
 
 type RollupKeyRow = { user_id: string; metric: string; month: string }
+type EmailUsageRow = {
+	user_id: string
+	metric: string
+	month: string
+	event_count: number
+	error_count: number
+	total_duration_ms: number
+	total_cpu_ms: number
+	total_bytes: number
+}
 
-function createFakeDb(input: { existingRollups?: Array<RollupKeyRow> } = {}) {
+function createFakeDb(
+	input: {
+		existingRollups?: Array<RollupKeyRow>
+		emailUsageRows?: Array<EmailUsageRow>
+		liveUserIds?: Array<string>
+	} = {},
+) {
 	const rollups = input.existingRollups?.map((row) => ({ ...row })) ?? []
 	const batches: Array<Array<BoundStatement>> = []
 	const deletes: Array<BoundStatement> = []
+	const selects: Array<BoundStatement> = []
 	const db = {
 		prepare(sql: string) {
 			return {
@@ -21,6 +38,19 @@ function createFakeDb(input: { existingRollups?: Array<RollupKeyRow> } = {}) {
 						sql,
 						params,
 						async all() {
+							if (sql.includes('SELECT stable_user_id FROM users')) {
+								const allowed = new Set(input.liveUserIds ?? params.map(String))
+								return {
+									results: params
+										.map(String)
+										.filter((userId) => allowed.has(userId))
+										.map((stable_user_id) => ({ stable_user_id })),
+								}
+							}
+							if (sql.includes('FROM email_delivery_events event')) {
+								selects.push({ sql, params })
+								return { results: input.emailUsageRows ?? [] }
+							}
 							if (!sql.includes('SELECT user_id, metric FROM usage_rollups')) {
 								throw new Error(`Unsupported all query: ${sql}`)
 							}
@@ -34,10 +64,32 @@ function createFakeDb(input: { existingRollups?: Array<RollupKeyRow> } = {}) {
 							}
 						},
 						async run() {
+							if (sql.startsWith('UPDATE email_delivery_events')) {
+								return { meta: { changes: 0 } }
+							}
 							if (!sql.startsWith('DELETE FROM usage_rollups')) {
 								throw new Error(`Unsupported run query: ${sql}`)
 							}
 							deletes.push({ sql, params })
+							if (sql.includes('NOT EXISTS')) {
+								const months = new Set(params.slice(0, 2))
+								const live = new Set(input.liveUserIds ?? [])
+								let changes = 0
+								for (let index = rollups.length - 1; index >= 0; index -= 1) {
+									const row = rollups[index]
+									if (
+										row &&
+										months.has(row.month) &&
+										row.user_id !== 'system:email' &&
+										input.liveUserIds != null &&
+										!live.has(row.user_id)
+									) {
+										rollups.splice(index, 1)
+										changes += 1
+									}
+								}
+								return { meta: { changes } }
+							}
 							const month = params[0]
 							let changes = 0
 							for (let index = 1; index < params.length; index += 2) {
@@ -63,7 +115,7 @@ function createFakeDb(input: { existingRollups?: Array<RollupKeyRow> } = {}) {
 			return []
 		},
 	} as unknown as D1Database
-	return { db, batches, deletes, rollups }
+	return { db, batches, deletes, selects, rollups }
 }
 
 function createAggregationEnv(db: D1Database) {
@@ -76,10 +128,32 @@ function createAggregationEnv(db: D1Database) {
 }
 
 function stubFetchResponse(input: { status?: number; body: unknown }) {
+	let callIndex = 0
 	const fetchMock = vi.fn(async () => {
+		const isFirst = callIndex === 0
+		callIndex += 1
+		const body = isFirst ? input.body : { data: [] }
 		return new Response(
-			typeof input.body === 'string' ? input.body : JSON.stringify(input.body),
-			{ status: input.status ?? 200 },
+			typeof body === 'string' ? body : JSON.stringify(body),
+			{ status: isFirst ? (input.status ?? 200) : 200 },
+		)
+	})
+	vi.stubGlobal('fetch', fetchMock)
+	return Object.assign(fetchMock, {
+		[Symbol.dispose]() {
+			vi.unstubAllGlobals()
+		},
+	})
+}
+
+function stubFetchSequence(bodies: Array<unknown>) {
+	let index = 0
+	const fetchMock = vi.fn(async () => {
+		const body = bodies[index] ?? bodies.at(-1) ?? { data: [] }
+		index += 1
+		return new Response(
+			typeof body === 'string' ? body : JSON.stringify(body),
+			{ status: 200 },
 		)
 	})
 	vi.stubGlobal('fetch', fetchMock)
@@ -140,9 +214,9 @@ test('aggregateUsageRollups no-ops when the binding or credentials are missing',
 	expect(deletes).toHaveLength(0)
 })
 
-test('aggregateUsageRollups queries Analytics Engine month-to-date and upserts absolute values', async () => {
-	using fetchMock = stubFetchResponse({
-		body: {
+test('aggregateUsageRollups merges current and previous Analytics months with durable inbound usage', async () => {
+	using fetchMock = stubFetchSequence([
+		{
 			data: [
 				{
 					user_id: 'user-a',
@@ -175,21 +249,57 @@ test('aggregateUsageRollups queries Analytics Engine month-to-date and upserts a
 				},
 			],
 		},
+		{
+			data: [
+				{
+					user_id: 'user-c',
+					metric: 'email_received',
+					event_count: 5,
+					error_count: 2,
+					total_duration_ms: 100,
+					total_cpu_ms: 0,
+					total_bytes: 1000,
+				},
+			],
+		},
+	])
+	const { db, batches, selects } = createFakeDb({
+		emailUsageRows: [
+			{
+				user_id: 'user-a',
+				metric: 'email_received',
+				month: '2026-07',
+				event_count: 2,
+				error_count: 0,
+				total_duration_ms: 50,
+				total_cpu_ms: 0,
+				total_bytes: 4096,
+			},
+			{
+				user_id: 'user-c',
+				metric: 'email_received',
+				month: '2026-06',
+				event_count: 1,
+				error_count: 0,
+				total_duration_ms: 25,
+				total_cpu_ms: 0,
+				total_bytes: 512,
+			},
+		],
 	})
-	const { db, batches } = createFakeDb()
-	const now = new Date('2026-07-15T10:00:00.000Z')
+	const now = new Date('2026-07-01T00:00:30.000Z')
 
 	const result = await aggregateUsageRollups(createAggregationEnv(db), now)
 
 	expect(result).toEqual({
 		skipped: false,
 		month: '2026-07',
-		upsertedRows: 2,
+		upsertedRows: 4,
 		deletedRows: 0,
-		users: 2,
+		users: 3,
 	})
 
-	expect(fetchMock).toHaveBeenCalledTimes(1)
+	expect(fetchMock).toHaveBeenCalledTimes(2)
 	const [url, init] = fetchMock.mock.calls[0] as unknown as [
 		string,
 		RequestInit,
@@ -209,6 +319,15 @@ test('aggregateUsageRollups queries Analytics Engine month-to-date and upserts a
 	// into a later month (clock skew, backdated writes) inflate this month.
 	expect(query).toContain(`timestamp >= toDateTime('2026-07-01 00:00:00')`)
 	expect(query).toContain(`timestamp < toDateTime('2026-08-01 00:00:00')`)
+	const previousQuery = String(
+		(fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body,
+	)
+	expect(previousQuery).toContain(
+		`timestamp >= toDateTime('2026-06-01 00:00:00')`,
+	)
+	expect(previousQuery).toContain(
+		`timestamp < toDateTime('2026-07-01 00:00:00')`,
+	)
 	// Sampling-correct aggregates: counts and sums weight by _sample_interval.
 	expect(query).toContain('sum(_sample_interval) AS event_count')
 	expect(query).toContain(
@@ -218,10 +337,14 @@ test('aggregateUsageRollups queries Analytics Engine month-to-date and upserts a
 		'sum(double1 * _sample_interval) AS total_duration_ms',
 	)
 	expect(query).toContain('GROUP BY blob1, blob2')
+	expect(selects[0]?.sql).not.toContain('JOIN email_messages')
+	expect(selects[0]?.sql).toContain(`'$.usageMonth'`)
+	expect(selects[0]?.sql).toContain(`'$.usageBytes'`)
+	expect(selects[0]?.params).toEqual(['2026-07', '2026-06'])
 
 	expect(batches).toHaveLength(1)
 	const statements = batches[0] ?? []
-	expect(statements).toHaveLength(2)
+	expect(statements).toHaveLength(4)
 	expect(statements[0]?.sql).toContain('ON CONFLICT (user_id, metric, month)')
 	expect(statements[0]?.sql).toContain('event_count = excluded.event_count')
 	expect(statements[0]?.sql).not.toContain('event_count + ')
@@ -245,6 +368,28 @@ test('aggregateUsageRollups queries Analytics Engine month-to-date and upserts a
 		0,
 		0,
 		2048,
+		now.toISOString(),
+	])
+	expect(statements[2]?.params).toEqual([
+		'user-c',
+		'email_received',
+		'2026-06',
+		6,
+		2,
+		125,
+		0,
+		1512,
+		now.toISOString(),
+	])
+	expect(statements[3]?.params).toEqual([
+		'user-a',
+		'email_received',
+		'2026-07',
+		2,
+		0,
+		50,
+		0,
+		4096,
 		now.toISOString(),
 	])
 })
@@ -282,6 +427,56 @@ test('aggregateUsageRollups honors CLOUDFLARE_API_BASE_URL and the preview datas
 	expect(query).toContain(`timestamp >= toDateTime('2026-12-01 00:00:00')`)
 	expect(query).toContain(`timestamp < toDateTime('2027-01-01 00:00:00')`)
 	expect(batches).toHaveLength(0)
+})
+
+test('hourly aggregation cannot recreate rollups for deleting or deleted users', async () => {
+	using _fetchMock = stubFetchSequence([
+		{
+			data: ['user-live', 'user-deleting', 'user-deleted'].map((user_id) => ({
+				user_id,
+				metric: 'execute',
+				event_count: 1,
+				error_count: 0,
+				total_duration_ms: 0,
+				total_cpu_ms: 0,
+				total_bytes: 0,
+			})),
+		},
+		{ data: [] },
+	])
+	const { db, batches, rollups } = createFakeDb({
+		liveUserIds: ['user-live'],
+		existingRollups: [
+			{ user_id: 'user-deleting', metric: 'execute', month: '2026-07' },
+			{ user_id: 'user-deleted', metric: 'execute', month: '2026-07' },
+		],
+		emailUsageRows: [
+			{
+				user_id: 'user-deleting',
+				metric: 'email_received',
+				month: '2026-07',
+				event_count: 1,
+				error_count: 0,
+				total_duration_ms: 1,
+				total_cpu_ms: 0,
+				total_bytes: 10,
+			},
+		],
+	})
+
+	const result = await aggregateUsageRollups(
+		createAggregationEnv(db),
+		new Date('2026-07-15T10:00:00.000Z'),
+	)
+	expect(result).toMatchObject({
+		upsertedRows: 1,
+		deletedRows: 2,
+		users: 1,
+	})
+	expect(batches[0]?.map((statement) => statement.params[0])).toEqual([
+		'user-live',
+	])
+	expect(rollups).toEqual([])
 })
 
 test('aggregateUsageRollups deletes current-month rows absent from the Analytics Engine result', async () => {
@@ -331,9 +526,14 @@ test('aggregateUsageRollups deletes current-month rows absent from the Analytics
 		'execute',
 		'2026-07',
 	])
-	expect(deletes).toHaveLength(1)
-	expect(deletes[0]?.sql).toContain('DELETE FROM usage_rollups WHERE month = ?')
-	expect(deletes[0]?.params).toEqual([
+	const staleDeletes = deletes.filter(
+		(statement) => !statement.sql.includes(`user_id != 'system:email'`),
+	)
+	expect(staleDeletes).toHaveLength(1)
+	expect(staleDeletes[0]?.sql).toContain(
+		'DELETE FROM usage_rollups WHERE month = ?',
+	)
+	expect(staleDeletes[0]?.params).toEqual([
 		'2026-07',
 		'user-a',
 		'job_run',
@@ -377,9 +577,13 @@ test('aggregateUsageRollups chunks stale-row deletes under the bind-parameter ca
 
 	expect(result).toMatchObject({ upsertedRows: 1, deletedRows: 120 })
 	// 49 pairs per statement: 1 month param + 2 per pair = 99 binds max.
-	expect(deletes.map((statement) => statement.params.length)).toEqual([
-		99, 99, 45,
-	])
+	expect(
+		deletes
+			.filter(
+				(statement) => !statement.sql.includes(`user_id != 'system:email'`),
+			)
+			.map((statement) => statement.params.length),
+	).toEqual([99, 99, 45])
 	expect(rollups).toEqual([])
 })
 
@@ -392,7 +596,21 @@ test('aggregateUsageRollups keeps existing rollups when the Analytics Engine res
 		{ user_id: 'user-a', metric: 'execute', month: '2026-07' },
 		{ user_id: 'user-b', metric: 'job_run', month: '2026-07' },
 	]
-	const { db, deletes, rollups } = createFakeDb({ existingRollups })
+	const { db, batches, deletes, rollups } = createFakeDb({
+		existingRollups,
+		emailUsageRows: [
+			{
+				user_id: 'user-a',
+				metric: 'email_received',
+				month: '2026-07',
+				event_count: 1,
+				error_count: 0,
+				total_duration_ms: 10,
+				total_cpu_ms: 0,
+				total_bytes: 128,
+			},
+		],
+	})
 
 	const result = await aggregateUsageRollups(
 		createAggregationEnv(db),
@@ -406,7 +624,12 @@ test('aggregateUsageRollups keeps existing rollups when the Analytics Engine res
 		deletedRows: 0,
 		users: 0,
 	})
-	expect(deletes).toHaveLength(0)
+	expect(
+		deletes.filter(
+			(statement) => !statement.sql.includes(`user_id != 'system:email'`),
+		),
+	).toHaveLength(0)
+	expect(batches).toHaveLength(0)
 	expect(rollups).toEqual(existingRollups)
 })
 

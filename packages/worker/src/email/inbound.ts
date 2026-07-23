@@ -1,4 +1,5 @@
 import { isReservedUsername } from '#app/reserved-usernames.ts'
+import { withAccountWriteLease } from '#app/account-deletion-state.ts'
 import { findPublicUserIdentityByUsername } from '#app/user-lookup.ts'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
 import {
@@ -9,9 +10,7 @@ import {
 import {
 	assertWithinEntitlement,
 	assertWithinStorageBytesEntitlement,
-	consumeDailyEntitlement,
 	estimateEntitlementStorageEntryBytes,
-	refundDailyEntitlement,
 } from '#worker/entitlements/service.ts'
 import { recordUsage } from '#worker/usage/record-usage.ts'
 import {
@@ -20,53 +19,48 @@ import {
 	splitEmailLocalPart,
 } from './address.ts'
 import { ensureDefaultEmailInbox } from './default-inbox.ts'
-import { parseForwardableEmailMessage } from './parser.ts'
+import { processInboundDeliveryEffects } from './inbound-effects.ts'
+import {
+	parseForwardableEmailRawMime,
+	readForwardableEmailRawMime,
+} from './parser.ts'
+import {
+	adoptLegacyInboundDelivery,
+	buildInboundDelivery,
+	claimInboundDeliveryWindow,
+	claimInboundDeliveryStorage,
+	chargeSystemInboundDeliveryOnce,
+	chargeUserInboundDeliveryOnce,
+	getInboundDeliveryWindow,
+	getInboundDelivery,
+	markInboundDeliveryRejected,
+	pruneExpiredInboundDedupePointers,
+	reconcileStaleInboundDeliveries,
+	readSystemInboundReceiveCount,
+	readUserInboundReceiveCount,
+	releaseInboundDeliveryStorage,
+	systemInboundQuotaDay,
+	type InboundDelivery,
+	userInboundQuotaDay,
+} from './inbound-delivery.ts'
 import {
 	getPlatformEmailDomain,
 	getSystemEmailDomain,
 } from './platform-address.ts'
+import { deleteEmptyEmailThreads, getEmailMessageById } from './repo.ts'
 import {
-	createEmailThread,
-	findEmailThreadForInboundMessage,
-	insertEmailDeliveryEvent,
-	insertEmailMessageWithAttachments,
 	recordBoundedEmailRejectionEvent,
 	RetryableInboundStorageError,
-	touchEmailThread,
+	storeIdempotentInboundEmail,
 } from './service.ts'
 import {
-	dispatchInboundEmailSubscriptionEvents,
-	dispatchSystemInboundEmailSubscriptionEvents,
-} from './package-subscriptions.ts'
-import {
-	consumeSystemEmailDailyReceive,
 	countStoredSystemEmailMessages,
 	ensureSystemEmailInbox,
 	isSystemEmailLocal,
-	refundSystemEmailDailyReceive,
 	systemEmailLimits,
 	systemEmailOwnerId,
 	type SystemEmailLocal,
 } from './system-email.ts'
-
-/**
- * Best-effort refund of a pre-parse daily receive charge after a retryable
- * storage failure. Logs refund failures but never masks the original error.
- */
-async function refundReceiveQuotaAfterStorageFailure(input: {
-	refund: () => Promise<void>
-	logLabel: string
-}): Promise<void> {
-	try {
-		await input.refund()
-	} catch (refundError) {
-		console.error(input.logLabel, refundError)
-	}
-}
-
-type ParsedInboundEmail = Awaited<
-	ReturnType<typeof parseForwardableEmailMessage>
->
 
 /**
  * Rejection audit writes are best-effort (the SMTP reject already happened),
@@ -75,6 +69,24 @@ type ParsedInboundEmail = Awaited<
  */
 function warnRejectionAuditWriteFailed(error: unknown) {
 	console.warn('email-rejection-audit-write-failed', error)
+}
+
+async function rejectClaimedInboundDelivery(input: {
+	db: D1Database
+	message: ForwardableEmailMessage
+	delivery: InboundDelivery
+	reason: string
+}) {
+	const transitioned = await markInboundDeliveryRejected({
+		db: input.db,
+		delivery: input.delivery,
+		reason: input.reason,
+	}).catch((error: unknown) => {
+		warnRejectionAuditWriteFailed(error)
+		throw error
+	})
+	if (transitioned) input.message.setReject(input.reason)
+	return transitioned
 }
 
 function estimateInboundEmailStorageBytes(input: {
@@ -97,91 +109,18 @@ function estimateInboundEmailStorageBytes(input: {
 async function parseAndStoreInboundEmail(input: {
 	db: D1Database
 	blobs: R2Bucket
-	message: ForwardableEmailMessage
-	recipient: string
-	userId: string
-	inboxId: string
-	maxMessageBytes: number
-	onParseRejected: (reason: string) => Promise<void>
+	delivery: InboundDelivery
+	parsed: Awaited<ReturnType<typeof parseForwardableEmailRawMime>>
 }) {
-	let parsed: ParsedInboundEmail
-	try {
-		parsed = await parseForwardableEmailMessage(input.message, {
-			maxRawSize: input.maxMessageBytes,
-		})
-	} catch (error) {
-		const reason =
-			error instanceof Error ? error.message : 'Failed to parse inbound email.'
-		input.message.setReject(reason)
-		await input.onParseRejected(reason)
-		return null
-	}
 	const now = new Date().toISOString()
-	const subjectNormalized = normalizeSubject(parsed.subject)
-	// Durable commit boundary: thread prework + message/attachment storage are
-	// pre-commit (RetryableInboundStorageError → refund + Email Routing retry).
-	// touchEmailThread / received delivery-event writes are post-commit and must
-	// not throw after the message row is durable (retry would duplicate mail).
-	let thread
-	let stored
 	try {
-		const existingThread = await findEmailThreadForInboundMessage({
-			db: input.db,
-			userId: input.userId,
-			inboxId: input.inboxId,
-			references: parsed.references,
-			inReplyToHeader: parsed.inReplyTo,
-		})
-		thread =
-			existingThread ??
-			(await createEmailThread({
-				db: input.db,
-				userId: input.userId,
-				inboxId: input.inboxId,
-				subjectNormalized,
-				rootMessageIdHeader: parsed.messageId,
-				lastMessageAt: now,
-			}))
-		stored = await insertEmailMessageWithAttachments({
+		return await storeIdempotentInboundEmail({
 			db: input.db,
 			blobs: input.blobs,
-			message: {
-				direction: 'inbound',
-				userId: input.userId,
-				inboxId: input.inboxId,
-				threadId: thread.id,
-				senderIdentityId: null,
-				fromAddress: parsed.headerFrom,
-				envelopeFrom: parsed.envelopeFrom,
-				toAddresses: parsed.to.map((entry) => entry.address),
-				ccAddresses: parsed.cc.map((entry) => entry.address),
-				bccAddresses: parsed.bcc.map((entry) => entry.address),
-				replyToAddresses: parsed.replyTo.map((entry) => entry.address),
-				subject: parsed.subject,
-				messageIdHeader: parsed.messageId,
-				inReplyToHeader: parsed.inReplyTo,
-				references: parsed.references,
-				headers: parsed.headers,
-				authResults: parsed.authResults,
-				textBody: parsed.textBody,
-				htmlBody: parsed.htmlBody,
-				rawMime: parsed.rawMime,
-				rawSize: parsed.rawSize,
-				processingStatus: 'stored',
-				providerMessageId: null,
-				error: null,
-				receivedAt: now,
-				sentAt: null,
-			},
-			attachments: parsed.attachments.map((attachment) => ({
-				filename: attachment.filename,
-				contentType: attachment.contentType,
-				contentId: attachment.contentId,
-				disposition: attachment.disposition,
-				size: attachment.size,
-				storageKind: 'raw-mime',
-				storageKey: null,
-			})),
+			delivery: input.delivery,
+			parsed: input.parsed,
+			subjectNormalized: normalizeSubject(input.parsed.subject),
+			now,
 		})
 	} catch (error) {
 		if (error instanceof RetryableInboundStorageError) throw error
@@ -190,33 +129,57 @@ async function parseAndStoreInboundEmail(input: {
 			error,
 		)
 	}
+}
+
+async function cleanupInboundDurability(input: {
+	db: D1Database
+	blobs: R2Bucket
+	userId: string
+}) {
 	try {
-		await touchEmailThread({
+		await reconcileStaleInboundDeliveries(input)
+		await pruneExpiredInboundDedupePointers({
 			db: input.db,
-			threadId: thread.id,
-			lastMessageAt: now,
-		})
-		await insertEmailDeliveryEvent({
-			db: input.db,
-			messageId: stored.id,
 			userId: input.userId,
-			inboxId: input.inboxId,
-			eventType: 'received',
-			provider: 'cloudflare-email-routing',
-			detail: {
-				recipient: input.recipient,
-				envelope_from: parsed.envelopeFrom,
-				from_address: parsed.headerFrom,
-			},
+		})
+		await deleteEmptyEmailThreads({
+			db: input.db,
+			userId: input.userId,
+			before: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+			limit: 20,
 		})
 	} catch (error) {
-		console.error(
-			'inbound-email-post-commit-bookkeeping-failed',
-			stored.id,
-			error,
-		)
+		console.warn('inbound-email-durability-cleanup-failed', input.userId, error)
 	}
-	return stored
+}
+
+async function scheduleInboundDeliveryEffects(input: {
+	env: Parameters<typeof processInboundDeliveryEffects>[0]['env']
+	userId: string
+	deliveryId: string
+	expectedFinalizationToken?: string
+	durationMs?: number
+	ctx?: ExecutionContext
+	logLabel: string
+}) {
+	const promise = processInboundDeliveryEffects({
+		env: input.env,
+		userId: input.userId,
+		deliveryId: input.deliveryId,
+		expectedFinalizationToken: input.expectedFinalizationToken,
+		durationMs: input.durationMs,
+	})
+	if (input.ctx) {
+		input.ctx.waitUntil(
+			promise.catch((error) => {
+				console.error(input.logLabel, error)
+			}),
+		)
+		return
+	}
+	await promise.catch((error) => {
+		console.error(input.logLabel, error)
+	})
 }
 
 export async function handleInboundEmail(
@@ -290,215 +253,372 @@ export async function handleInboundEmail(
 	}
 
 	const userId = identity.mcpUserId
-	// Require email + canonical stable id together (same contract as
-	// getUserPlan / isAccountEmailVerified) so a mismatched identity pair
-	// cannot apply another account's plan or verification state.
-	const accountRow = await env.APP_DB.prepare(
-		`SELECT plan, stripe_plan, email_verified_at FROM users
-			WHERE email = ? AND stable_user_id = ?`,
-	)
-		.bind(identity.email, userId)
-		.first<{
-			plan: string
-			stripe_plan: string | null
-			email_verified_at: string | null
-		}>()
-	const account = {
-		email: identity.email,
-		plan: resolveEffectivePlan(
-			// Defensive: missing row or unexpected stored value still fails open.
-			parseStoredPlanName(accountRow?.plan),
-			accountRow?.stripe_plan ?? null,
-		),
-		emailVerified: Boolean(accountRow?.email_verified_at),
-	}
-
-	const provisioned = await ensureDefaultEmailInbox({
+	return await withAccountWriteLease({
 		db: env.APP_DB,
-		userId,
-		username: identity.username,
-		domain: platformDomain,
-	})
-	if (!provisioned) {
-		message.setReject('Email inbox is unavailable.')
-		return
-	}
-	const { inbox } = provisioned
-	if (!inbox.enabled) {
-		message.setReject('Email inbox is disabled.')
-		return
-	}
+		stableUserId: userId,
+		async write() {
+			// Require email + canonical stable id together (same contract as
+			// getUserPlan / isAccountEmailVerified) so a mismatched identity pair
+			// cannot apply another account's plan or verification state.
+			const accountRow = await env.APP_DB.prepare(
+				`SELECT plan, stripe_plan, email_verified_at FROM users
+			WHERE email = ? AND stable_user_id = ?`,
+			)
+				.bind(identity.email, userId)
+				.first<{
+					plan: string
+					stripe_plan: string | null
+					email_verified_at: string | null
+				}>()
+			const account = {
+				email: identity.email,
+				plan: resolveEffectivePlan(
+					// Defensive: missing row or unexpected stored value still fails open.
+					parseStoredPlanName(accountRow?.plan),
+					accountRow?.stripe_plan ?? null,
+				),
+				emailVerified: Boolean(accountRow?.email_verified_at),
+			}
 
-	const receiveStartedAtMs = Date.now()
-	const recordReceiveUsage = async (input: {
-		entityId?: string | null
-		outcome: 'success' | 'error'
-	}) => {
-		await recordUsage(env, {
-			userId,
-			eventType: 'email_received',
-			entityId: input.entityId ?? null,
-			bytes: message.rawSize,
-			durationMs: Date.now() - receiveStartedAtMs,
-			outcome: input.outcome,
-		})
-	}
+			const provisioned = await ensureDefaultEmailInbox({
+				db: env.APP_DB,
+				userId,
+				username: identity.username,
+				domain: platformDomain,
+			})
+			if (!provisioned) {
+				message.setReject('Email inbox is unavailable.')
+				return
+			}
+			const { inbox } = provisioned
+			if (!inbox.enabled) {
+				message.setReject('Email inbox is disabled.')
+				return
+			}
 
-	// Inbound volume is attacker-controlled (anyone can send to a
-	// {username}@<platform domain> address), so every fail-closed gate runs
-	// before any parsing work, cheapest rejection first: verified account,
-	// per-message size cap, storage bytes, per-day receive rate, and
-	// stored-message cap (entitlements, including max-plan email caps).
+			const receiveStartedAtMs = Date.now()
+			const recordReceiveUsage = async (input: {
+				entityId?: string | null
+				outcome: 'success' | 'error'
+			}) => {
+				await recordUsage(env, {
+					userId,
+					eventType: 'email_received',
+					entityId: input.entityId ?? null,
+					bytes: message.rawSize,
+					durationMs: Date.now() - receiveStartedAtMs,
+					outcome: input.outcome,
+				})
+			}
 
-	// Verified-account gate first: an unverified account can never receive
-	// mail, so the attempt must not consume any of the daily receive quota
-	// or trip the other counters. Rejection rows go through the bounded
-	// recorder because unverified-alias floods are the same
-	// attacker-controlled row-growth shape as over-quota floods.
-	if (!account.emailVerified) {
-		const reason = 'Account email is not verified.'
-		message.setReject(reason)
-		await recordBoundedEmailRejectionEvent({
-			db: env.APP_DB,
-			userId,
-			inboxId: inbox.id,
-			recipient,
-			reason,
-			phase: 'account-verification',
-		}).catch(warnRejectionAuditWriteFailed)
-		await recordReceiveUsage({ outcome: 'error' })
-		return
-	}
+			// Inbound volume is attacker-controlled (anyone can send to a
+			// {username}@<platform domain> address), so every fail-closed gate runs
+			// before any parsing work, cheapest rejection first: verified account,
+			// per-message size cap, storage bytes, per-day receive rate, and
+			// stored-message cap (entitlements, including max-plan email caps).
 
-	// The plan's per-message cap also becomes the parser's raw-MIME ceiling
-	// so the two size gates can never disagree.
-	const maxMessageBytes = resolveEmailResourceLimit(
-		account.plan,
-		'email_message_bytes',
-	)
-	// Captured at consume time so a storage-failure refund uses the same UTC day.
-	let receiveQuotaNow: Date | null = null
-	try {
-		// Size first: an oversize message is rejected without consuming any
-		// of the owner's daily receive quota (griefing resistance) and
-		// without touching the counters.
-		await assertWithinEntitlement({
-			db: env.APP_DB,
-			userId,
-			email: account.email,
-			resource: 'email_message_bytes',
-			requested: 0,
-			getCurrent: async () => message.rawSize,
-		})
-		await assertWithinStorageBytesEntitlement({
-			db: env.APP_DB,
-			userId,
-			email: account.email,
-			requested: estimateInboundEmailStorageBytes({ message, recipient }),
-		})
-		receiveQuotaNow = new Date()
-		await consumeDailyEntitlement({
-			db: env.APP_DB,
-			userId,
-			email: account.email,
-			resource: 'email_receives_per_day',
-			now: receiveQuotaNow,
-		})
-		// Check-then-insert: a concurrent burst can overshoot the stored cap
-		// by a few rows, which is the documented row-count-limit trade-off
-		// (see entitlements.md "Concurrency") — this is a denial-of-wallet
-		// backstop, not billing-grade accounting.
-		await assertWithinEntitlement({
-			db: env.APP_DB,
-			userId,
-			email: account.email,
-			resource: 'stored_email_messages',
-		})
-	} catch (error) {
-		if (!isEntitlementLimitError(error)) throw error
-		// The SMTP reject reason goes to the arbitrary sender; keep it
-		// generic and store the detailed entitlement message for the owner.
-		// Rejection rows are bounded per inbox per day because over-quota
-		// traffic is exactly the flood these limits exist to absorb.
-		message.setReject('Recipient mailbox is over quota.')
-		await recordBoundedEmailRejectionEvent({
-			db: env.APP_DB,
-			userId,
-			inboxId: inbox.id,
-			recipient,
-			reason: error.message,
-			phase:
-				error.details.resource === 'email_message_bytes'
-					? 'size'
-					: 'entitlement',
-		}).catch(warnRejectionAuditWriteFailed)
-		await recordReceiveUsage({ outcome: 'error' })
-		return
-	}
-
-	let stored
-	try {
-		stored = await parseAndStoreInboundEmail({
-			db: env.APP_DB,
-			blobs: env.EMAIL_BLOBS,
-			message,
-			recipient,
-			userId,
-			inboxId: inbox.id,
-			maxMessageBytes,
-			async onParseRejected(reason) {
-				// Parse failures keep one event per attempt: unlike quota/size
-				// rejections they are bounded by the daily receive quota (the
-				// counter was already consumed above), and the per-attempt detail
-				// is useful for the owner to debug a misbehaving sender.
-				await insertEmailDeliveryEvent({
+			// Verified-account gate first: an unverified account can never receive
+			// mail, so the attempt must not consume any of the daily receive quota
+			// or trip the other counters. Rejection rows go through the bounded
+			// recorder because unverified-alias floods are the same
+			// attacker-controlled row-growth shape as over-quota floods.
+			if (!account.emailVerified) {
+				const reason = 'Account email is not verified.'
+				message.setReject(reason)
+				await recordBoundedEmailRejectionEvent({
 					db: env.APP_DB,
 					userId,
 					inboxId: inbox.id,
-					eventType: 'rejected',
-					provider: 'cloudflare-email-routing',
-					detail: {
-						recipient,
-						reason,
-						phase: 'parse',
-					},
+					recipient,
+					reason,
+					phase: 'account-verification',
 				}).catch(warnRejectionAuditWriteFailed)
 				await recordReceiveUsage({ outcome: 'error' })
-			},
-		})
-	} catch (error) {
-		// Only typed pre-commit failures refund + retry. Post-commit
-		// bookkeeping is swallowed inside parseAndStoreInboundEmail.
-		if (!(error instanceof RetryableInboundStorageError)) throw error
-		const chargedAt = receiveQuotaNow
-		if (chargedAt) {
-			await refundReceiveQuotaAfterStorageFailure({
-				logLabel: 'email-receives-daily-refund-failed',
-				refund: () =>
-					refundDailyEntitlement({
+				return
+			}
+
+			try {
+				// Size first: an oversize message is rejected without consuming any
+				// of the owner's daily receive quota (griefing resistance) and
+				// without touching the counters.
+				await assertWithinEntitlement({
+					db: env.APP_DB,
+					userId,
+					email: account.email,
+					resource: 'email_message_bytes',
+					requested: 0,
+					getCurrent: async () => message.rawSize,
+				})
+			} catch (error) {
+				if (!isEntitlementLimitError(error)) throw error
+				// The SMTP reject reason goes to the arbitrary sender; keep it
+				// generic and store the detailed entitlement message for the owner.
+				// Rejection rows are bounded per inbox per day because over-quota
+				// traffic is exactly the flood these limits exist to absorb.
+				message.setReject('Recipient mailbox is over quota.')
+				await recordBoundedEmailRejectionEvent({
+					db: env.APP_DB,
+					userId,
+					inboxId: inbox.id,
+					recipient,
+					reason: error.message,
+					phase:
+						error.details.resource === 'email_message_bytes'
+							? 'size'
+							: 'entitlement',
+				}).catch(warnRejectionAuditWriteFailed)
+				await recordReceiveUsage({ outcome: 'error' })
+				return
+			}
+
+			await cleanupInboundDurability({
+				db: env.APP_DB,
+				blobs: env.EMAIL_BLOBS,
+				userId,
+			})
+			let rawMime: string
+			try {
+				rawMime = await readForwardableEmailRawMime(message)
+			} catch (error) {
+				throw new RetryableInboundStorageError(
+					'Failed to read inbound raw MIME; delivery should be retried.',
+					error,
+				)
+			}
+			const quotaNow = new Date()
+			const candidateDelivery = await buildInboundDelivery({
+				userId,
+				inboxId: inbox.id,
+				recipient,
+				envelopeFrom: message.from,
+				rawMime,
+				quotaDay: userInboundQuotaDay(quotaNow),
+				now: quotaNow,
+			})
+			const activeWindow = await getInboundDeliveryWindow({
+				db: env.APP_DB,
+				userId,
+				fingerprint: candidateDelivery.fingerprint,
+				now: quotaNow,
+			})
+			let delivery = activeWindow ?? candidateDelivery
+			let existingDelivery =
+				(await getInboundDelivery({
+					db: env.APP_DB,
+					userId,
+					deliveryId: delivery.deliveryId,
+				})) ??
+				(await adoptLegacyInboundDelivery({
+					db: env.APP_DB,
+					blobs: env.EMAIL_BLOBS,
+					delivery,
+					rawMime,
+					rawSize: message.rawSize,
+					now: quotaNow,
+				}))
+			if (!existingDelivery) {
+				try {
+					// New deliveries check storage bytes and stored-message caps
+					// before their durable quota claim. A retry with an existing
+					// ledger bypasses both so already-charged mail can still repair
+					// after unrelated writes fill the mailbox.
+					await assertWithinStorageBytesEntitlement({
 						db: env.APP_DB,
 						userId,
-						resource: 'email_receives_per_day',
-						now: chargedAt,
-					}),
+						email: account.email,
+						requested: estimateInboundEmailStorageBytes({
+							message,
+							recipient,
+						}),
+					})
+					await assertWithinEntitlement({
+						db: env.APP_DB,
+						userId,
+						email: account.email,
+						resource: 'stored_email_messages',
+					})
+					const receiveLimit = resolveEmailResourceLimit(
+						account.plan,
+						'email_receives_per_day',
+					)
+					const receivesToday = await readUserInboundReceiveCount({
+						db: env.APP_DB,
+						userId,
+						day: userInboundQuotaDay(quotaNow),
+					})
+					if (receivesToday >= receiveLimit) {
+						message.setReject('Recipient mailbox is over quota.')
+						await recordBoundedEmailRejectionEvent({
+							db: env.APP_DB,
+							userId,
+							inboxId: inbox.id,
+							recipient,
+							reason: `Daily receive cap ${receiveLimit} reached.`,
+							phase: 'entitlement',
+						}).catch(warnRejectionAuditWriteFailed)
+						await recordReceiveUsage({ outcome: 'error' })
+						return
+					}
+				} catch (error) {
+					if (!isEntitlementLimitError(error)) throw error
+					message.setReject('Recipient mailbox is over quota.')
+					await recordBoundedEmailRejectionEvent({
+						db: env.APP_DB,
+						userId,
+						inboxId: inbox.id,
+						recipient,
+						reason: error.message,
+						phase: 'entitlement',
+					}).catch(warnRejectionAuditWriteFailed)
+					await recordReceiveUsage({ outcome: 'error' })
+					return
+				}
+			}
+			if (!activeWindow) {
+				delivery = await claimInboundDeliveryWindow({
+					db: env.APP_DB,
+					delivery: candidateDelivery,
+					now: quotaNow,
+				})
+				if (
+					!existingDelivery ||
+					existingDelivery.deliveryId !== delivery.deliveryId
+				) {
+					existingDelivery =
+						(await getInboundDelivery({
+							db: env.APP_DB,
+							userId,
+							deliveryId: delivery.deliveryId,
+						})) ??
+						(await adoptLegacyInboundDelivery({
+							db: env.APP_DB,
+							blobs: env.EMAIL_BLOBS,
+							delivery,
+							rawMime,
+							rawSize: message.rawSize,
+							now: quotaNow,
+						}))
+				}
+			}
+			let claimedDelivery: InboundDelivery
+			try {
+				claimedDelivery =
+					existingDelivery ??
+					(await chargeUserInboundDeliveryOnce({
+						db: env.APP_DB,
+						delivery: {
+							...delivery,
+							quotaDay: userInboundQuotaDay(quotaNow),
+						},
+						plan: account.plan,
+						limit: resolveEmailResourceLimit(
+							account.plan,
+							'email_receives_per_day',
+						),
+						now: quotaNow,
+					}))
+			} catch (error) {
+				if (!isEntitlementLimitError(error)) throw error
+				message.setReject('Recipient mailbox is over quota.')
+				await recordBoundedEmailRejectionEvent({
+					db: env.APP_DB,
+					userId,
+					inboxId: inbox.id,
+					recipient,
+					reason: error.message,
+					phase: 'entitlement',
+				}).catch(warnRejectionAuditWriteFailed)
+				await recordReceiveUsage({ outcome: 'error' })
+				return
+			}
+			if (claimedDelivery.state === 'rejected') {
+				message.setReject(
+					claimedDelivery.rejectionReason ?? 'Failed to parse inbound email.',
+				)
+				return
+			}
+			if (claimedDelivery.state === 'received') {
+				const existing = await getEmailMessageById({
+					db: env.APP_DB,
+					userId,
+					messageId: claimedDelivery.messageId,
+				})
+				if (existing) {
+					await scheduleInboundDeliveryEffects({
+						env,
+						userId,
+						deliveryId: claimedDelivery.deliveryId,
+						durationMs: Date.now() - receiveStartedAtMs,
+						ctx: _ctx,
+						logLabel: 'Inbound email effect reconciliation failed',
+					})
+					return
+				}
+			}
+			let parsed
+			try {
+				parsed = await parseForwardableEmailRawMime(message, rawMime)
+			} catch (error) {
+				const reason =
+					error instanceof Error
+						? error.message
+						: 'Failed to parse inbound email.'
+				const rejected = await rejectClaimedInboundDelivery({
+					db: env.APP_DB,
+					message,
+					delivery: claimedDelivery,
+					reason,
+				})
+				if (!rejected) return
+				await recordReceiveUsage({ outcome: 'error' })
+				return
+			}
+			const storageClaim = await claimInboundDeliveryStorage({
+				db: env.APP_DB,
+				delivery: claimedDelivery,
+				expectedAttachmentCount: parsed.attachments.length,
+				usageStartedAt: new Date(receiveStartedAtMs).toISOString(),
 			})
-		}
-		throw error
-	}
-	if (!stored) return
-	await recordReceiveUsage({ entityId: stored.id, outcome: 'success' })
-	const dispatchPromise = dispatchInboundEmailSubscriptionEvents({
-		env,
-		userId,
-		message: stored,
+			if (!storageClaim.claimed) {
+				if (storageClaim.delivery?.state === 'received') return
+				throw new RetryableInboundStorageError(
+					'Inbound delivery is already being stored; retry the stable delivery.',
+				)
+			}
+			let storedResult
+			try {
+				storedResult = await parseAndStoreInboundEmail({
+					db: env.APP_DB,
+					blobs: env.EMAIL_BLOBS,
+					delivery: storageClaim.delivery,
+					parsed,
+				})
+			} catch (error) {
+				await releaseInboundDeliveryStorage({
+					db: env.APP_DB,
+					delivery: storageClaim.delivery,
+				}).catch((releaseError) => {
+					console.error(
+						'inbound-email-storage-lease-release-failed',
+						storageClaim.delivery.deliveryId,
+						releaseError,
+					)
+				})
+				throw error
+			}
+			if (!storedResult.wonFinalization) return
+			await scheduleInboundDeliveryEffects({
+				env,
+				userId,
+				deliveryId: storedResult.finalizedDelivery.deliveryId,
+				expectedFinalizationToken:
+					storedResult.finalizedDelivery.finalizationToken,
+				durationMs: Date.now() - receiveStartedAtMs,
+				ctx: _ctx,
+				logLabel: 'Inbound email effect dispatch failed',
+			})
+		},
 	})
-	if (_ctx) {
-		_ctx.waitUntil(dispatchPromise)
-	} else {
-		void dispatchPromise.catch((error) => {
-			console.error('Inbound email package subscription dispatch failed', error)
-		})
-	}
 }
 
 async function handleSystemInboundEmail(input: {
@@ -555,14 +675,126 @@ async function handleSystemInboundEmail(input: {
 		return
 	}
 
-	// Same-day key for consume + possible storage-failure refund.
-	const receiveQuotaNow = new Date()
-	const receivesToday = await consumeSystemEmailDailyReceive({
+	await cleanupInboundDurability({
 		db: input.env.APP_DB,
-		localPart: input.localPart,
-		now: receiveQuotaNow,
+		blobs: input.env.EMAIL_BLOBS,
+		userId: systemEmailOwnerId,
 	})
-	if (receivesToday === null) {
+	let rawMime: string
+	try {
+		rawMime = await readForwardableEmailRawMime(input.message)
+	} catch (error) {
+		throw new RetryableInboundStorageError(
+			'Failed to read inbound raw MIME; delivery should be retried.',
+			error,
+		)
+	}
+	const quotaNow = new Date()
+	const candidateDelivery = await buildInboundDelivery({
+		userId: systemEmailOwnerId,
+		inboxId: inbox.id,
+		recipient: input.recipient,
+		envelopeFrom: input.message.from,
+		rawMime,
+		quotaDay: systemInboundQuotaDay(quotaNow),
+		now: quotaNow,
+	})
+	const activeWindow = await getInboundDeliveryWindow({
+		db: input.env.APP_DB,
+		userId: systemEmailOwnerId,
+		fingerprint: candidateDelivery.fingerprint,
+		now: quotaNow,
+	})
+	let delivery = activeWindow ?? candidateDelivery
+	let existingDelivery =
+		(await getInboundDelivery({
+			db: input.env.APP_DB,
+			userId: systemEmailOwnerId,
+			deliveryId: delivery.deliveryId,
+		})) ??
+		(await adoptLegacyInboundDelivery({
+			db: input.env.APP_DB,
+			blobs: input.env.EMAIL_BLOBS,
+			delivery,
+			rawMime,
+			rawSize: input.message.rawSize,
+			now: quotaNow,
+		}))
+	if (!existingDelivery) {
+		const storedMessages = await countStoredSystemEmailMessages({
+			db: input.env.APP_DB,
+		})
+		if (storedMessages >= systemEmailLimits.maxStoredMessages) {
+			input.message.setReject('Recipient mailbox is over quota.')
+			await recordBoundedEmailRejectionEvent({
+				db: input.env.APP_DB,
+				userId: systemEmailOwnerId,
+				inboxId: inbox.id,
+				recipient: input.recipient,
+				reason: `System inbox stored-message cap ${systemEmailLimits.maxStoredMessages} reached.`,
+				phase: 'system-limit',
+			}).catch(warnRejectionAuditWriteFailed)
+			await recordReceiveUsage({ outcome: 'error' })
+			return
+		}
+		const receivesToday = await readSystemInboundReceiveCount({
+			db: input.env.APP_DB,
+			localPart: input.localPart,
+			day: systemInboundQuotaDay(quotaNow),
+		})
+		if (receivesToday >= systemEmailLimits.maxReceivesPerDay) {
+			input.message.setReject('Recipient mailbox is over quota.')
+			await recordBoundedEmailRejectionEvent({
+				db: input.env.APP_DB,
+				userId: systemEmailOwnerId,
+				inboxId: inbox.id,
+				recipient: input.recipient,
+				reason: `System inbox daily receive cap ${systemEmailLimits.maxReceivesPerDay} reached for ${input.localPart}.`,
+				phase: 'system-limit',
+			}).catch(warnRejectionAuditWriteFailed)
+			await recordReceiveUsage({ outcome: 'error' })
+			return
+		}
+	}
+	if (!activeWindow) {
+		delivery = await claimInboundDeliveryWindow({
+			db: input.env.APP_DB,
+			delivery: candidateDelivery,
+			now: quotaNow,
+		})
+		if (
+			!existingDelivery ||
+			existingDelivery.deliveryId !== delivery.deliveryId
+		) {
+			existingDelivery =
+				(await getInboundDelivery({
+					db: input.env.APP_DB,
+					userId: systemEmailOwnerId,
+					deliveryId: delivery.deliveryId,
+				})) ??
+				(await adoptLegacyInboundDelivery({
+					db: input.env.APP_DB,
+					blobs: input.env.EMAIL_BLOBS,
+					delivery,
+					rawMime,
+					rawSize: input.message.rawSize,
+					now: quotaNow,
+				}))
+		}
+	}
+	const claim = existingDelivery
+		? { delivery: existingDelivery, overLimit: false as const }
+		: await chargeSystemInboundDeliveryOnce({
+				db: input.env.APP_DB,
+				delivery: {
+					...delivery,
+					quotaDay: systemInboundQuotaDay(quotaNow),
+				},
+				localPart: input.localPart,
+				limit: systemEmailLimits.maxReceivesPerDay,
+				now: quotaNow,
+			})
+	if (claim.overLimit || !claim.delivery) {
 		input.message.setReject('Recipient mailbox is over quota.')
 		await recordBoundedEmailRejectionEvent({
 			db: input.env.APP_DB,
@@ -575,80 +807,88 @@ async function handleSystemInboundEmail(input: {
 		await recordReceiveUsage({ outcome: 'error' })
 		return
 	}
-
-	const storedMessages = await countStoredSystemEmailMessages({
-		db: input.env.APP_DB,
-	})
-	if (storedMessages >= systemEmailLimits.maxStoredMessages) {
-		input.message.setReject('Recipient mailbox is over quota.')
-		await recordBoundedEmailRejectionEvent({
+	const claimedDelivery = claim.delivery
+	if (claimedDelivery.state === 'rejected') {
+		input.message.setReject(
+			claimedDelivery.rejectionReason ?? 'Failed to parse inbound email.',
+		)
+		return
+	}
+	if (claimedDelivery.state === 'received') {
+		const existing = await getEmailMessageById({
 			db: input.env.APP_DB,
 			userId: systemEmailOwnerId,
-			inboxId: inbox.id,
-			recipient: input.recipient,
-			reason: `System inbox stored-message cap ${systemEmailLimits.maxStoredMessages} reached.`,
-			phase: 'system-limit',
-		}).catch(warnRejectionAuditWriteFailed)
+			messageId: claimedDelivery.messageId,
+		})
+		if (existing) {
+			await scheduleInboundDeliveryEffects({
+				env: input.env,
+				userId: systemEmailOwnerId,
+				deliveryId: claimedDelivery.deliveryId,
+				durationMs: Date.now() - receiveStartedAtMs,
+				ctx: input.ctx,
+				logLabel: 'System inbound email effect reconciliation failed',
+			})
+			return
+		}
+	}
+	let parsed
+	try {
+		parsed = await parseForwardableEmailRawMime(input.message, rawMime)
+	} catch (error) {
+		const reason =
+			error instanceof Error ? error.message : 'Failed to parse inbound email.'
+		const rejected = await rejectClaimedInboundDelivery({
+			db: input.env.APP_DB,
+			message: input.message,
+			delivery: claimedDelivery,
+			reason,
+		})
+		if (!rejected) return
 		await recordReceiveUsage({ outcome: 'error' })
 		return
 	}
-
-	let stored
+	const storageClaim = await claimInboundDeliveryStorage({
+		db: input.env.APP_DB,
+		delivery: claimedDelivery,
+		expectedAttachmentCount: parsed.attachments.length,
+		usageStartedAt: new Date(receiveStartedAtMs).toISOString(),
+	})
+	if (!storageClaim.claimed) {
+		if (storageClaim.delivery?.state === 'received') return
+		throw new RetryableInboundStorageError(
+			'Inbound delivery is already being stored; retry the stable delivery.',
+		)
+	}
+	let storedResult
 	try {
-		stored = await parseAndStoreInboundEmail({
+		storedResult = await parseAndStoreInboundEmail({
 			db: input.env.APP_DB,
 			blobs: input.env.EMAIL_BLOBS,
-			message: input.message,
-			recipient: input.recipient,
-			userId: systemEmailOwnerId,
-			inboxId: inbox.id,
-			maxMessageBytes: systemEmailLimits.maxMessageBytes,
-			async onParseRejected(reason) {
-				await insertEmailDeliveryEvent({
-					db: input.env.APP_DB,
-					userId: systemEmailOwnerId,
-					inboxId: inbox.id,
-					eventType: 'rejected',
-					provider: 'cloudflare-email-routing',
-					detail: {
-						recipient: input.recipient,
-						reason,
-						phase: 'parse',
-					},
-				}).catch(warnRejectionAuditWriteFailed)
-				await recordReceiveUsage({ outcome: 'error' })
-			},
+			delivery: storageClaim.delivery,
+			parsed,
 		})
 	} catch (error) {
-		if (!(error instanceof RetryableInboundStorageError)) throw error
-		await refundReceiveQuotaAfterStorageFailure({
-			logLabel: 'system-email-receives-daily-refund-failed',
-			refund: () =>
-				refundSystemEmailDailyReceive({
-					db: input.env.APP_DB,
-					localPart: input.localPart,
-					now: receiveQuotaNow,
-				}),
+		await releaseInboundDeliveryStorage({
+			db: input.env.APP_DB,
+			delivery: storageClaim.delivery,
+		}).catch((releaseError) => {
+			console.error(
+				'inbound-email-storage-lease-release-failed',
+				storageClaim.delivery.deliveryId,
+				releaseError,
+			)
 		})
 		throw error
 	}
-	if (!stored) return
-	await recordReceiveUsage({ entityId: stored.id, outcome: 'success' })
-	// System mail fans out to packages saved by admin users on the dedicated
-	// email.system-message.received topic (never to the synthetic system
-	// owner, which has no saved packages).
-	const dispatchPromise = dispatchSystemInboundEmailSubscriptionEvents({
+	if (!storedResult.wonFinalization) return
+	await scheduleInboundDeliveryEffects({
 		env: input.env,
-		message: stored,
+		userId: systemEmailOwnerId,
+		deliveryId: storedResult.finalizedDelivery.deliveryId,
+		expectedFinalizationToken: storedResult.finalizedDelivery.finalizationToken,
+		durationMs: Date.now() - receiveStartedAtMs,
+		ctx: input.ctx,
+		logLabel: 'System inbound email effect dispatch failed',
 	})
-	if (input.ctx) {
-		input.ctx.waitUntil(dispatchPromise)
-	} else {
-		void dispatchPromise.catch((error) => {
-			console.error(
-				'System inbound email package subscription dispatch failed',
-				error,
-			)
-		})
-	}
 }

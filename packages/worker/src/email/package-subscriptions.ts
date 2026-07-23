@@ -1,5 +1,8 @@
 import { getAppBaseUrl } from '#app/app-base-url.ts'
-import { dispatchAdminPackageSubscriptionEvent } from '#worker/package-invocations/admin-package-subscriptions.ts'
+import {
+	dispatchAdminPackageSubscriptionEvent,
+	readPreExecutionPackageInvocationInfrastructureCode,
+} from '#worker/package-invocations/admin-package-subscriptions.ts'
 import { invokePackageSubscription } from '#worker/package-invocations/service.ts'
 import { listPackageSubscriptions } from '#worker/package-registry/manifest.ts'
 import { listSavedPackagesByUserId } from '#worker/package-registry/repo.ts'
@@ -125,37 +128,44 @@ async function loadMatchingEmailSubscriptions(input: {
 			error instanceof Error &&
 			error.message.includes('no such table: saved_packages')
 		) {
-			return []
+			return {
+				subscriptions: [] as Array<LoadedEmailSubscription>,
+				discoveryErrors: [] as Array<unknown>,
+			}
 		}
 		throw error
 	}
-	const settled = await Promise.all(
+	const settled = await Promise.allSettled(
 		savedPackages.map(async (savedPackage) => {
-			try {
-				const loaded = await loadPackageManifestBySourceId({
-					env: input.env as Env,
-					baseUrl: input.baseUrl,
-					userId: input.userId,
-					sourceId: savedPackage.sourceId,
-				})
-				const subscription = listPackageSubscriptions(loaded.manifest).find(
-					(candidate) => candidate.topic === input.topic,
-				)
-				if (!subscription) return null
-				return { savedPackage, subscription } satisfies LoadedEmailSubscription
-			} catch (error) {
-				console.warn('Failed to load package manifest for email subscription', {
-					sourceId: savedPackage.sourceId,
-					packageId: savedPackage.id,
-					error,
-				})
-				return null
-			}
+			const loaded = await loadPackageManifestBySourceId({
+				env: input.env as Env,
+				baseUrl: input.baseUrl,
+				userId: input.userId,
+				sourceId: savedPackage.sourceId,
+			})
+			const subscription = listPackageSubscriptions(loaded.manifest).find(
+				(candidate) => candidate.topic === input.topic,
+			)
+			if (!subscription) return null
+			return { savedPackage, subscription } satisfies LoadedEmailSubscription
 		}),
 	)
-	return settled.filter(
-		(entry): entry is LoadedEmailSubscription => entry !== null,
-	)
+	const subscriptions: Array<LoadedEmailSubscription> = []
+	const discoveryErrors: Array<unknown> = []
+	for (const [index, result] of settled.entries()) {
+		if (result.status === 'fulfilled') {
+			if (result.value) subscriptions.push(result.value)
+			continue
+		}
+		const savedPackage = savedPackages[index]
+		console.warn('Failed to load package manifest for email subscription', {
+			sourceId: savedPackage?.sourceId,
+			packageId: savedPackage?.id,
+			error: result.reason,
+		})
+		discoveryErrors.push(result.reason)
+	}
+	return { subscriptions, discoveryErrors }
 }
 
 export async function dispatchInboundEmailSubscriptionEvents(input: {
@@ -170,34 +180,56 @@ export async function dispatchInboundEmailSubscriptionEvents(input: {
 		db: input.env.APP_DB,
 		messageId: input.message.id,
 	})
-	const subscriptions = await loadMatchingEmailSubscriptions({
-		env: input.env,
-		baseUrl,
-		userId: input.userId,
-		topic: inboundEmailReceiptTopic,
-	})
+	const { subscriptions, discoveryErrors } =
+		await loadMatchingEmailSubscriptions({
+			env: input.env,
+			baseUrl,
+			userId: input.userId,
+			topic: inboundEmailReceiptTopic,
+		})
 	const eventPayload = buildEmailEventPayload({
 		event: inboundEmailReceiptTopic,
 		message: input.message,
 		attachments,
 	})
-	return await Promise.all(
-		subscriptions.map(
-			async ({ savedPackage }) =>
-				await invokePackageSubscription({
-					env: input.env as Env,
-					baseUrl,
-					savedPackage,
+	const settled = await Promise.allSettled(
+		subscriptions.map(async ({ savedPackage }) => {
+			const response = await invokePackageSubscription({
+				env: input.env as Env,
+				baseUrl,
+				savedPackage,
+				topic: inboundEmailReceiptTopic,
+				params: eventPayload as Record<string, unknown>,
+				idempotencyKey: buildSubscriptionIdempotencyKey({
+					messageId: input.message.id,
+					packageId: savedPackage.id,
 					topic: inboundEmailReceiptTopic,
-					params: eventPayload as Record<string, unknown>,
-					idempotencyKey: buildSubscriptionIdempotencyKey({
-						messageId: input.message.id,
-						packageId: savedPackage.id,
-						topic: inboundEmailReceiptTopic,
-					}),
-					source: 'email',
 				}),
-		),
+				source: 'email',
+			})
+			const retryableCode =
+				readPreExecutionPackageInvocationInfrastructureCode(response)
+			if (retryableCode) {
+				throw new Error(
+					`Retryable package invocation infrastructure response: ${retryableCode}.`,
+				)
+			}
+			return response
+		}),
+	)
+	const invocationError = settled.find(
+		(result): result is PromiseRejectedResult => result.status === 'rejected',
+	)
+	if (discoveryErrors.length > 0 || invocationError) {
+		throw new Error(
+			'Inbound email package subscription dispatch was incomplete.',
+			{
+				cause: discoveryErrors[0] ?? invocationError?.reason,
+			},
+		)
+	}
+	return settled.map((result) =>
+		result.status === 'fulfilled' ? result.value : null,
 	)
 }
 
@@ -207,12 +239,13 @@ export async function dispatchEmailDeliverySubscriptionEvents(input: {
 	providerEvent: CloudflareEmailDeliveryEvent
 }) {
 	const baseUrl = getAppBaseUrl({ env: input.env })
-	const subscriptions = await loadMatchingEmailSubscriptions({
-		env: input.env,
-		baseUrl,
-		userId: input.message.userId,
-		topic: emailDeliveryUpdatedTopic,
-	})
+	const { subscriptions, discoveryErrors } =
+		await loadMatchingEmailSubscriptions({
+			env: input.env,
+			baseUrl,
+			userId: input.message.userId,
+			topic: emailDeliveryUpdatedTopic,
+		})
 	const payload = {
 		event: emailDeliveryUpdatedTopic,
 		message: {
@@ -243,20 +276,35 @@ export async function dispatchEmailDeliverySubscriptionEvents(input: {
 			occurred_at: input.providerEvent.metadata.eventTimestamp,
 		},
 	}
-	return await Promise.all(
-		subscriptions.map(
-			async ({ savedPackage }) =>
-				await invokePackageSubscription({
-					env: input.env as Env,
-					baseUrl,
-					savedPackage,
-					topic: emailDeliveryUpdatedTopic,
-					params: payload,
-					idempotencyKey: `email-delivery:${input.providerEvent.payload.eventId}:${savedPackage.id}`,
-					source: 'email',
-				}),
-		),
+	const results = await Promise.all(
+		subscriptions.map(async ({ savedPackage }) => {
+			const response = await invokePackageSubscription({
+				env: input.env as Env,
+				baseUrl,
+				savedPackage,
+				topic: emailDeliveryUpdatedTopic,
+				params: payload,
+				idempotencyKey: `email-delivery:${input.providerEvent.payload.eventId}:${savedPackage.id}`,
+				source: 'email',
+			})
+			return {
+				response,
+				retryableCode:
+					readPreExecutionPackageInvocationInfrastructureCode(response),
+			}
+		}),
 	)
+	const retryableResult = results.find((result) => result.retryableCode)
+	if (discoveryErrors.length > 0 || retryableResult) {
+		throw new Error('Email delivery subscription dispatch was incomplete.', {
+			cause:
+				discoveryErrors[0] ??
+				new Error(
+					`Retryable package invocation infrastructure response: ${retryableResult?.retryableCode}.`,
+				),
+		})
+	}
+	return results.map((result) => result.response)
 }
 
 /**
@@ -298,6 +346,9 @@ export async function dispatchSystemInboundEmailSubscriptionEvents(input: {
 			return eventPayload as Record<string, unknown>
 		},
 		source: 'email',
+		retryDiscoveryFailures: true,
+		retryInvocationInfrastructureFailures: true,
+		retryOnlyPreExecutionInfrastructureFailures: true,
 		buildIdempotencyKey: (savedPackage) =>
 			buildSubscriptionIdempotencyKey({
 				messageId: input.message.id,

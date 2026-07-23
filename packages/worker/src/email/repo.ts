@@ -16,6 +16,12 @@ function nowIso() {
 	return new Date().toISOString()
 }
 
+export type EmailInboundDeliveryFence = {
+	deliveryId: string
+	userId: string
+	storageLease: string
+}
+
 /**
  * R2 object key for a message's raw MIME payload in the EMAIL_BLOBS
  * bucket. The userId prefix is part of the per-user isolation contract:
@@ -508,15 +514,18 @@ export const findEmailThreadForInboundMessage = findThreadForMessage
 
 export async function createEmailThread(input: {
 	db: D1Database
+	id?: string
 	userId: string
 	inboxId?: string | null
 	subjectNormalized?: string | null
 	rootMessageIdHeader?: string | null
 	lastMessageAt?: string | null
+	ignoreConflict?: boolean
+	inboundDeliveryFence?: EmailInboundDeliveryFence
 }) {
 	const timestamp = nowIso()
 	const row = {
-		id: crypto.randomUUID(),
+		id: input.id ?? crypto.randomUUID(),
 		user_id: input.userId,
 		inbox_id: input.inboxId ?? null,
 		subject_normalized: input.subjectNormalized ?? '',
@@ -525,24 +534,84 @@ export async function createEmailThread(input: {
 		created_at: timestamp,
 		updated_at: timestamp,
 	}
+	const values = [
+		row.id,
+		row.user_id,
+		row.inbox_id,
+		row.subject_normalized,
+		row.root_message_id_header,
+		row.last_message_at,
+		row.created_at,
+		row.updated_at,
+	]
+	const fence = input.inboundDeliveryFence
 	await input.db
 		.prepare(
-			`INSERT INTO email_threads (
+			`${input.ignoreConflict ? 'INSERT OR IGNORE' : 'INSERT'} INTO email_threads (
 				id, user_id, inbox_id, subject_normalized, root_message_id_header, last_message_at, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			) ${
+				fence
+					? `SELECT ?, ?, ?, ?, ?, ?, ?, ?
+						WHERE EXISTS (
+							SELECT 1 FROM email_delivery_events
+							WHERE id = ?
+								AND user_id = ?
+								AND json_extract(detail_json, '$.state') = 'storing'
+								AND json_extract(detail_json, '$.storageLease') = ?
+						)`
+					: 'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+			}`,
 		)
 		.bind(
-			row.id,
-			row.user_id,
-			row.inbox_id,
-			row.subject_normalized,
-			row.root_message_id_header,
-			row.last_message_at,
-			row.created_at,
-			row.updated_at,
+			...values,
+			...(fence ? [fence.deliveryId, fence.userId, fence.storageLease] : []),
 		)
 		.run()
 	return mapThreadRow(row)
+}
+
+export async function deleteEmptyEmailThreads(input: {
+	db: D1Database
+	userId: string
+	before: string
+	limit: number
+}) {
+	const rows = await input.db
+		.prepare(
+			`SELECT thread.id
+			FROM email_threads thread
+			WHERE thread.user_id = ?
+				AND thread.created_at < ?
+				AND NOT EXISTS (
+					SELECT 1 FROM email_messages message
+					WHERE message.thread_id = thread.id
+				)
+			ORDER BY thread.created_at ASC, thread.id ASC
+			LIMIT ?`,
+		)
+		.bind(input.userId, input.before, input.limit)
+		.all<{ id: string }>()
+	const ids = (rows.results ?? []).map((row) => row.id)
+	if (ids.length === 0) return 0
+	const results = await input.db.batch(
+		ids.map((id) =>
+			input.db
+				.prepare(
+					`DELETE FROM email_threads
+					WHERE id = ?
+						AND user_id = ?
+						AND NOT EXISTS (
+							SELECT 1 FROM email_messages
+							WHERE thread_id = ?
+						)`,
+				)
+				.bind(id, input.userId, id),
+		),
+	)
+	return results.reduce(
+		(total, result) => total + Number(result.meta.changes ?? 0),
+		0,
+	)
 }
 
 export async function touchEmailThread(input: {
@@ -563,6 +632,7 @@ export async function touchEmailThread(input: {
 
 export async function insertEmailMessage(input: {
 	db: D1Database
+	inboundDeliveryFence?: EmailInboundDeliveryFence
 	message: {
 		id?: string
 		direction: EmailDirection
@@ -630,7 +700,8 @@ export async function insertEmailMessage(input: {
 		created_at: timestamp,
 		updated_at: timestamp,
 	}
-	await input.db
+	const fence = input.inboundDeliveryFence
+	const result = await input.db
 		.prepare(
 			`INSERT INTO email_messages (
 				id, direction, user_id, inbox_id, thread_id, sender_identity_id,
@@ -640,7 +711,18 @@ export async function insertEmailMessage(input: {
 				text_body, html_body, raw_mime_key, raw_size, processing_status,
 				provider_message_id, error, received_at, sent_at,
 				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			) ${
+				fence
+					? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+						WHERE EXISTS (
+							SELECT 1 FROM email_delivery_events
+							WHERE id = ?
+								AND user_id = ?
+								AND json_extract(detail_json, '$.state') = 'storing'
+								AND json_extract(detail_json, '$.storageLease') = ?
+						)`
+					: 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+			}`,
 		)
 		.bind(
 			row.id,
@@ -672,8 +754,14 @@ export async function insertEmailMessage(input: {
 			row.sent_at,
 			row.created_at,
 			row.updated_at,
+			...(fence ? [fence.deliveryId, fence.userId, fence.storageLease] : []),
 		)
 		.run()
+	if (fence && Number(result.meta.changes ?? 0) === 0) {
+		throw new Error(
+			'Inbound delivery storage lease was lost before message insert.',
+		)
+	}
 	return mapMessageRow(row)
 }
 
@@ -942,6 +1030,8 @@ const emailAttachmentInsertBatchSize = 50
 export async function insertEmailAttachments(input: {
 	db: D1Database
 	messageId: string
+	ignoreConflicts?: boolean
+	inboundDeliveryFence?: EmailInboundDeliveryFence
 	attachments: Array<{
 		/**
 		 * Pre-generated row id. Callers that store attachment bytes in R2
@@ -963,11 +1053,23 @@ export async function insertEmailAttachments(input: {
 	// files) all-or-nothing, while chunking protects large inbound MIME
 	// from oversized D1 batches. On a mid-chunk failure, callers that need
 	// consistency delete by message_id, which covers earlier chunks too.
+	const fence = input.inboundDeliveryFence
 	const statement = input.db.prepare(
-		`INSERT INTO email_attachments (
+		`${input.ignoreConflicts ? 'INSERT OR IGNORE' : 'INSERT'} INTO email_attachments (
 			id, message_id, filename, content_type, content_id, disposition,
 			size, storage_kind, storage_key, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) ${
+			fence
+				? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+					WHERE EXISTS (
+						SELECT 1 FROM email_delivery_events
+						WHERE id = ?
+							AND user_id = ?
+							AND json_extract(detail_json, '$.state') = 'storing'
+							AND json_extract(detail_json, '$.storageLease') = ?
+					)`
+				: 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+		}`,
 	)
 	const statements = input.attachments.map((attachment) =>
 		statement.bind(
@@ -981,6 +1083,7 @@ export async function insertEmailAttachments(input: {
 			attachment.storageKind,
 			attachment.storageKey ?? null,
 			timestamp,
+			...(fence ? [fence.deliveryId, fence.userId, fence.storageLease] : []),
 		),
 	)
 	for (

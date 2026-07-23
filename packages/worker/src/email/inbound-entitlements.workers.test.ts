@@ -171,6 +171,14 @@ test('inbound email enforces free-plan receive, storage, and size limits then st
 		event_count: 1,
 		error_count: 1,
 	})
+	expect(
+		await env.APP_DB.prepare(
+			`SELECT id FROM email_delivery_events
+			WHERE user_id = ? AND provider = 'cloudflare-email-routing-dedupe'`,
+		)
+			.bind(receiveLimitUserId)
+			.first(),
+	).toBeNull()
 
 	const storageCapEmail = `storage-cap-${crypto.randomUUID()}@example.com`
 	const storageCapUserId = await createStableUserIdFromEmail(storageCapEmail)
@@ -194,12 +202,20 @@ test('inbound email enforces free-plan receive, storage, and size limits then st
 			limit: storageCap + 10,
 		}),
 	).toHaveLength(storageCap)
-	expect(await readDailyReceiveCounter(storageCapUserId)).toBe(1)
+	expect(await readDailyReceiveCounter(storageCapUserId)).toBe(0)
 	expect(
 		(await readRejectionEvents(storageCapUserId)).detailed[0]?.detail,
 	).toMatchObject({
 		phase: 'entitlement',
 	})
+	expect(
+		await env.APP_DB.prepare(
+			`SELECT id FROM email_delivery_events
+			WHERE user_id = ? AND provider = 'cloudflare-email-routing-dedupe'`,
+		)
+			.bind(storageCapUserId)
+			.first(),
+	).toBeNull()
 
 	const storageBytesEmail = `storage-bytes-${crypto.randomUUID()}@example.com`
 	const storageBytesUserId =

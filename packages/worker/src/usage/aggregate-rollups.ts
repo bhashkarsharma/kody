@@ -88,7 +88,13 @@ INSERT INTO usage_rollups (
 	event_count, error_count,
 	total_duration_ms, total_cpu_ms, total_bytes,
 	updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+)
+SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
+WHERE ?1 = 'system:email'
+	OR EXISTS (
+		SELECT 1 FROM users
+		WHERE stable_user_id = ?1 AND deleting_at IS NULL
+	)
 ON CONFLICT (user_id, metric, month) DO UPDATE SET
 	event_count = excluded.event_count,
 	error_count = excluded.error_count,
@@ -147,11 +153,117 @@ FORMAT JSON
 type AnalyticsEngineSqlRow = {
 	user_id: string
 	metric: string
+	month?: string
 	event_count: number | string
 	error_count: number | string
 	total_duration_ms: number | string
 	total_cpu_ms: number | string
 	total_bytes: number | string
+}
+
+export async function readIdempotentInboundEmailUsage(input: {
+	db: D1Database
+	months: [string, string]
+}) {
+	await runD1WithRetry(() =>
+		input.db
+			.prepare(
+				`UPDATE email_delivery_events
+				SET detail_json = json_set(
+					detail_json,
+					'$.usageMonth', COALESCE(
+						json_extract(detail_json, '$.usageMonth'),
+						(
+							SELECT substr(
+								COALESCE(message.received_at, message.created_at),
+								1,
+								7
+							)
+							FROM email_messages message
+							WHERE message.id = email_delivery_events.message_id
+								AND message.user_id = email_delivery_events.user_id
+						)
+					),
+					'$.usageBytes', COALESCE(
+						json_extract(detail_json, '$.usageBytes'),
+						(
+							SELECT COALESCE(message.raw_size, 0)
+							FROM email_messages message
+							WHERE message.id = email_delivery_events.message_id
+								AND message.user_id = email_delivery_events.user_id
+						)
+					)
+				)
+				WHERE provider = 'cloudflare-email-routing'
+					AND event_type = 'received'
+					AND (
+						email_delivery_events.user_id = 'system:email'
+						OR EXISTS (
+							SELECT 1 FROM users
+							WHERE stable_user_id = email_delivery_events.user_id
+								AND deleting_at IS NULL
+						)
+					)
+					AND json_extract(
+						detail_json,
+						'$.usageEffectRecordedAt'
+					) IS NOT NULL
+					AND (
+						json_extract(detail_json, '$.usageMonth') IS NULL
+						OR json_extract(detail_json, '$.usageBytes') IS NULL
+					)
+					AND EXISTS (
+						SELECT 1 FROM email_messages message
+						WHERE message.id = email_delivery_events.message_id
+							AND message.user_id = email_delivery_events.user_id
+					)`,
+			)
+			.bind()
+			.run(),
+	)
+	const result = await runD1WithRetry(() =>
+		input.db
+			.prepare(
+				`SELECT
+					event.user_id,
+					'email_received' AS metric,
+					json_extract(event.detail_json, '$.usageMonth') AS month,
+					COUNT(*) AS event_count,
+					0 AS error_count,
+					SUM(COALESCE(
+						json_extract(event.detail_json, '$.usageDurationMs'),
+						0
+					)) AS total_duration_ms,
+					0 AS total_cpu_ms,
+					SUM(COALESCE(
+						json_extract(event.detail_json, '$.usageBytes'),
+						0
+					)) AS total_bytes
+				FROM email_delivery_events event
+				WHERE event.provider = 'cloudflare-email-routing'
+					AND event.event_type = 'received'
+					AND (
+						event.user_id = 'system:email'
+						OR EXISTS (
+							SELECT 1 FROM users
+							WHERE stable_user_id = event.user_id
+								AND deleting_at IS NULL
+						)
+					)
+					AND json_extract(
+						event.detail_json,
+						'$.usageEffectRecordedAt'
+					) IS NOT NULL
+					AND json_extract(
+						event.detail_json,
+						'$.usageMonth'
+					) IN (?, ?)
+				GROUP BY event.user_id, month`,
+			)
+			.bind(...input.months)
+			.all<AnalyticsEngineSqlRow>(),
+	)
+	return result.results ?? []
 }
 
 async function queryAnalyticsEngineSql(input: {
@@ -186,8 +298,46 @@ function toCount(value: number | string) {
 	return Number.isFinite(parsed) ? Math.round(parsed) : 0
 }
 
+async function filterLiveUsageRows(
+	db: D1Database,
+	rows: Array<AnalyticsEngineSqlRow>,
+) {
+	const systemRows = rows.filter((row) => row.user_id === 'system:email')
+	const userIds = [
+		...new Set(
+			rows
+				.map((row) => row.user_id)
+				.filter((userId) => userId && userId !== 'system:email'),
+		),
+	]
+	const live = new Set<string>()
+	for (let index = 0; index < userIds.length; index += 80) {
+		const chunk = userIds.slice(index, index + 80)
+		const placeholders = chunk.map(() => '?').join(', ')
+		const result = await runD1WithRetry(() =>
+			db
+				.prepare(
+					`SELECT stable_user_id FROM users
+					WHERE deleting_at IS NULL
+						AND stable_user_id IN (${placeholders})`,
+				)
+				.bind(...chunk)
+				.all<{ stable_user_id: string }>(),
+		)
+		for (const row of result.results ?? []) live.add(row.stable_user_id)
+	}
+	return [...systemRows, ...rows.filter((row) => live.has(row.user_id))]
+}
+
 function rollupPairKey(row: { user_id: string; metric: string }) {
 	return `${row.user_id}\n${row.metric}`
+}
+
+function previousMonth(month: string) {
+	const [year, monthNumber] = month.split('-').map(Number)
+	return new Date(Date.UTC(year ?? 1970, (monthNumber ?? 1) - 2, 1))
+		.toISOString()
+		.slice(0, 7)
 }
 
 /**
@@ -240,6 +390,28 @@ async function deleteStaleCurrentMonthRollups(input: {
 	return deleted
 }
 
+async function deleteNonLiveUserRollups(input: {
+	db: D1Database
+	months: [string, string]
+}) {
+	const result = await runD1WithRetry(() =>
+		input.db
+			.prepare(
+				`DELETE FROM usage_rollups
+				WHERE month IN (?, ?)
+					AND user_id != 'system:email'
+					AND NOT EXISTS (
+						SELECT 1 FROM users
+						WHERE stable_user_id = usage_rollups.user_id
+							AND deleting_at IS NULL
+					)`,
+			)
+			.bind(...input.months)
+			.run(),
+	)
+	return Number(result.meta.changes ?? 0)
+}
+
 /**
  * Recompute the current UTC month's `usage_rollups` rows from Analytics
  * Engine: upsert absolute values for every (user, metric) pair in the result
@@ -262,24 +434,90 @@ export async function aggregateUsageRollups(
 	}
 
 	const month = now.toISOString().slice(0, 'YYYY-MM'.length)
-	const rows = await queryAnalyticsEngineSql({
-		accountId,
-		apiToken,
-		baseUrl:
-			env.CLOUDFLARE_API_BASE_URL?.trim() || 'https://api.cloudflare.com',
-		query: buildMonthToDateAggregateQuery(
-			resolveUsageEventsDataset(env),
-			utcMonthBounds(now),
-		),
-	})
+	const priorMonth = previousMonth(month)
+	const priorMonthDate = new Date(
+		Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15),
+	)
+	const baseUrl =
+		env.CLOUDFLARE_API_BASE_URL?.trim() || 'https://api.cloudflare.com'
+	const dataset = resolveUsageEventsDataset(env)
+	const [currentAnalyticsRows, previousAnalyticsRows] = await Promise.all([
+		queryAnalyticsEngineSql({
+			accountId,
+			apiToken,
+			baseUrl,
+			query: buildMonthToDateAggregateQuery(dataset, utcMonthBounds(now)),
+		}),
+		queryAnalyticsEngineSql({
+			accountId,
+			apiToken,
+			baseUrl,
+			query: buildMonthToDateAggregateQuery(
+				dataset,
+				utcMonthBounds(priorMonthDate),
+			),
+		}),
+	])
+	const [liveCurrentAnalyticsRows, livePreviousAnalyticsRows] =
+		await Promise.all([
+			filterLiveUsageRows(env.APP_DB, currentAnalyticsRows),
+			filterLiveUsageRows(env.APP_DB, previousAnalyticsRows),
+		])
+	const rows = [
+		...liveCurrentAnalyticsRows.map((row) => ({ ...row, month })),
+		...livePreviousAnalyticsRows.map((row) => ({
+			...row,
+			month: priorMonth,
+		})),
+	]
+	const analyticsMonthsWithRows = new Set<string>()
+	if (liveCurrentAnalyticsRows.some((row) => row.user_id && row.metric)) {
+		analyticsMonthsWithRows.add(month)
+	}
+	if (livePreviousAnalyticsRows.some((row) => row.user_id && row.metric)) {
+		analyticsMonthsWithRows.add(priorMonth)
+	}
 
 	const updatedAt = now.toISOString()
-	const presentRows = rows.filter((row) => row.user_id && row.metric)
+	const emailRows = await readIdempotentInboundEmailUsage({
+		db: env.APP_DB,
+		months: [month, priorMonth],
+	})
+	const liveEmailRows = await filterLiveUsageRows(env.APP_DB, emailRows)
+	const mergedRows = new Map<string, AnalyticsEngineSqlRow>()
+	for (const row of [
+		...rows,
+		...liveEmailRows.filter(
+			(row) => row.month && analyticsMonthsWithRows.has(row.month),
+		),
+	]) {
+		if (!row.user_id || !row.metric) continue
+		const rowMonth = row.month ?? month
+		const key = `${rowMonth}\n${rollupPairKey(row)}`
+		const existing = mergedRows.get(key)
+		mergedRows.set(key, {
+			user_id: row.user_id,
+			metric: row.metric,
+			month: rowMonth,
+			event_count:
+				toCount(existing?.event_count ?? 0) + toCount(row.event_count),
+			error_count:
+				toCount(existing?.error_count ?? 0) + toCount(row.error_count),
+			total_duration_ms:
+				toCount(existing?.total_duration_ms ?? 0) +
+				toCount(row.total_duration_ms),
+			total_cpu_ms:
+				toCount(existing?.total_cpu_ms ?? 0) + toCount(row.total_cpu_ms),
+			total_bytes:
+				toCount(existing?.total_bytes ?? 0) + toCount(row.total_bytes),
+		})
+	}
+	const presentRows = [...mergedRows.values()]
 	const statements = presentRows.map((row) =>
 		env.APP_DB.prepare(usageRollupAbsoluteUpsertStatement).bind(
 			row.user_id,
 			row.metric,
-			month,
+			row.month ?? month,
 			toCount(row.event_count),
 			toCount(row.error_count),
 			toCount(row.total_duration_ms),
@@ -298,14 +536,22 @@ export async function aggregateUsageRollups(
 	// lag (or a dataset misconfiguration) than a genuinely event-free
 	// month; skip the stale-row cleanup rather than wiping real counters.
 	// The next hourly run reconciles once events are visible again.
-	const deletedRows =
-		presentRows.length === 0
+	const currentRows = presentRows.filter(
+		(row) => (row.month ?? month) === month,
+	)
+	const deletedStaleRows =
+		!analyticsMonthsWithRows.has(month) || currentRows.length === 0
 			? 0
 			: await deleteStaleCurrentMonthRollups({
 					db: env.APP_DB,
 					month,
-					presentPairs: new Set(presentRows.map(rollupPairKey)),
+					presentPairs: new Set(currentRows.map(rollupPairKey)),
 				})
+	const deletedNonLiveRows = await deleteNonLiveUserRollups({
+		db: env.APP_DB,
+		months: [month, priorMonth],
+	})
+	const deletedRows = deletedStaleRows + deletedNonLiveRows
 
 	const result = {
 		skipped: false as const,

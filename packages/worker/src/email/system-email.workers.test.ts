@@ -255,10 +255,8 @@ test('refundSystemEmailDailyReceive decrements local/day counter and floors at z
 	expect(await readCount('abuse')).toBe(0)
 })
 
-test('system inbox pre-commit R2/D1 failures refund daily receive quota; retry consumes one', async () => {
+test('system inbox R2/D1 failures and retries keep one durable quota charge', async () => {
 	silenceIncidentalRuntimeWarnings()
-	await ensureEmailTestSchema(env.APP_DB)
-	await ensureUsageRollupsTestSchema(env.APP_DB)
 	const r2FailingEnv = {
 		...createInboundEnv(),
 		EMAIL_BLOBS: new Proxy(env.EMAIL_BLOBS, {
@@ -298,26 +296,75 @@ test('system inbox pre-commit R2/D1 failures refund daily receive quota; retry c
 		}) as D1Database,
 	} as Parameters<typeof handleInboundEmail>[1]
 
-	for (const failingEnv of [r2FailingEnv, d1FailingEnv]) {
+	for (const [index, failingEnv] of [r2FailingEnv, d1FailingEnv].entries()) {
+		await ensureEmailTestSchema(env.APP_DB)
+		await ensureUsageRollupsTestSchema(env.APP_DB)
+		const messageId = `system-storage-retry-${index}`
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const message = buildInboundMessage({
 				to: `abuse@${systemDomain}`,
-				messageId: `system-precommit-fail-${attempt}-${crypto.randomUUID().slice(0, 6)}`,
+				messageId,
 			})
 			await expect(
 				handleInboundEmail(message, failingEnv),
 			).rejects.toBeInstanceOf(RetryableInboundStorageError)
 			expect(message.rejectedReason).toBeNull()
-			expect(await readSystemDailyReceiveCount('abuse')).toBe(0)
+			expect(await readSystemDailyReceiveCount('abuse')).toBe(1)
 		}
-	}
 
+		const retry = buildInboundMessage({
+			to: `abuse@${systemDomain}`,
+			messageId,
+		})
+		await handleInboundEmail(retry, createInboundEnv())
+		expect(retry.rejectedReason).toBeNull()
+		expect(await readSystemDailyReceiveCount('abuse')).toBe(1)
+		expect(
+			await listEmailMessages({
+				db: env.APP_DB,
+				userId: systemEmailOwnerId,
+				limit: 10,
+			}),
+		).toHaveLength(1)
+	}
+})
+
+test('system inbox ambiguous quota batch response charges once across retry', async () => {
+	silenceIncidentalRuntimeWarnings()
+	await ensureEmailTestSchema(env.APP_DB)
+	await ensureUsageRollupsTestSchema(env.APP_DB)
+	let batchResponseFailed = false
+	const ambiguousDb = new Proxy(env.APP_DB, {
+		get(target, property, receiver) {
+			if (property === 'batch') {
+				return async (statements: Parameters<D1Database['batch']>[0]) => {
+					const result = await target.batch(statements)
+					if (!batchResponseFailed) {
+						batchResponseFailed = true
+						throw new Error('simulated system quota batch response loss')
+					}
+					return result
+				}
+			}
+			const value = Reflect.get(target, property, receiver)
+			return typeof value === 'function' ? value.bind(target) : value
+		},
+	}) as D1Database
+	const messageId = 'system-ambiguous-quota'
+	const first = buildInboundMessage({
+		to: `abuse@${systemDomain}`,
+		messageId,
+	})
+	await handleInboundEmail(first, {
+		...createInboundEnv(),
+		APP_DB: ambiguousDb,
+	})
 	const retry = buildInboundMessage({
 		to: `abuse@${systemDomain}`,
-		messageId: 'system-r2-retry-ok',
+		messageId,
 	})
 	await handleInboundEmail(retry, createInboundEnv())
-	expect(retry.rejectedReason).toBeNull()
+
 	expect(await readSystemDailyReceiveCount('abuse')).toBe(1)
 	expect(
 		await listEmailMessages({
@@ -326,6 +373,45 @@ test('system inbox pre-commit R2/D1 failures refund daily receive quota; retry c
 			limit: 10,
 		}),
 	).toHaveLength(1)
+})
+
+test('system stored-message count failure occurs before quota charge', async () => {
+	await ensureEmailTestSchema(env.APP_DB)
+	const failingDb = new Proxy(env.APP_DB, {
+		get(target, property, receiver) {
+			if (property === 'prepare') {
+				return (query: string) => {
+					if (
+						query.includes('COUNT(*)') &&
+						query.includes('FROM email_messages')
+					) {
+						return {
+							bind: () => ({
+								first: async () => {
+									throw new Error('simulated system stored count failure')
+								},
+							}),
+						}
+					}
+					return target.prepare(query)
+				}
+			}
+			const value = Reflect.get(target, property, receiver)
+			return typeof value === 'function' ? value.bind(target) : value
+		},
+	}) as D1Database
+	const message = buildInboundMessage({
+		to: `abuse@${systemDomain}`,
+		messageId: 'system-count-failure',
+	})
+
+	await expect(
+		handleInboundEmail(message, {
+			...createInboundEnv(),
+			APP_DB: failingDb,
+		}),
+	).rejects.toThrow('simulated system stored count failure')
+	expect(await readSystemDailyReceiveCount('abuse')).toBe(0)
 })
 
 test('system inbox post-commit bookkeeping failure keeps one stored row without refund or retry throw', async () => {

@@ -58,6 +58,7 @@ import {
 } from '#app/handlers/package-app.ts'
 import { PackageAppRuntimeBridge } from '#worker/package-runtime/package-app.ts'
 import { handleInboundEmail } from '#worker/email/inbound.ts'
+import { sweepStaleInboundDeliveries } from '#worker/email/reconcile-inbound-deliveries.ts'
 import { pruneSystemEmailRetention } from '#worker/email/system-email.ts'
 import { refreshStaleStripePlans } from '#worker/billing/subscription-sync.ts'
 import { handleQueueBatch } from '#worker/queue-handler.ts'
@@ -539,6 +540,14 @@ const workerHandler = {
 			{
 				name: 'repo_session_cleanup',
 				run: () => cleanupRepoSessionBranches({ env, now: scheduledAt }),
+			},
+			{
+				name: 'reconcile_inbound_deliveries',
+				run: () =>
+					sweepStaleInboundDeliveries({
+						env,
+						now: scheduledAt,
+					}),
 			},
 			{
 				name: 'system_email_retention',
