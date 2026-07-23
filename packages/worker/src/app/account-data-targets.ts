@@ -15,7 +15,14 @@ export type UserScopedDataTarget =
 	// Rows keyed by a `target` column holding the stringified database user id
 	// (Epic Stack-style verifications: 2fa secrets etc).
 	| { kind: 'db_user_target'; table: string }
-	| { kind: 'user_columns'; table: string; columns: ReadonlyArray<string> }
+	| {
+			kind: 'user_columns'
+			table: string
+			columns: ReadonlyArray<string>
+			includeInExport?: boolean
+			surface?: string
+			reason?: string
+	  }
 	| {
 			kind: 'null_user_column'
 			table: string
@@ -32,7 +39,14 @@ export type UserScopedDataTarget =
 	  }
 	| { kind: 'bucket_parent'; table: string; parentTable: string }
 	| { kind: 'attachment_parent'; table: string }
-	| { kind: 'community_listing_child'; table: string; listingColumn: string }
+	| {
+			kind: 'community_listing_child'
+			table: string
+			listingColumn: string
+			includeInExport?: boolean
+			surface?: string
+			reason?: string
+	  }
 	| { kind: 'mcp_memory_suppression' }
 
 export const accountUserDataExcludedOwnerIds = [
@@ -68,7 +82,8 @@ export function getAccountExportExcludedD1Surfaces(): Array<{
 	for (const target of accountUserDataTargets) {
 		if (!isExcludedFromAccountExport(target)) continue
 		if (
-			target.kind === 'user_id' &&
+			'surface' in target &&
+			'reason' in target &&
 			typeof target.surface === 'string' &&
 			typeof target.reason === 'string'
 		) {
@@ -105,6 +120,22 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 	{ kind: 'mcp_memory_suppression' },
 	{ kind: 'user_id', table: 'mcp_memories' },
 	{ kind: 'user_id', table: 'mcp_user_server_instructions' },
+	{ kind: 'user_id', table: 'mcp_agent_sessions' },
+	{ kind: 'user_id', table: 'account_write_leases' },
+	{
+		kind: 'replace_user_column',
+		table: 'account_write_lease_repairs',
+		matchColumn: 'target_user_id',
+		setColumn: 'target_user_id',
+		value: 'deleted-user',
+	},
+	{
+		kind: 'replace_user_column',
+		table: 'account_write_lease_repairs',
+		matchColumn: 'repaired_by_user_id',
+		setColumn: 'repaired_by_user_id',
+		value: 'deleted-user',
+	},
 	{
 		kind: 'bucket_parent',
 		table: 'value_entries',
@@ -152,18 +183,30 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 		kind: 'community_listing_child',
 		table: 'community_ratings',
 		listingColumn: 'listing_id',
+		includeInExport: false,
+		surface: 'community_listing_ratings_by_other_users',
+		reason:
+			'Ratings belong in the rating author export. Listing-owner deletion still cascades them, but listing-owner export must not disclose another user’s identity, score, or note.',
 	},
 	{ kind: 'user_id', table: 'community_ratings' },
 	{
 		kind: 'community_listing_child',
 		table: 'community_stars',
 		listingColumn: 'listing_id',
+		includeInExport: false,
+		surface: 'community_listing_stars_by_other_users',
+		reason:
+			'Stars belong in the stargazer export. Listing-owner deletion still cascades them, but listing-owner export must not disclose another user’s bookmark or its timestamp.',
 	},
 	{ kind: 'user_id', table: 'community_stars' },
 	{
 		kind: 'community_listing_child',
 		table: 'community_activity_events',
 		listingColumn: 'listing_id',
+		includeInExport: false,
+		surface: 'community_listing_activity_by_other_users',
+		reason:
+			'Stored community activity belongs in the actor export. Listing-owner deletion still cascades it, but listing-owner export must not disclose another actor’s event type or timestamp.',
 	},
 	{
 		kind: 'user_columns',
@@ -179,6 +222,10 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 		kind: 'community_listing_child',
 		table: 'community_forks',
 		listingColumn: 'listing_id',
+		includeInExport: false,
+		surface: 'community_listing_forks_by_other_users',
+		reason:
+			'Fork and adoption records belong in the forking user export. Listing-owner deletion still cascades them, but listing-owner export must not disclose another user’s identity or adoption note.',
 	},
 	{
 		kind: 'user_columns',
@@ -189,17 +236,31 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 		kind: 'community_listing_child',
 		table: 'community_reports',
 		listingColumn: 'listing_id',
+		includeInExport: false,
+		surface: 'community_listing_reports_by_other_users',
+		reason:
+			'Community reports are attributed moderation submissions. Listing-owner deletion still cascades them, but listing-owner export must not disclose reporter identity, report reasons, or moderation notes.',
 	},
 	{
 		kind: 'user_columns',
 		table: 'community_reports',
 		columns: ['listing_owner_user_id', 'reporter_user_id'],
+		includeInExport: false,
+		surface: 'community_report_deletion_parties',
+		reason:
+			'This combined predicate exists for deletion. Export ownership is limited to the separate reporter predicate so listing owners cannot receive reports about their listings.',
+	},
+	{
+		kind: 'user_columns',
+		table: 'community_reports',
+		columns: ['reporter_user_id'],
 	},
 	{
 		kind: 'null_user_column',
 		table: 'community_reports',
 		matchColumn: 'resolved_by_user_id',
 		nullColumns: ['resolved_by_user_id', 'resolved_at', 'resolution_note'],
+		includeInExport: false,
 	},
 	// A grant dies with its scope owner or grantee, but survives deletion of
 	// the admin who created it (the grant remains valid; only attribution is
@@ -539,6 +600,8 @@ export const accountExportForeignUserIdColumnsByTable: Readonly<
 	user_follows: ['follower_user_id', 'followee_user_id'],
 	community_stars: ['user_id'],
 	community_activity_events: ['actor_user_id'],
+	community_reports: ['listing_owner_user_id', 'resolved_by_user_id'],
+	account_write_lease_repairs: ['target_user_id', 'repaired_by_user_id'],
 	package_scope_grants: [
 		'scope_owner_user_id',
 		'grantee_user_id',

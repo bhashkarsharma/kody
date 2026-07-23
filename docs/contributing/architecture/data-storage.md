@@ -44,15 +44,18 @@ installs and ordinary forks share the same row shape and therefore appear as
 ## Account deletion inventory
 
 Account deletion is implemented in `packages/worker/src/app/account-deletion.ts`
-and is intentionally inventory driven. The operation first enumerates user-owned
-identifiers while D1 rows still exist, then best-effort deletes out-of-band
-stores, then deletes or clears D1 rows, revokes OAuth grants, and finally
-deletes the `users` row. Each step records deleted counts, updated counts for
-cleared references, and warnings so the HTTP response states what was removed
-and what needs operator attention. Re-running the operation is safe: missing
-rows, missing KV keys, missing vectors, deleted Artifacts repos, and
-already-cleared Durable Objects are treated as successful no-ops or warning-only
-failures.
+and is intentionally inventory driven. Before inventory it durably sets
+`users.deleting_at`; browser, MCP, package-invocation, and job mutation
+boundaries then reject writes, while the deletion route can still authenticate
+the marked account for retry. The operation performs idempotent out-of-band and
+OAuth cleanup. Any critical cleanup failure preserves D1, the marker, and the
+user row for retry. Only after cleanup succeeds does one atomic D1 batch delete
+or clear all user rows and the `users` row. Each step records deleted counts,
+updated counts for cleared references, and warnings so the HTTP response states
+what was removed and what needs operator attention. Re-running the operation is
+safe: missing rows, missing KV keys, missing vectors, deleted Artifacts repos,
+and already-cleared Durable Objects are treated as successful no-ops or
+warning-only failures.
 
 System email rows owned by `system:email` are intentionally excluded from
 account deletion. They are operator-owned inbound mail for reserved platform
@@ -76,19 +79,19 @@ Deletion must cover these user-owned surfaces:
 - **Durable Objects:** `JobManager`, `StorageRunner`, `RepoSession`,
   `RemoteConnectorSession`, `PackageRealtimeSession`, and
   `PackageServiceInstance` are purged through account-deletion RPCs after their
-  D1 identifiers are collected. `MCP` objects are session-keyed by the MCP SDK
-  rather than user-keyed and are not globally enumerable; account deletion
-  revokes OAuth grants/tokens so those sessions cannot continue making
-  authorized user requests.
+  D1 identifiers are collected. `MCP` objects remain SDK session-keyed, while
+  `mcp_agent_sessions` indexes each Durable Object id by authenticated stable
+  user id so account deletion can purge stored props, conversation state,
+  raw-fetch state, and transport storage before revoking OAuth grants.
 - **Vectorize:** memory, job, and saved-package vector ids are derived from D1
   rows and removed with `deleteByIds`.
 - **R2:** raw email MIME blobs in `EMAIL_BLOBS` are enumerated from
   `email_messages` (deterministic `emailRawMimeKey` keys) and attachment storage
-  keys while those rows still exist, then deleted best-effort with warnings,
-  mirroring the KV/Vectorize reporting. Rows owned by `system:email` keep their
-  blobs here (they are not user data); those blobs are removed when the
-  system-email retention prune deletes the messages through the shared
-  delete-message helper.
+  keys while those rows still exist. A failed object delete aborts D1
+  finalization so those inventory rows remain available for retry. Rows owned by
+  `system:email` keep their blobs here (they are not user data); those blobs are
+  removed when the system-email retention prune deletes the messages through the
+  shared delete-message helper.
 - **KV:** published bundle artifact keys, source/manifest snapshot keys,
   community listing snapshots, and per-user package retriever cache/index keys
   in `BUNDLE_ARTIFACTS_KV` are deleted before D1 projection rows are removed.
@@ -148,8 +151,10 @@ hashes, and package invocation token hashes. The manifest states these
 redactions explicitly so a partial or intentionally redacted export is not
 mistaken for a complete secret backup.
 
-The browser route `GET /account/export.json` downloads a full JSON export for
-the signed-in user. The MCP capability domain `account` provides a
+The browser route `GET /account/export.json` downloads a bounded metadata
+manifest for the signed-in user and identifies the MCP capabilities required for
+a complete export. It deliberately does not inline D1 rows, Durable Object
+state, or R2 bytes. The MCP capability domain `account` provides the complete,
 migration-safe chunked interface:
 
 - `account_export_manifest` returns the manifest, counts, warnings, and chunking
@@ -158,13 +163,19 @@ migration-safe chunked interface:
   with `section: "d1_table"` and a table name. Durable storage buckets are read
   with `section: "storage_runner"` and a `storage_id`, using the same
   StorageRunner `exportStorage({ pageSize, startAfter })` RPC as the dedicated
-  storage export capability.
+  storage export capability. R2 raw MIME, attachment, avatar, and icon objects
+  use `section: "r2_object"`; each response contains at most one 256 KiB base64
+  chunk and an opaque cursor. Each request uses bounded `LIMIT 1` ownership
+  queries rather than reconstructing inventory. Continuation cursors bind the
+  source row, object key, size, and ETag; ownership/key mutations and object
+  overwrites are reported instead of mixing generations. Missing objects are
+  represented explicitly.
 
-D1 rows are always read with SQL-level keyset pagination: every query orders by
-the table's `rowid`, resumes strictly after an opaque cursor, and applies a SQL
-`LIMIT`, so a single query never loads a whole table. `account_export_section`
-fetches only the requested page, and the full browser export streams each table
-page by page (500 rows per query) before assembling the final JSON document.
+D1 manifest counts use bounded SQL `COUNT(*)` queries. D1 section rows are read
+with SQL-level keyset pagination: every query orders by the table's `rowid`,
+resumes strictly after an opaque cursor, and applies a SQL `LIMIT`, so a single
+query never loads a whole table. `account_export_section` fetches only the
+requested page.
 
 Durable Object export behavior:
 
@@ -352,8 +363,8 @@ rows only.
   that canonical key): `deleteEmailMessageById` (best-effort after the D1 row
   delete), user email retention and system-email retention (strict: blob delete
   before row delete; failed blob deletes skip the row for retry), and account
-  deletion (best-effort with warnings; enumerates every message id for the user
-  before D1 rows are removed).
+  deletion (strict before atomic D1 finalization; a failed blob delete preserves
+  every message row for retry).
 - Bucket names: `kody-email-blobs` (production), per-preview
   `{worker}-email-blobs` buckets created and cleaned up by
   `tools/ci/preview-resources.ts`, and the test env reuses the preview-style
@@ -683,7 +694,8 @@ to `durableObjectNameFromParts`).
 - `RemoteConnectorSession`:
   `idFromName(JSON.stringify([userId.trim(), normalizedInstanceId]))`.
 - `MCP`: session-keyed by the MCP SDK rather than by user id; OAuth caller
-  context is the request-time ownership boundary.
+  context is the request-time ownership boundary and `mcp_agent_sessions`
+  provides deletion-only enumeration by stable user id.
 
 Storage ids are also stable strings: execute storage uses `exec:{uuid}`, job
 storage uses `job:{jobId}`, and package services use
@@ -702,10 +714,13 @@ app-owned keys in it. App-owned `BUNDLE_ARTIFACTS_KV` keys are:
 - `package-retriever-index-entry:v1:{userId}:{scope}:{packageId}:{retrieverKey}`
   for per-entry retriever index rows.
 - `package-retriever-index:v1:{userId}:{scope}` — legacy combined retriever
-  index blob (no longer written). Residual blobs for active users are unused and
-  are not removed by refresh/removal; account deletion lists and deletes keys
-  under the user-scoped prefix `package-retriever-index:v1:{userId}:`. There is
-  no global sweep because that would require cross-user KV enumeration.
+  index blob (no longer written). Package refresh/removal and account deletion
+  delete the known `search` and `context` keys directly, so cleanup does not
+  depend on KV prefix listing. There is no global sweep because that would
+  require cross-user KV enumeration.
+- `derived-cache:v1:usage-rollups:user:{userId}:asof:{YYYY-MM}` — derived
+  per-user usage read model written with KV `expirationTtl`; retention is five
+  minutes, so immediate account-deletion cleanup is not required.
 
 Account deletion derives these keys from D1 rows and package ids before deleting
 D1 projections. New KV prefixes must add corresponding account-deletion coverage
@@ -717,8 +732,12 @@ App-owned R2 keys are:
 
 - `community-icon:v1/{listingId}/{commit}/asset` — processed public community
   icon bytes at the listing's pinned or icon commit. The listing id is the
-  public ownership boundary; account deletion derives keys from the owner's
-  listing rows and their joined package source commits.
+  public ownership boundary. Account deletion paginates and strictly deletes
+  every key under each D1-owned listing prefix, including historical revisions.
+
+- `user-avatars/{stableUserId}/{contentHash}.{extension}` — profile avatars.
+  Account deletion paginates and strictly deletes the complete stable-user
+  prefix, including historical replacements left by earlier cleanup failures.
 
 - `email-raw:v1:{userId}/{messageId}` — raw email MIME for the message row that
   stores this key in `email_messages.raw_mime_key`. The `userId` prefix is part
@@ -726,7 +745,9 @@ App-owned R2 keys are:
   the keys stored on their rows.
 
 New R2 key prefixes must add corresponding account-deletion coverage or a
-deliberate retention note, same as KV.
+deliberate retention note, same as KV. All currently registered R2 surfaces use
+the bounded `r2_object` account-export section; the inventory is derived from
+the same user-owned D1 rows used by account deletion.
 
 ### Vectorize metadata contracts
 

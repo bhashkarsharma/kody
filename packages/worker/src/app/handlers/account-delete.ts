@@ -1,9 +1,15 @@
 import { type Action } from 'remix/router'
 import { getRequestIp, logAuditEvent } from '#app/audit-log.ts'
-import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
+import { readAuthenticatedAppUserForDeletion } from '#app/authenticated-user.ts'
 import { destroyAuthCookie, isSecureRequest } from '#app/auth-session.ts'
 import { type routes } from '#app/routes.ts'
-import { deleteUserAccount } from '#app/account-deletion.ts'
+import {
+	AccountDeletionCleanupError,
+	AccountDeletionInventoryError,
+	deleteUserAccount,
+} from '#app/account-deletion.ts'
+import { AccountDeletionWritersActiveError } from '#app/account-deletion-state.ts'
+import { McpAgentSessionBackfillIncompleteError } from '#mcp/session-backfill-marker.ts'
 import { createDb, usersTable } from '#worker/db.ts'
 import { verifyPassword } from '@kody-internal/shared/password-hash.ts'
 
@@ -12,7 +18,7 @@ export function createAccountDeleteHandler(env: Env) {
 		middleware: [],
 		async handler({ request, url }) {
 			const requestIp = getRequestIp(request) ?? undefined
-			const user = await readAuthenticatedAppUser(request, env)
+			const user = await readAuthenticatedAppUserForDeletion(request, env)
 			if (!user) {
 				return Response.json(
 					{ error: 'Authentication required.' },
@@ -71,11 +77,48 @@ export function createAccountDeleteHandler(env: Env) {
 				)
 			}
 
-			const result = await deleteUserAccount({
-				env,
-				dbUserId: user.userId,
-				mcpUserId: user.mcpUser.userId,
-			})
+			let result: Awaited<ReturnType<typeof deleteUserAccount>>
+			try {
+				result = await deleteUserAccount({
+					env,
+					dbUserId: user.userId,
+					mcpUserId: user.mcpUser.userId,
+				})
+			} catch (error) {
+				if (
+					!(
+						error instanceof AccountDeletionInventoryError ||
+						error instanceof AccountDeletionCleanupError ||
+						error instanceof AccountDeletionWritersActiveError ||
+						error instanceof McpAgentSessionBackfillIncompleteError
+					)
+				) {
+					throw error
+				}
+				void logAuditEvent({
+					category: 'auth',
+					action: 'account_delete',
+					result: 'failure',
+					email: user.email,
+					ip: requestIp,
+					path: url.pathname,
+					reason:
+						error instanceof McpAgentSessionBackfillIncompleteError
+							? 'mcp_agent_session_backfill_incomplete'
+							: error instanceof AccountDeletionWritersActiveError
+								? 'writers_active'
+								: error instanceof AccountDeletionInventoryError
+									? 'inventory_incomplete'
+									: 'cleanup_incomplete',
+				})
+				return Response.json(
+					{
+						error:
+							'Account deletion could not complete safely. Try again later.',
+					},
+					{ status: 503 },
+				)
+			}
 
 			void logAuditEvent({
 				category: 'auth',

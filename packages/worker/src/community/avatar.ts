@@ -1,6 +1,10 @@
 import { toHex } from '@kody-internal/shared/hex.ts'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 import {
+	assertAccountWritableDb,
+	withAccountWriteLease,
+} from '#app/account-deletion-state.ts'
+import {
 	readJpegDimensions,
 	readPngDimensions,
 	readWebpDimensions,
@@ -148,49 +152,77 @@ export async function saveUserAvatar(input: {
 	bytes: Uint8Array
 	contentType: UserAvatarContentType
 }): Promise<string> {
-	const contentHash = await sha256Hex(input.bytes)
-	const r2Key = buildUserAvatarR2Key({
+	return await withAccountWriteLease({
+		db: input.env.APP_DB,
 		stableUserId: input.stableUserId,
-		contentHash,
-		contentType: input.contentType,
-	})
+		async write() {
+			await assertAccountWritableDb(input.env.APP_DB, input.stableUserId)
+			const contentHash = await sha256Hex(input.bytes)
+			const r2Key = buildUserAvatarR2Key({
+				stableUserId: input.stableUserId,
+				contentHash,
+				contentType: input.contentType,
+			})
 
-	const existing = await input.env.APP_DB.prepare(
-		`SELECT avatar_key FROM users WHERE id = ?`,
-	)
-		.bind(input.numericUserId)
-		.first<{ avatar_key: string | null }>()
-	const previousKey =
-		existing?.avatar_key == null ? null : String(existing.avatar_key)
+			const existing = await input.env.APP_DB.prepare(
+				`SELECT avatar_key FROM users WHERE id = ? AND stable_user_id = ?`,
+			)
+				.bind(input.numericUserId, input.stableUserId)
+				.first<{ avatar_key: string | null }>()
+			const previousKey =
+				existing?.avatar_key == null ? null : String(existing.avatar_key)
 
-	await input.env.COMMUNITY_ASSETS.put(r2Key, input.bytes, {
-		httpMetadata: {
-			contentType: input.contentType,
-			cacheControl: userAvatarCacheControl,
-		},
-		customMetadata: {
-			stableUserId: input.stableUserId,
-			contentHash,
-		},
-	})
+			await input.env.COMMUNITY_ASSETS.put(r2Key, input.bytes, {
+				httpMetadata: {
+					contentType: input.contentType,
+					cacheControl: userAvatarCacheControl,
+				},
+				customMetadata: {
+					stableUserId: input.stableUserId,
+					contentHash,
+				},
+			})
+			try {
+				await assertAccountWritableDb(input.env.APP_DB, input.stableUserId)
+			} catch (error) {
+				await input.env.COMMUNITY_ASSETS.delete(r2Key)
+				throw error
+			}
 
-	await input.env.APP_DB.prepare(
-		`UPDATE users
+			const update = await input.env.APP_DB.prepare(
+				`UPDATE users
 		SET avatar_key = ?, updated_at = ?
-		WHERE id = ?`,
-	)
-		.bind(r2Key, utcSqliteTimestamp(), input.numericUserId)
-		.run()
+		WHERE id = ? AND stable_user_id = ? AND deleting_at IS NULL`,
+			)
+				.bind(
+					r2Key,
+					utcSqliteTimestamp(),
+					input.numericUserId,
+					input.stableUserId,
+				)
+				.run()
+			if ((update.meta.changes ?? 0) !== 1) {
+				await input.env.COMMUNITY_ASSETS.delete(r2Key)
+				throw new Error(
+					'Avatar write was rejected because account state changed.',
+				)
+			}
 
-	if (previousKey && previousKey !== r2Key) {
-		try {
-			await input.env.COMMUNITY_ASSETS.delete(previousKey)
-		} catch (error) {
-			console.error('user-avatar-previous-delete-failed', previousKey, error)
-		}
-	}
+			if (previousKey && previousKey !== r2Key) {
+				try {
+					await input.env.COMMUNITY_ASSETS.delete(previousKey)
+				} catch (error) {
+					console.error(
+						'user-avatar-previous-delete-failed',
+						previousKey,
+						error,
+					)
+				}
+			}
 
-	return r2Key
+			return r2Key
+		},
+	})
 }
 
 export async function deleteUserAvatar(input: {
@@ -198,28 +230,40 @@ export async function deleteUserAvatar(input: {
 	numericUserId: number
 	stableUserId: string
 }): Promise<void> {
-	const existing = await input.env.APP_DB.prepare(
-		`SELECT avatar_key FROM users WHERE id = ?`,
-	)
-		.bind(input.numericUserId)
-		.first<{ avatar_key: string | null }>()
-	const previousKey =
-		existing?.avatar_key == null ? null : String(existing.avatar_key)
+	await withAccountWriteLease({
+		db: input.env.APP_DB,
+		stableUserId: input.stableUserId,
+		async write() {
+			await assertAccountWritableDb(input.env.APP_DB, input.stableUserId)
+			const existing = await input.env.APP_DB.prepare(
+				`SELECT avatar_key FROM users WHERE id = ? AND stable_user_id = ?`,
+			)
+				.bind(input.numericUserId, input.stableUserId)
+				.first<{ avatar_key: string | null }>()
+			const previousKey =
+				existing?.avatar_key == null ? null : String(existing.avatar_key)
 
-	await input.env.APP_DB.prepare(
-		`UPDATE users
-		SET avatar_key = NULL, updated_at = ?
-		WHERE id = ?`,
-	)
-		.bind(utcSqliteTimestamp(), input.numericUserId)
-		.run()
+			const update = await input.env.APP_DB.prepare(
+				`UPDATE users
+				SET avatar_key = NULL, updated_at = ?
+				WHERE id = ? AND stable_user_id = ? AND deleting_at IS NULL`,
+			)
+				.bind(utcSqliteTimestamp(), input.numericUserId, input.stableUserId)
+				.run()
+			if ((update.meta.changes ?? 0) !== 1) {
+				throw new Error(
+					'Avatar delete was rejected because account state changed.',
+				)
+			}
 
-	if (!previousKey) return
-	try {
-		await input.env.COMMUNITY_ASSETS.delete(previousKey)
-	} catch (error) {
-		console.error('user-avatar-delete-failed', previousKey, error)
-	}
+			if (!previousKey) return
+			try {
+				await input.env.COMMUNITY_ASSETS.delete(previousKey)
+			} catch (error) {
+				console.error('user-avatar-delete-failed', previousKey, error)
+			}
+		},
+	})
 }
 
 export async function getUserAvatarObject(input: {

@@ -21,10 +21,12 @@ related social surfaces. When visibility is **private**, the public profile is
 not found, others cannot follow you, and you are omitted from stargazer lists
 and other users' timelines. See [Community profiles](./community-profiles.md).
 
-Account export includes your profile columns and social rows where you are on
-either side of an edge (follows as follower or followee; stars you placed or
-that sit on listings you own; activity you authored or that is tied to your
-listings). Account deletion removes those same rows.
+Account export includes your profile columns and social rows where you are a
+participant (follows as follower or followee, stars you placed, and activity you
+authored). The browser download is a bounded metadata manifest; use its
+`account_export_section` instructions to retrieve every D1, Durable Object, and
+R2 page for a complete portable export. Account deletion removes those same
+user-owned rows and objects.
 
 ## What a deployment admin can see
 
@@ -80,6 +82,11 @@ Your account export includes your own submissions and their status. Internal
 reviewer identity, notes, and timestamps are not included. If an admin who
 reviewed your feedback deletes their account, Kody clears that reviewer's
 attribution while retaining your submission for the lifecycle described above.
+
+Community stars, stored activity events, ratings, forks, and reports appear only
+in the participating user's account export. Owning the related listing does not
+expose another user's event timestamps or types, identity, rating or adoption
+notes, report reasons, or moderation details.
 
 ## What an admin can never see
 

@@ -28,6 +28,9 @@ export async function ensureEntitlementTestSchema(db: D1Database) {
 	stripe_customer_id TEXT,
 	stripe_plan TEXT,
 	stripe_plan_refreshed_at TEXT,
+	deleting_at TEXT,
+	active_write_count INTEGER NOT NULL DEFAULT 0,
+	active_write_expires_at TEXT,
 	created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
 	updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 )`,
@@ -42,6 +45,9 @@ export async function ensureEntitlementTestSchema(db: D1Database) {
 		'stripe_customer_id TEXT',
 		'stripe_plan TEXT',
 		'stripe_plan_refreshed_at TEXT',
+		'deleting_at TEXT',
+		'active_write_count INTEGER NOT NULL DEFAULT 0',
+		'active_write_expires_at TEXT',
 	]) {
 		try {
 			await db.prepare(`ALTER TABLE users ADD COLUMN ${column}`).run()
@@ -49,6 +55,17 @@ export async function ensureEntitlementTestSchema(db: D1Database) {
 			// The column already exists (fresh CREATE above or migrations).
 		}
 	}
+	await db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS account_write_leases (
+				token TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				holder TEXT NOT NULL,
+				acquired_at TEXT NOT NULL,
+				released_at TEXT
+			)`,
+		)
+		.run()
 	await db
 		.prepare(
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_stable_user_id

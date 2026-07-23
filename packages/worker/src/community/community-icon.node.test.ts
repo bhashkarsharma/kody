@@ -353,6 +353,63 @@ test('community icon descriptor caches the R2 reference and repairs a dangling r
 	expect(kvValues.size).toBe(0)
 })
 
+test('community icon cache write loses the race to account deletion', async () => {
+	const png = createPngHeader(128, 128)
+	const { kv, values: kvValues } = createFakeKv()
+	const { bucket } = createFakeR2()
+	let deleting = false
+	let leaseAcquires = 0
+	const db = {
+		prepare(query: string) {
+			return {
+				bind() {
+					return {
+						async first<T>() {
+							if (query.includes('SELECT deleting_at')) {
+								return { deleting_at: deleting ? 'now' : null } as T
+							}
+							return null
+						},
+						async run() {
+							if (query.includes('active_write_count + 1')) {
+								leaseAcquires += 1
+								if (leaseAcquires === 2) deleting = true
+								return { meta: { changes: deleting ? 0 : 1 } }
+							}
+							return { meta: { changes: 1 } }
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+	mocks.readCommunitySnapshot.mockResolvedValue({
+		version: 1,
+		listingId: listing.id,
+		pinnedCommit: listing.pinnedCommit,
+		files: {},
+		communityIconPath: 'community-icon.png',
+		createdAt: '2026-07-10T00:00:00.000Z',
+	})
+	mocks.getEntitySourceById.mockResolvedValue(entitySourceRow)
+	mocks.getCommunityListingById.mockResolvedValue(listing)
+	mocks.readFirstArtifactFileAtCommit.mockResolvedValue({
+		path: 'community-icon.png',
+		bytes: png,
+	})
+	await getCommunityIconObject({
+		env: {
+			APP_DB: db,
+			BUNDLE_ARTIFACTS_KV: kv,
+			COMMUNITY_ASSETS: bucket,
+		} as Env,
+		listing,
+		iconCommit: listing.pinnedCommit,
+	})
+	expect(leaseAcquires).toBe(2)
+	expect(kvValues.size).toBe(0)
+})
+
 test('community icons ahead of the pinned snapshot load from the artifact repo at the icon commit', async () => {
 	const png = createPngHeader(128, 128)
 	const iconCommit = 'def456'

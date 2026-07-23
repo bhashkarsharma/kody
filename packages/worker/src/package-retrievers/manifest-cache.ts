@@ -19,6 +19,11 @@ const retrieverManifestCacheVersion = 1
 const retrieverScopeIndexVersion = 1
 const retrieverManifestCachePrefix = 'package-retriever-manifest'
 const retrieverScopeEntryPrefix = 'package-retriever-index-entry'
+const legacyRetrieverScopeIndexPrefix = 'package-retriever-index'
+const packageRetrieverScopes = [
+	'search',
+	'context',
+] satisfies Array<PackageRetrieverScope>
 
 function getRetrieverKv(env: Env) {
 	const kv = (env as Env & { BUNDLE_ARTIFACTS_KV?: KVNamespace })
@@ -102,6 +107,38 @@ function buildPackageRetrieverScopeEntryPrefix(input: {
 		...(input.packageId ? [input.packageId] : []),
 		'',
 	].join(':')
+}
+
+export function buildLegacyPackageRetrieverScopeIndexKey(input: {
+	userId: string
+	scope: PackageRetrieverScope
+}) {
+	return [
+		legacyRetrieverScopeIndexPrefix,
+		`v${retrieverScopeIndexVersion}`,
+		input.userId,
+		input.scope,
+	].join(':')
+}
+
+export async function deleteLegacyPackageRetrieverScopeIndexes(input: {
+	env: Env
+	userId: string
+}) {
+	if (!hasRetrieverKv(input.env)) return 0
+	const kv = getRetrieverKv(input.env)
+	const deleted = await Promise.all(
+		packageRetrieverScopes.map(async (scope) => {
+			const key = buildLegacyPackageRetrieverScopeIndexKey({
+				userId: input.userId,
+				scope,
+			})
+			if ((await kv.get(key)) === null) return false
+			await kv.delete(key)
+			return true
+		}),
+	)
+	return deleted.filter(Boolean).length
 }
 
 function buildPackageRetrieverManifestCachePrefix(input: {
@@ -320,16 +357,17 @@ export async function refreshPackageRetrieverManifestCache(input: {
 		manifestKey,
 		JSON.stringify(manifestCache),
 	)
+	await deleteLegacyPackageRetrieverScopeIndexes({
+		env: input.env,
+		userId: input.userId,
+	})
 	await deleteStaleManifestCacheKeys({
 		env: input.env,
 		userId: input.userId,
 		packageId: input.savedPackage.id,
 		currentManifestKey: manifestKey,
 	})
-	for (const scope of [
-		'search',
-		'context',
-	] satisfies Array<PackageRetrieverScope>) {
+	for (const scope of packageRetrieverScopes) {
 		const existingScopeEntryKeys = await listScopeEntryKeys({
 			env: input.env,
 			userId: input.userId,
@@ -395,11 +433,12 @@ export async function removePackageRetrieverManifestCacheEntries(input: {
 	packageId: string
 }) {
 	if (!hasRetrieverKv(input.env)) return
+	await deleteLegacyPackageRetrieverScopeIndexes({
+		env: input.env,
+		userId: input.userId,
+	})
 	const manifestCacheKeys = await listManifestCacheKeys(input)
-	for (const scope of [
-		'search',
-		'context',
-	] satisfies Array<PackageRetrieverScope>) {
+	for (const scope of packageRetrieverScopes) {
 		const existingScopeEntryKeys = await listScopeEntryKeys({
 			env: input.env,
 			userId: input.userId,
@@ -422,35 +461,38 @@ export async function removePackageRetrieverManifestCacheEntries(input: {
 export async function deleteAllPackageRetrieverCacheEntriesForUser(input: {
 	env: Env
 	userId: string
-	packageIds: ReadonlyArray<string>
 }) {
 	if (!hasRetrieverKv(input.env)) return 0
-	const keys = new Set<string>()
-	for (const packageId of input.packageIds) {
-		for (const key of await listManifestCacheKeys({
-			env: input.env,
-			userId: input.userId,
-			packageId,
-		})) {
-			keys.add(key)
-		}
-		for (const scope of [
-			'search',
-			'context',
-		] satisfies Array<PackageRetrieverScope>) {
-			for (const key of await listScopeEntryKeys({
-				env: input.env,
-				userId: input.userId,
-				scope,
-				packageId,
-			})) {
-				keys.add(key)
-			}
-		}
-	}
+	const deletedLegacyKeys = await deleteLegacyPackageRetrieverScopeIndexes({
+		env: input.env,
+		userId: input.userId,
+	})
 	const kv = getRetrieverKv(input.env)
-	await Promise.all(Array.from(keys).map(async (key) => await kv.delete(key)))
-	return keys.size
+	const deletePrefix = async (prefix: string) => {
+		let deleted = 0
+		let cursor: string | undefined
+		do {
+			const result = await kv.list({ prefix, cursor })
+			const keys = result.keys.map((key) => key.name)
+			const outOfScope = keys.find((key) => !key.startsWith(prefix))
+			if (outOfScope) {
+				throw new Error(
+					`Package retriever KV listing returned out-of-scope key: ${outOfScope}`,
+				)
+			}
+			await Promise.all(keys.map(async (key) => await kv.delete(key)))
+			deleted += keys.length
+			cursor = result.list_complete ? undefined : result.cursor
+		} while (cursor)
+		return deleted
+	}
+	const manifestKeys = await deletePrefix(
+		`${retrieverManifestCachePrefix}:v${retrieverManifestCacheVersion}:${input.userId}:`,
+	)
+	const indexEntryKeys = await deletePrefix(
+		`${retrieverScopeEntryPrefix}:v${retrieverScopeIndexVersion}:${input.userId}:`,
+	)
+	return deletedLegacyKeys + manifestKeys + indexEntryKeys
 }
 
 export async function listPackageRetrieversForScope(input: {

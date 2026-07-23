@@ -18,6 +18,7 @@ type GrantUserRow = {
 	username: string | null
 	display_name: string | null
 	stable_user_id: string
+	deleting_at: string | null
 }
 
 function buildBaseUserFromGrant(
@@ -47,10 +48,8 @@ function buildBaseUserFromGrant(
  * Build the MCP caller user context from OAuth grant props.
  *
  * Account identity and RBAC always resolve through the grant's stable
- * `userId` (`users.stable_user_id`). Grant email/username/displayName are only
- * a fallback when D1 is unavailable; a successful lookup refreshes those
- * fields from the authoritative row so a stale grant email that another
- * account now owns can never attach that other account's roles.
+ * `userId` (`users.stable_user_id`). D1 lookup failures fail closed; grant
+ * profile fields only fill missing values after the authoritative row resolves.
  */
 export async function buildMcpUserContextFromGrantProps(
 	env: Env,
@@ -64,18 +63,17 @@ export async function buildMcpUserContextFromGrantProps(
 
 	const baseUser = buildBaseUserFromGrant(grantProps, userId)
 
-	// A transient D1 failure must not take MCP auth down. Roles and
-	// permissions are optional on the context; falling back to the base
-	// grant-props user means no elevated permissions this request.
+	// Fail closed on transient D1 errors so a deleting or reassigned account can
+	// never continue through stale OAuth grant metadata.
 	try {
 		const row = await env.APP_DB.prepare(
-			`SELECT id, email, username, display_name, stable_user_id
+			`SELECT id, email, username, display_name, stable_user_id, deleting_at
 			 FROM users
 			 WHERE stable_user_id = ?`,
 		)
 			.bind(userId)
 			.first<GrantUserRow>()
-		if (!row) return baseUser
+		if (!row || row.deleting_at) return null
 
 		const email = row.email.trim().toLowerCase()
 		const usernameCandidate = row.username?.trim() ?? ''
@@ -103,6 +101,6 @@ export async function buildMcpUserContextFromGrantProps(
 		}
 	} catch (error) {
 		console.error('Failed to load roles for MCP user context:', error)
-		return baseUser
+		throw error
 	}
 }

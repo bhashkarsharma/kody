@@ -159,3 +159,21 @@ test('account export redaction maps stay centralized in the D1 registry', () => 
 	])
 	expect(accountExportRedactedForeignUserId).toBe('[redacted]')
 })
+
+test('listing-owner deletion predicates are excluded from export for private participation rows', () => {
+	const excludedListingChildren = accountUserDataTargets
+		.filter(
+			(target) =>
+				target.kind === 'community_listing_child' &&
+				target.includeInExport === false,
+		)
+		.map((target) => target.table)
+		.sort()
+	expect(excludedListingChildren).toEqual([
+		'community_activity_events',
+		'community_forks',
+		'community_ratings',
+		'community_reports',
+		'community_stars',
+	])
+})

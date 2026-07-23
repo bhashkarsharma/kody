@@ -3,15 +3,29 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
+	AccountDeletionCleanupError,
+	AccountDeletionInventoryError,
 	deleteUserAccount,
 	getAccountDeletionD1UserColumnCoverage,
 } from './account-deletion.ts'
 import { accountUserDataExcludedOwnerIds } from './account-data-targets.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
+import {
+	AccountDeletionInProgressError,
+	AccountDeletionWritersActiveError,
+	assertAccountWritable,
+} from './account-deletion-state.ts'
 
 type RowMap = Record<string, Array<Record<string, unknown>>>
 
-function createTestDb(initial: RowMap): {
+function createTestDb(
+	initial: RowMap,
+	options?: {
+		failSelectContaining?: string
+		failRunContaining?: string
+		onSelect?: (query: string) => Promise<void>
+	},
+): {
 	db: D1Database
 	rows: RowMap
 } {
@@ -52,8 +66,55 @@ function createTestDb(initial: RowMap): {
 				bind(...params: Array<unknown>) {
 					return {
 						async all<T>() {
+							await options?.onSelect?.(lower)
+							if (
+								options?.failSelectContaining &&
+								lower.includes(options.failSelectContaining)
+							) {
+								throw new Error('simulated inventory read failure')
+							}
 							let results: Array<unknown> = []
 							const userId = params[0] as string
+							if (
+								lower ===
+								'select deleting_at from users where stable_user_id = ?'
+							) {
+								results = (rows.users ?? [])
+									.filter((row) => row['stable_user_id'] === userId)
+									.map((row) => ({
+										deleting_at: row['deleting_at'] ?? null,
+									}))
+								return { results: results as Array<T>, meta: { changes: 0 } }
+							}
+							if (
+								lower ===
+								'select version from deployment_backfill_markers where key = ?'
+							) {
+								results =
+									'deployment_backfill_markers' in rows
+										? (rows.deployment_backfill_markers ?? [])
+										: [{ version: 1 }]
+								return { results: results as Array<T>, meta: { changes: 0 } }
+							}
+							if (
+								lower.includes(
+									'select count(*) as count from account_write_leases',
+								)
+							) {
+								const user = (rows.users ?? []).find(
+									(row) => row['id'] === params[0],
+								)
+								results = [
+									{
+										count: (rows.account_write_leases ?? []).filter(
+											(row) =>
+												row['user_id'] === user?.['stable_user_id'] &&
+												row['released_at'] == null,
+										).length,
+									},
+								]
+								return { results: results as Array<T>, meta: { changes: 0 } }
+							}
 							if (
 								lower ===
 								'select id from saved_packages where user_id = ? and has_app = 1'
@@ -104,6 +165,15 @@ function createTestDb(initial: RowMap): {
 									.map((row) => ({
 										instance_id: row['instance_id'],
 									}))
+								return { results: results as Array<T>, meta: { changes: 0 } }
+							}
+							if (
+								lower ===
+								'select do_id from mcp_agent_sessions where user_id = ? order by do_id'
+							) {
+								results = (rows.mcp_agent_sessions ?? [])
+									.filter((row) => row['user_id'] === userId)
+									.map((row) => ({ do_id: row['do_id'] }))
 								return { results: results as Array<T>, meta: { changes: 0 } }
 							}
 							if (
@@ -162,25 +232,49 @@ function createTestDb(initial: RowMap): {
 								return { results: results as Array<T>, meta: { changes: 0 } }
 							}
 							if (
-								lower.startsWith(
-									'select community_listings.id, community_listings.pinned_commit',
-								)
+								lower.includes('from community_listings') &&
+								lower.includes('entity_sources.published_commit')
 							) {
 								results = (rows.community_listings ?? [])
 									.filter((row) => row['owner_user_id'] === userId)
-									.map((row) => {
+									.map((row, index) => {
 										const source = (rows.entity_sources ?? []).find(
 											(sourceRow) =>
 												sourceRow['id'] === row['source_id'] &&
 												sourceRow['user_id'] === row['owner_user_id'],
 										)
 										return {
+											account_r2_rowid: index + 1,
 											id: row['id'],
 											pinned_commit: row['pinned_commit'],
 											source_published_commit:
 												source?.['published_commit'] ?? null,
 										}
 									})
+								return { results: results as Array<T>, meta: { changes: 0 } }
+							}
+							if (
+								lower.startsWith(
+									'select rowid as account_r2_rowid, id from email_messages',
+								)
+							) {
+								const afterRowid = Number(params[1])
+								const limit = Number(params[2])
+								results = (rows.email_messages ?? [])
+									.map((row, index) => ({
+										row,
+										account_r2_rowid: index + 1,
+									}))
+									.filter(
+										(entry) =>
+											entry.row['user_id'] === userId &&
+											entry.account_r2_rowid > afterRowid,
+									)
+									.slice(0, limit)
+									.map((entry) => ({
+										account_r2_rowid: entry.account_r2_rowid,
+										id: entry.row['id'],
+									}))
 								return { results: results as Array<T>, meta: { changes: 0 } }
 							}
 							const m = lower.match(/^select id from (\w+) where user_id = \?/)
@@ -230,7 +324,26 @@ function createTestDb(initial: RowMap): {
 							return (result.results[0] ?? null) as T | null
 						},
 						async run() {
+							if (
+								options?.failRunContaining &&
+								lower.includes(options.failRunContaining)
+							) {
+								throw new Error('simulated atomic D1 failure')
+							}
 							const userId = params[0] as string | number
+							if (
+								lower ===
+								'update users set deleting_at = coalesce(deleting_at, ?), updated_at = ? where id = ?'
+							) {
+								let changed = 0
+								for (const row of rows.users ?? []) {
+									if (row['id'] !== params[2]) continue
+									row['deleting_at'] ??= params[0]
+									row['updated_at'] = params[1]
+									changed += 1
+								}
+								return { meta: { changes: changed } }
+							}
 							const nullColumnMatch = lower.match(
 								/^update (\w+) set ((?:\w+ = null)(?:, \w+ = null)*) where (\w+) = \?$/,
 							)
@@ -351,9 +464,109 @@ function createTestDb(initial: RowMap): {
 				},
 			}
 		},
+		async batch(
+			statements: Array<{ run: () => Promise<{ meta: { changes: number } }> }>,
+		) {
+			const snapshot = structuredClone(rows)
+			try {
+				const results = []
+				for (const statement of statements) {
+					results.push(await statement.run())
+				}
+				return results
+			} catch (error) {
+				for (const key of Object.keys(rows)) delete rows[key]
+				Object.assign(rows, snapshot)
+				throw error
+			}
+		},
 	} as unknown as D1Database
 
 	return { db, rows }
+}
+
+function createSuccessfulDeletionEnv(
+	db: D1Database,
+	overrides: Partial<Env> & {
+		OAUTH_PROVIDER?: {
+			listUserGrants: (
+				userId: string,
+				options: { cursor: string | undefined },
+			) => Promise<{
+				items: Array<{ id: string; clientId: string }>
+				cursor: string | undefined
+			}>
+			revokeGrant: (grantId: string, userId: string) => Promise<unknown>
+		}
+	} = {},
+) {
+	const durableObjectId = (name: string) => name as unknown as DurableObjectId
+	const fetchOk = async () => Response.json({ ok: true })
+	return {
+		APP_DB: db,
+		CAPABILITY_VECTOR_INDEX: {
+			deleteByIds: async () => undefined,
+		},
+		STORAGE_RUNNER: {
+			idFromName: durableObjectId,
+			get: () => ({ clearStorage: async () => ({ ok: true as const }) }),
+		},
+		JOB_MANAGER: {
+			idFromName: durableObjectId,
+			get: () => ({ purgeUser: async () => ({ ok: true as const }) }),
+		},
+		REPO_SESSION: {
+			idFromName: durableObjectId,
+			get: () => ({ purgeSession: async () => ({ ok: true as const }) }),
+		},
+		REMOTE_CONNECTOR_SESSION: {
+			idFromName: durableObjectId,
+			get: () => ({
+				rpcPurgeUserSession: async () => ({ ok: true as const }),
+			}),
+		},
+		MCP_CLIENT_HUB: {
+			idFromName: durableObjectId,
+			get: () => ({ purgeForAccountDeletion: async () => undefined }),
+		},
+		PACKAGE_REALTIME_SESSION: {
+			idFromName: durableObjectId,
+			get: () => ({ fetch: fetchOk }),
+		},
+		PACKAGE_SERVICE_INSTANCE: {
+			idFromName: durableObjectId,
+			get: () => ({ fetch: fetchOk }),
+		},
+		COMMUNITY_ASSETS: {
+			async list() {
+				return {
+					objects: [],
+					delimitedPrefixes: [],
+					truncated: false as const,
+				}
+			},
+			delete: async () => undefined,
+		},
+		EMAIL_BLOBS: {
+			async list() {
+				return {
+					objects: [],
+					delimitedPrefixes: [],
+					truncated: false as const,
+				}
+			},
+			delete: async () => undefined,
+		},
+		OAUTH_PROVIDER: {
+			async listUserGrants() {
+				return { items: [], cursor: undefined }
+			},
+			async revokeGrant() {
+				return undefined
+			},
+		},
+		...overrides,
+	} as unknown as Parameters<typeof deleteUserAccount>[0]['env']
 }
 
 test('account deletion D1 coverage includes every live user-owned schema column', () => {
@@ -427,9 +640,7 @@ test('account deletion documents and preserves operator-owned system email rows'
 	})
 
 	await deleteUserAccount({
-		env: { APP_DB: db } as unknown as Parameters<
-			typeof deleteUserAccount
-		>[0]['env'],
+		env: createSuccessfulDeletionEnv(db),
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 	})
@@ -525,6 +736,10 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		remote_connector_settings: [
 			{ id: 'rc-1', user_id: userAaa, instance_id: 'home' },
 			{ id: 'rc-2', user_id: userBbb, instance_id: 'other' },
+		],
+		mcp_agent_sessions: [
+			{ do_id: 'do-user-a', user_id: userAaa },
+			{ do_id: 'do-user-b', user_id: userBbb },
 		],
 		saved_packages: [
 			{
@@ -721,6 +936,9 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'source-manifest-snapshot:v1:src-1:abc123',
 		'source-snapshot:v1:src-1:old456',
 		'source-manifest-snapshot:v1:src-1:old456',
+		'derived-cache:v1:community-icon:v1:listing-1:commit-1',
+		'derived-cache:v1:community-icon:v1:listing-1:abc123',
+		'derived-cache:v1:community-icon:v1:listing-1:historical',
 		'source-snapshot:v1:src-2:def456',
 		'package-retriever-manifest:v1:user-aaa:pkg-1:abc123',
 		'package-retriever-index-entry:v1:user-aaa:search:pkg-1:notes',
@@ -731,6 +949,9 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'package-retriever-index:v1:user-bbb:search',
 	]
 	const kv = {
+		async get(key: string) {
+			return kvStoreKeys.includes(key) ? '{}' : null
+		},
 		async delete(key: string) {
 			deletedKvKeys.push(key)
 		},
@@ -756,6 +977,19 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 					}
 				}
 			}
+			if (prefix === 'derived-cache:v1:community-icon:v1:listing-1:') {
+				const start = options?.cursor
+					? Number(options.cursor.replace('icon-page-', '')) - 1
+					: 0
+				const page = matchingKeys.slice(start, start + 1)
+				return {
+					keys: page.map((name) => ({ name })),
+					list_complete: start + page.length >= matchingKeys.length,
+					...(start + page.length < matchingKeys.length
+						? { cursor: `icon-page-${start + 2}` }
+						: {}),
+				}
+			}
 			return {
 				keys: matchingKeys.map((name) => ({ name })),
 				list_complete: true,
@@ -765,15 +999,61 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	} as unknown as KVNamespace
 
 	const deletedEmailBlobKeys: Array<string> = []
+	const emailBlobKeys = new Set([
+		'email-raw:v1:user-aaa/em-1',
+		'email-raw:v1:user-aaa/em-2',
+		'email-raw:v1:user-bbb/em-3',
+	])
 	const emailBlobs = {
-		async delete(key: string) {
-			deletedEmailBlobKeys.push(key)
+		async list(options?: { prefix?: string }) {
+			return {
+				objects: [...emailBlobKeys]
+					.filter((key) => key.startsWith(options?.prefix ?? ''))
+					.map((key) => ({ key })),
+				delimitedPrefixes: [],
+				truncated: false as const,
+			}
+		},
+		async delete(keys: string | Array<string>) {
+			for (const key of Array.isArray(keys) ? keys : [keys]) {
+				deletedEmailBlobKeys.push(key)
+				emailBlobKeys.delete(key)
+			}
 		},
 	} as unknown as R2Bucket
 	const deletedCommunityAssetKeys: Array<string> = []
+	const communityAssetKeys = new Set([
+		'user-avatars/user-aaa/abc123.png',
+		'user-avatars/user-aaa/old.png',
+		'user-avatars/user-bbb/other.png',
+		'community-icon:v1/listing-1/abc123/asset',
+		'community-icon:v1/listing-1/commit-1/asset',
+		'community-icon:v1/listing-1/historical/asset',
+		'community-icon:v1/listing-2/other/asset',
+	])
 	const communityAssets = {
-		async delete(key: string) {
-			deletedCommunityAssetKeys.push(key)
+		async list(options?: { prefix?: string; cursor?: string }) {
+			const matching = [...communityAssetKeys]
+				.filter(
+					(key) =>
+						key.startsWith(options?.prefix ?? '') &&
+						(!options?.cursor || key > options.cursor),
+				)
+				.sort()
+			const page = matching.slice(0, 1)
+			return {
+				objects: page.map((key) => ({ key })),
+				delimitedPrefixes: [],
+				...(matching.length > page.length
+					? { truncated: true as const, cursor: page[0]! }
+					: { truncated: false as const }),
+			}
+		},
+		async delete(keys: string | Array<string>) {
+			for (const key of Array.isArray(keys) ? keys : [keys]) {
+				deletedCommunityAssetKeys.push(key)
+				communityAssetKeys.delete(key)
+			}
 		},
 	} as unknown as R2Bucket
 
@@ -782,10 +1062,10 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	const purgeRepoSessionMock = vi.fn(async () => ({ ok: true as const }))
 	const purgeRemoteConnectorMock = vi.fn(async () => ({ ok: true as const }))
 	const purgeMcpClientHubMock = vi.fn(async () => undefined)
+	const purgeMcpAgentSessionMock = vi.fn(async () => undefined)
 	const doFetchMock = vi.fn(async () => Response.json({ ok: true }))
 	const deleteVectorsMock = vi.fn(async () => undefined)
-	const env = {
-		APP_DB: db,
+	const env = createSuccessfulDeletionEnv(db, {
 		BUNDLE_ARTIFACTS_KV: kv,
 		COMMUNITY_ASSETS: communityAssets,
 		EMAIL_BLOBS: emailBlobs,
@@ -812,6 +1092,12 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			idFromName: (name: string) => name as unknown as DurableObjectId,
 			get: () => ({ purgeForAccountDeletion: purgeMcpClientHubMock }),
 		},
+		MCP_OBJECT: {
+			idFromString: (id: string) => id as unknown as DurableObjectId,
+			get: () => ({
+				purgeForAccountDeletion: purgeMcpAgentSessionMock,
+			}),
+		},
 		PACKAGE_REALTIME_SESSION: {
 			idFromName: (name: string) => name as unknown as DurableObjectId,
 			get: () => ({ fetch: doFetchMock }),
@@ -820,13 +1106,13 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			idFromName: (name: string) => name as unknown as DurableObjectId,
 			get: () => ({ fetch: doFetchMock }),
 		},
-	} as unknown as Env
+	})
 
 	// password_resets.user_id is the database integer id; the deletion
 	// service must use the dbUserId (1) to clear the deleted user's reset
 	// tokens while leaving the other user's tokens in place.
 	const result = await deleteUserAccount({
-		env: env as Env & { OAUTH_PROVIDER: undefined },
+		env,
 		dbUserId: 1,
 		mcpUserId: userAaa,
 	})
@@ -847,6 +1133,9 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	])
 	expect(rows.remote_connector_settings).toEqual([
 		{ id: 'rc-2', user_id: userBbb, instance_id: 'other' },
+	])
+	expect(rows.mcp_agent_sessions).toEqual([
+		{ do_id: 'do-user-b', user_id: userBbb },
 	])
 	expect(rows.published_bundle_artifacts).toEqual([
 		{ id: 'pba-2', user_id: userBbb, kv_key: 'bundle-artifact:v1:src-2' },
@@ -986,6 +1275,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'community-snapshot:v1:listing-1',
 		'derived-cache:v1:community-icon:v1:listing-1:abc123',
 		'derived-cache:v1:community-icon:v1:listing-1:commit-1',
+		'derived-cache:v1:community-icon:v1:listing-1:historical',
 		'package-retriever-index-entry:v1:user-aaa:context:pkg-1:notes',
 		'package-retriever-index-entry:v1:user-aaa:search:pkg-1:notes',
 		'package-retriever-index:v1:user-aaa:context',
@@ -1021,16 +1311,23 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	expect(result.updatedRowCounts.community_bans).toBe(1)
 	expect(result.deletedRowCounts.platform_feedback).toBe(1)
 	expect(result.updatedRowCounts.platform_feedback).toBe(1)
-	expect(result.deletedKvKeys).toBe(13)
-	expect(result.deletedCommunityAssets).toBe(3)
+	expect(result.deletedKvKeys).toBe(14)
+	expect(result.deletedCommunityAssets).toBe(5)
 	expect(result.deletedEmailBlobs).toBe(2)
-	// Both the pinned snapshot revision and the current icon commit revision
-	// (the source's published commit) are removed, plus the user's avatar.
+	// Prefix sweeps remove current and historical assets without crossing users.
 	expect(deletedCommunityAssetKeys.sort()).toEqual([
 		'community-icon:v1/listing-1/abc123/asset',
 		'community-icon:v1/listing-1/commit-1/asset',
+		'community-icon:v1/listing-1/historical/asset',
 		'user-avatars/user-aaa/abc123.png',
+		'user-avatars/user-aaa/old.png',
 	])
+	expect(communityAssetKeys).toEqual(
+		new Set([
+			'community-icon:v1/listing-2/other/asset',
+			'user-avatars/user-bbb/other.png',
+		]),
+	)
 	expect(result.deletedVectors).toBe(5)
 	expect(result.clearedDurableObjects).toMatchObject({
 		storageRunners: 6,
@@ -1041,21 +1338,24 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		// mcp_server_settings rows, since the hub DO can still hold OAuth
 		// tokens from failed or removed registrations.
 		mcpClientHubs: 1,
+		mcpAgentSessions: 1,
 		packageRealtimeSessions: 1,
 		packageServiceInstances: 2,
 	})
 	expect(purgeMcpClientHubMock).toHaveBeenCalledTimes(1)
-	expect(result.warnings.length).toBeGreaterThan(0)
+	expect(purgeMcpAgentSessionMock).toHaveBeenCalledWith({
+		userId: userAaa,
+	})
+	expect(result.warnings).toEqual([])
 })
 
-test('deleteUserAccount handles OAuth grant revocation and warning-only edge cases', async () => {
+test('deleteUserAccount revokes OAuth grants and fails closed on critical cleanup errors', async () => {
 	const revokeGrant = vi.fn(async () => undefined)
 	const { db: revokeDb } = createTestDb({
 		users: [{ id: 1, email: 'a@example.com' }],
 	})
 	const revokeResult = await deleteUserAccount({
-		env: {
-			APP_DB: revokeDb,
+		env: createSuccessfulDeletionEnv(revokeDb, {
 			OAUTH_PROVIDER: {
 				async listUserGrants() {
 					return {
@@ -1068,45 +1368,42 @@ test('deleteUserAccount handles OAuth grant revocation and warning-only edge cas
 				},
 				revokeGrant,
 			},
-			STORAGE_RUNNER: {
-				idFromName: (name: string) => name as unknown as DurableObjectId,
-				get: () => ({ clearStorage: async () => ({ ok: true as const }) }),
-			},
-		} as unknown as Parameters<typeof deleteUserAccount>[0]['env'],
+		}),
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 	})
 	expect(revokeGrant).toHaveBeenCalledTimes(2)
 	expect(revokeResult.revokedOAuthGrants).toBe(2)
-	expect(revokeResult.warnings).toContain(
-		'JOB_MANAGER binding was unavailable; the user scheduler Durable Object was not purged.',
-	)
+	expect(revokeResult.warnings).toEqual([])
 
 	const { db: oauthFailureDb, rows: oauthFailureRows } = createTestDb({
 		users: [{ id: 1, email: 'a@example.com' }],
 		jobs: [{ id: 'job-1', user_id: 'user-aaa', storage_id: null }],
 	})
-	const oauthFailureResult = await deleteUserAccount({
-		env: {
-			APP_DB: oauthFailureDb,
-			OAUTH_PROVIDER: {
-				async listUserGrants() {
-					throw new Error('OAuth provider is temporarily unavailable')
+	await expect(
+		deleteUserAccount({
+			env: createSuccessfulDeletionEnv(oauthFailureDb, {
+				OAUTH_PROVIDER: {
+					async listUserGrants() {
+						throw new Error('OAuth provider is temporarily unavailable')
+					},
+					revokeGrant: vi.fn(async () => undefined),
 				},
-				revokeGrant: vi.fn(async () => undefined),
-			},
-			STORAGE_RUNNER: {
-				idFromName: (name: string) => name as unknown as DurableObjectId,
-				get: () => ({ clearStorage: async () => ({ ok: true as const }) }),
-			},
-		} as unknown as Parameters<typeof deleteUserAccount>[0]['env'],
-		dbUserId: 1,
-		mcpUserId: 'user-aaa',
-	})
-	expect(oauthFailureRows.jobs).toEqual([])
-	expect(oauthFailureRows.users).toEqual([])
-	expect(oauthFailureResult.revokedOAuthGrants).toBe(0)
-	expect(oauthFailureResult.warnings.length).toBeGreaterThan(0)
+			}),
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toBeInstanceOf(AccountDeletionCleanupError)
+	expect(oauthFailureRows.jobs).toEqual([
+		{ id: 'job-1', user_id: 'user-aaa', storage_id: null },
+	])
+	expect(oauthFailureRows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			email: 'a@example.com',
+			deleting_at: expect.any(String),
+		}),
+	])
 
 	const { db: kvFailureDb, rows: kvFailureRows } = createTestDb({
 		users: [{ id: 1, email: 'a@example.com' }],
@@ -1124,31 +1421,305 @@ test('deleteUserAccount handles OAuth grant revocation and warning-only edge cas
 			},
 		],
 	})
-	const kvFailureResult = await deleteUserAccount({
-		env: {
-			APP_DB: kvFailureDb,
-			EMAIL_BLOBS: {
-				delete: vi.fn(async () => {
-					throw new Error('simulated R2 outage')
-				}),
+	await expect(
+		deleteUserAccount({
+			env: createSuccessfulDeletionEnv(kvFailureDb, {
+				BUNDLE_ARTIFACTS_KV: {
+					delete: vi.fn(async () => undefined),
+					list: vi.fn(async () => ({
+						keys: [],
+						list_complete: true,
+						cursor: undefined,
+					})),
+				},
+				EMAIL_BLOBS: {
+					list: vi.fn(async () => ({
+						objects: [{ key: 'email-raw:v1:user-aaa/em-1' }],
+						delimitedPrefixes: [],
+						truncated: false,
+					})),
+					delete: vi.fn(async () => {
+						throw new Error('simulated R2 outage')
+					}),
+				},
+			}),
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toMatchObject({
+		cleanupErrors: expect.arrayContaining([
+			expect.stringContaining('Email raw MIME prefix delete failed'),
+		]),
+	})
+	expect(kvFailureRows.published_bundle_artifacts).toHaveLength(1)
+	expect(kvFailureRows.archived_job_artifacts).toHaveLength(1)
+	expect(kvFailureRows.email_messages).toHaveLength(1)
+	expect(kvFailureRows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			email: 'a@example.com',
+			deleting_at: expect.any(String),
+		}),
+	])
+})
+
+test('account deletion reports a missing email blob binding and remains retryable', async () => {
+	const { db, rows } = createTestDb({
+		users: [
+			{
+				id: 1,
+				email: 'a@example.com',
+				stable_user_id: 'user-aaa',
 			},
-			STORAGE_RUNNER: {
-				idFromName: (name: string) => name as unknown as DurableObjectId,
-				get: () => ({ clearStorage: async () => ({ ok: true as const }) }),
+		],
+		email_messages: [{ id: 'message-a', user_id: 'user-aaa' }],
+	})
+	await expect(
+		deleteUserAccount({
+			env: createSuccessfulDeletionEnv(db, {
+				EMAIL_BLOBS: undefined,
+			}),
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toMatchObject({
+		cleanupErrors: expect.arrayContaining([
+			'EMAIL_BLOBS binding was unavailable; email objects were not removed.',
+		]),
+	})
+	expect(rows.email_messages).toEqual([
+		{ id: 'message-a', user_id: 'user-aaa' },
+	])
+	expect(rows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			deleting_at: expect.any(String),
+		}),
+	])
+})
+
+test('account deletion is disabled until legacy MCP sessions are backfilled', async () => {
+	const { db, rows } = createTestDb({
+		users: [{ id: 1, stable_user_id: 'user-aaa' }],
+		deployment_backfill_markers: [],
+	})
+	await expect(
+		deleteUserAccount({
+			env: createSuccessfulDeletionEnv(db),
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toThrow('MCP agent session backfill is incomplete')
+	expect(rows.users).toEqual([{ id: 1, stable_user_id: 'user-aaa' }])
+})
+
+test('deleteUserAccount fails closed when preflight inventory cannot be read', async () => {
+	const { db, rows } = createTestDb(
+		{
+			users: [{ id: 1, email: 'a@example.com' }],
+			mcp_memories: [{ id: 'memory-a', user_id: 'user-aaa' }],
+			jobs: [{ id: 'job-a', user_id: 'user-aaa', storage_id: 'job:job-a' }],
+		},
+		{ failSelectContaining: 'select id from mcp_memories where user_id = ?' },
+	)
+	const deleteVectors = vi.fn(async () => undefined)
+	const clearStorage = vi.fn(async () => undefined)
+	await expect(
+		deleteUserAccount({
+			env: {
+				APP_DB: db,
+				CAPABILITY_VECTOR_INDEX: { deleteByIds: deleteVectors },
+				STORAGE_RUNNER: {
+					idFromName: (name: string) => name as unknown as DurableObjectId,
+					get: () => ({ clearStorage }),
+				},
+			} as unknown as Parameters<typeof deleteUserAccount>[0]['env'],
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toBeInstanceOf(AccountDeletionInventoryError)
+	expect(rows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			email: 'a@example.com',
+			deleting_at: expect.any(String),
+		}),
+	])
+	expect(rows.mcp_memories).toEqual([{ id: 'memory-a', user_id: 'user-aaa' }])
+	expect(rows.jobs).toEqual([
+		{ id: 'job-a', user_id: 'user-aaa', storage_id: 'job:job-a' },
+	])
+	expect(deleteVectors).not.toHaveBeenCalled()
+	expect(clearStorage).not.toHaveBeenCalled()
+})
+
+test('account deletion removes deterministic legacy retriever keys when KV listing fails', async () => {
+	const { db, rows } = createTestDb({
+		users: [{ id: 1, email: 'a@example.com' }],
+		saved_packages: [
+			{
+				id: 'package-a',
+				user_id: 'user-aaa',
+				kody_id: 'package-a',
+				source_id: 'source-a',
+				has_app: 0,
 			},
-		} as unknown as Parameters<typeof deleteUserAccount>[0]['env'],
+		],
+	})
+	const deletedKeys: Array<string> = []
+	await expect(
+		deleteUserAccount({
+			env: createSuccessfulDeletionEnv(db, {
+				BUNDLE_ARTIFACTS_KV: {
+					get: vi.fn(async () => '{}'),
+					delete: vi.fn(async (key: string) => {
+						deletedKeys.push(key)
+					}),
+					list: vi.fn(async () => {
+						throw new Error('KV list unavailable')
+					}),
+				},
+			}),
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toBeInstanceOf(AccountDeletionCleanupError)
+	expect(rows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			email: 'a@example.com',
+			deleting_at: expect.any(String),
+		}),
+	])
+	expect(deletedKeys).toEqual(
+		expect.arrayContaining([
+			'package-retriever-index:v1:user-aaa:search',
+			'package-retriever-index:v1:user-aaa:context',
+		]),
+	)
+})
+
+test('atomic D1 deletion rolls back every row when one statement fails', async () => {
+	const { db, rows } = createTestDb(
+		{
+			users: [{ id: 1, email: 'a@example.com' }],
+			jobs: [{ id: 'job-a', user_id: 'user-aaa', storage_id: null }],
+			mcp_memories: [{ id: 'memory-a', user_id: 'user-aaa' }],
+		},
+		{ failRunContaining: 'delete from jobs where user_id = ?' },
+	)
+	await expect(
+		deleteUserAccount({
+			env: createSuccessfulDeletionEnv(db),
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toMatchObject({
+		cleanupErrors: [
+			expect.stringContaining('Atomic D1 account deletion failed'),
+		],
+	})
+	expect(rows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			email: 'a@example.com',
+			deleting_at: expect.any(String),
+		}),
+	])
+	expect(rows.jobs).toEqual([
+		{ id: 'job-a', user_id: 'user-aaa', storage_id: null },
+	])
+	expect(rows.mcp_memories).toEqual([{ id: 'memory-a', user_id: 'user-aaa' }])
+})
+
+test('account deletion quiesces a concurrent user write before inventory', async () => {
+	let env: Parameters<typeof deleteUserAccount>[0]['env']
+	let raceAttempted = false
+	let writeCommitted = false
+	let writeError: unknown
+	const { db } = createTestDb(
+		{
+			users: [
+				{
+					id: 1,
+					email: 'a@example.com',
+					stable_user_id: 'user-aaa',
+					updated_at: '2026-07-22',
+				},
+			],
+		},
+		{
+			async onSelect(query) {
+				if (
+					raceAttempted ||
+					!query.includes('select id from mcp_memories where user_id = ?')
+				) {
+					return
+				}
+				raceAttempted = true
+				try {
+					await assertAccountWritable(env, 'user-aaa')
+					writeCommitted = true
+				} catch (error) {
+					writeError = error
+				}
+			},
+		},
+	)
+	env = createSuccessfulDeletionEnv(db)
+	await deleteUserAccount({
+		env,
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 	})
-	expect(kvFailureRows.published_bundle_artifacts).toEqual([])
-	expect(kvFailureRows.archived_job_artifacts).toEqual([])
-	expect(kvFailureRows.email_messages).toEqual([])
-	expect(kvFailureResult.deletedKvKeys).toBe(0)
-	// The D1 rows are still removed when the blob delete fails; the
-	// stranded blob is reported as a warning instead of aborting.
-	expect(kvFailureResult.deletedEmailBlobs).toBe(0)
-	expect(kvFailureResult.warnings).toContain(
-		'Email blob delete failed for email-raw:v1:user-aaa/em-1: simulated R2 outage',
+	expect(raceAttempted).toBe(true)
+	expect(writeCommitted).toBe(false)
+	expect(writeError).toBeInstanceOf(AccountDeletionInProgressError)
+})
+
+test('account deletion waits for an active writer and resumes on retry', async () => {
+	const { db, rows } = createTestDb({
+		users: [
+			{
+				id: 1,
+				email: 'a@example.com',
+				stable_user_id: 'user-aaa',
+				active_write_count: 1,
+				updated_at: '2026-07-22',
+			},
+		],
+		account_write_leases: [
+			{
+				token: 'crashed-token',
+				user_id: 'user-aaa',
+				holder: 'test',
+				acquired_at: '2000-01-01 00:00:00',
+				released_at: null,
+			},
+		],
+	})
+	const env = createSuccessfulDeletionEnv(db)
+	await expect(
+		deleteUserAccount({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toBeInstanceOf(AccountDeletionWritersActiveError)
+	expect(rows.users?.[0]).toEqual(
+		expect.objectContaining({
+			deleting_at: expect.any(String),
+			active_write_count: 1,
+		}),
 	)
-	expect(kvFailureResult.warnings.length).toBeGreaterThan(0)
+	rows.account_write_leases![0]!['released_at'] = '2026-07-23 00:00:00'
+	rows.users![0]!['active_write_count'] = 0
+	await expect(
+		deleteUserAccount({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).resolves.toEqual(expect.objectContaining({ warnings: [] }))
+	expect(rows.users).toEqual([])
 })

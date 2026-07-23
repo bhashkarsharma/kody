@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
 	createAccountExport,
+	createAccountExportManifest,
 	getAccountExportD1UserColumnCoverage,
 	readAccountExportSection,
 } from './account-export.ts'
@@ -19,10 +20,14 @@ function applyMigrations(db: DatabaseSync) {
 
 function createD1FromSqlite(
 	db: DatabaseSync,
-	options?: { onQueryRows?: (rowCount: number) => void },
+	options?: {
+		onQueryRows?: (rowCount: number) => void
+		onQuery?: (query: string) => void
+	},
 ) {
 	return {
 		prepare(query: string) {
+			options?.onQuery?.(query.replace(/\s+/g, ' ').trim())
 			return {
 				bind(...params: Array<unknown>) {
 					return {
@@ -68,6 +73,7 @@ function createD1FromSqlite(
 
 function createMigratedDb(options?: {
 	onQueryRows?: (rowCount: number) => void
+	onQuery?: (query: string) => void
 }) {
 	const sqlite = new DatabaseSync(':memory:')
 	applyMigrations(sqlite)
@@ -141,12 +147,15 @@ test('account export documents and excludes operator-owned system email rows', a
 	expect(accountExport.d1.email_messages.rows).toEqual([
 		expect.objectContaining({ id: 'user-message', user_id: 'user-aaa' }),
 	])
-	expect(accountExport.manifest.excludedD1Surfaces).toEqual([
-		expect.objectContaining({
-			name: 'system_email_inboxes',
-			reason: expect.stringContaining('Operator-owned inbound mail'),
-		}),
-	])
+	expect(accountExport.manifest.sections.r2_object?.count).toBe(1)
+	expect(accountExport.manifest.excludedD1Surfaces).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				name: 'system_email_inboxes',
+				reason: expect.stringContaining('Operator-owned inbound mail'),
+			}),
+		]),
+	)
 })
 
 test('account export includes submitted feedback but excludes reviewer-only relationships', async () => {
@@ -322,10 +331,6 @@ test('account export includes profile fields and social graph edges for either s
 	).toBe(false)
 
 	expect(accountExport.d1.community_stars.rows).toEqual([
-		expect.objectContaining({
-			listing_id: 'listing-a',
-			user_id: '[redacted]',
-		}),
 		expect.objectContaining({ listing_id: 'listing-b', user_id: 'user-aaa' }),
 	])
 	expect(
@@ -340,11 +345,6 @@ test('account export includes profile fields and social graph edges for either s
 			actor_user_id: 'user-aaa',
 			event_type: 'listing_published',
 		}),
-		expect.objectContaining({
-			id: 'evt-b',
-			actor_user_id: '[redacted]',
-			listing_id: 'listing-a',
-		}),
 	])
 	expect(
 		accountExport.d1.community_activity_events.rows.some(
@@ -353,10 +353,542 @@ test('account export includes profile fields and social graph edges for either s
 	).toBe(false)
 
 	expect(accountExport.manifest.sections['d1.user_follows']?.count).toBe(2)
-	expect(accountExport.manifest.sections['d1.community_stars']?.count).toBe(2)
+	expect(accountExport.manifest.sections['d1.community_stars']?.count).toBe(1)
 	expect(
 		accountExport.manifest.sections['d1.community_activity_events']?.count,
-	).toBe(2)
+	).toBe(1)
+})
+
+test('account export separates listing-owner deletion cascades from participant ownership', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		) VALUES
+			(1, 'owner', 'owner@example.com', 'hash', '2026-07-05', '2026-07-05', '2026-07-05', 'user-owner'),
+			(2, 'participant', 'participant@example.com', 'hash', '2026-07-05', '2026-07-05', '2026-07-05', 'user-participant');
+		INSERT INTO community_listings (
+			id, owner_user_id, package_id, source_id, kody_id, name, description,
+			tags_json, license, pinned_commit, status, published_at
+		) VALUES (
+			'listing-owner', 'user-owner', 'pkg-owner', 'src-owner', 'owned',
+			'@owner/owned', 'Owned listing', '[]', 'MIT', 'commit-owner', 'active',
+			'2026-07-05'
+		);
+		INSERT INTO community_ratings (
+			id, listing_id, user_id, stars, adaptation_effort, note
+		) VALUES (
+			'rating-private', 'listing-owner', 'user-participant', 4, 3,
+			'private rating note'
+		);
+		INSERT INTO community_forks (
+			id, listing_id, forker_user_id, origin_commit, forked_package_id,
+			forked_source_id, target_kody_id, adoption_note
+		) VALUES (
+			'fork-private', 'listing-owner', 'user-participant', 'commit-owner',
+			'pkg-fork', 'src-fork', 'forked', 'private adoption note'
+		);
+		INSERT INTO community_reports (
+			id, listing_id, listing_name, listing_owner_user_id, reporter_user_id,
+			reason, resolved_by_user_id
+		) VALUES (
+			'report-private', 'listing-owner', '@owner/owned', 'user-owner',
+			'user-participant', 'private report reason', 'user-moderator'
+		);
+	`)
+	const ownerExport = await createAccountExport({
+		env: { APP_DB: db } as Env,
+		dbUserId: 1,
+		mcpUserId: 'user-owner',
+	})
+	expect(ownerExport.d1.community_ratings.rows).toEqual([])
+	expect(ownerExport.d1.community_forks.rows).toEqual([])
+	expect(ownerExport.d1.community_reports.rows).toEqual([])
+
+	const participantExport = await createAccountExport({
+		env: { APP_DB: db } as Env,
+		dbUserId: 2,
+		mcpUserId: 'user-participant',
+	})
+	expect(participantExport.d1.community_ratings.rows).toEqual([
+		expect.objectContaining({
+			id: 'rating-private',
+			note: 'private rating note',
+		}),
+	])
+	expect(participantExport.d1.community_forks.rows).toEqual([
+		expect.objectContaining({
+			id: 'fork-private',
+			adoption_note: 'private adoption note',
+		}),
+	])
+	expect(participantExport.d1.community_reports.rows).toEqual([
+		expect.objectContaining({
+			id: 'report-private',
+			reason: 'private report reason',
+			reporter_user_id: 'user-participant',
+			listing_owner_user_id: '[redacted]',
+			resolved_by_user_id: '[redacted]',
+		}),
+	])
+})
+
+test('account write lease repair export redacts the foreign party for both perspectives', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		) VALUES
+			(1, 'target', 'target@example.com', 'hash', '2026-07-05', '2026-07-05', '2026-07-05', 'user-target'),
+			(2, 'admin', 'admin@example.com', 'hash', '2026-07-05', '2026-07-05', '2026-07-05', 'user-admin');
+		INSERT INTO account_write_lease_repairs (
+			id, target_user_id, lease_token, lease_holder, lease_acquired_at,
+			repaired_by_user_id, reason, created_at
+		) VALUES (
+			'repair-a', 'user-target', 'token-a', 'job:run', '2026-07-05',
+			'user-admin', 'Confirmed crashed worker', '2026-07-05'
+		);
+	`)
+	const targetExport = await createAccountExport({
+		env: { APP_DB: db } as Env,
+		dbUserId: 1,
+		mcpUserId: 'user-target',
+	})
+	expect(targetExport.d1.account_write_lease_repairs.rows).toEqual([
+		expect.objectContaining({
+			target_user_id: 'user-target',
+			repaired_by_user_id: '[redacted]',
+		}),
+	])
+	const adminExport = await createAccountExport({
+		env: { APP_DB: db } as Env,
+		dbUserId: 2,
+		mcpUserId: 'user-admin',
+	})
+	expect(adminExport.d1.account_write_lease_repairs.rows).toEqual([
+		expect.objectContaining({
+			target_user_id: '[redacted]',
+			repaired_by_user_id: 'user-admin',
+		}),
+	])
+})
+
+test('R2 export pages owned payloads in bounded chunks and reports missing objects', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id, avatar_key
+		) VALUES
+			(1, 'user-a', 'a@example.com', 'hash', '2026-07-05', '2026-07-05', '2026-07-05', 'user-aaa', 'user-avatars/user-aaa/avatar.png'),
+			(2, 'user-b', 'b@example.com', 'hash', '2026-07-05', '2026-07-05', '2026-07-05', 'user-bbb', 'user-avatars/user-bbb/avatar.png');
+		INSERT INTO email_messages (
+			id, direction, user_id, from_address, subject, processing_status,
+			created_at, updated_at
+		) VALUES
+			('mail-a', 'inbound', 'user-aaa', 'sender@example.com', 'A', 'stored', '2026-07-05', '2026-07-05'),
+			('mail-z', 'inbound', 'user-aaa', 'sender@example.com', 'Z', 'stored', '2026-07-05', '2026-07-05'),
+			('mail-b', 'inbound', 'user-bbb', 'sender@example.com', 'B', 'stored', '2026-07-05', '2026-07-05');
+	`)
+	const mimeBytes = new TextEncoder().encode('Subject: A\r\n\r\nbody')
+	const getEmailBlob = vi.fn(async (key: string) => {
+		if (key === 'email-raw:v1:user-aaa/mail-z') {
+			throw new Error('temporary R2 outage')
+		}
+		if (key !== 'email-raw:v1:user-aaa/mail-a') return null
+		return {
+			size: mimeBytes.byteLength,
+			httpEtag: '"etag-a"',
+			httpMetadata: { contentType: 'message/rfc822' },
+			arrayBuffer: async () => mimeBytes.buffer,
+		}
+	})
+	const env = {
+		APP_DB: db,
+		COOKIE_SECRET: 'test-cookie-secret',
+		EMAIL_BLOBS: { get: getEmailBlob },
+		COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
+	} as unknown as Env
+
+	const first = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+	})
+	expect(first.items).toEqual([
+		expect.objectContaining({
+			surfaceId: 'user_avatar',
+			key: 'user-avatars/user-aaa/avatar.png',
+			missing: true,
+		}),
+	])
+	const firstCursor = first.nextStartAfter!
+	const tamperedCursor = `${firstCursor.slice(0, -1)}${firstCursor.endsWith('a') ? 'b' : 'a'}`
+	await expect(
+		readAccountExportSection({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'r2_object',
+			startAfter: tamperedCursor,
+		}),
+	).rejects.toThrow('Invalid r2_object cursor.')
+	const second = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+		startAfter: first.nextStartAfter ?? undefined,
+	})
+	expect(second.items).toEqual([
+		expect.objectContaining({
+			surfaceId: 'email_raw_mime',
+			key: 'email-raw:v1:user-aaa/mail-a',
+			contentBase64: btoa('Subject: A\r\n\r\nbody'),
+			objectComplete: true,
+		}),
+	])
+	expect(second.truncated).toBe(true)
+	const third = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+		startAfter: second.nextStartAfter ?? undefined,
+	})
+	expect(third.items).toEqual([
+		expect.objectContaining({
+			key: 'email-raw:v1:user-aaa/mail-z',
+			unavailable: true,
+		}),
+	])
+	expect(third.truncated).toBe(true)
+	expect(third.warnings).toEqual([
+		expect.stringContaining('R2 object export failed'),
+	])
+	const done = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+		startAfter: third.nextStartAfter ?? undefined,
+	})
+	expect(done.items).toEqual([])
+	expect(done.truncated).toBe(false)
+	expect(getEmailBlob).not.toHaveBeenCalledWith(
+		'email-raw:v1:user-bbb/mail-b',
+		expect.anything(),
+	)
+})
+
+test('R2 export performs bounded keyset work independent of mailbox size', async () => {
+	const queries: Array<string> = []
+	const { sqlite, db } = createMigratedDb({
+		onQuery: (query) => queries.push(query),
+	})
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		) VALUES (
+			1, 'user-a', 'a@example.com', 'hash', '2026-07-05', '2026-07-05',
+			'2026-07-05', 'user-aaa'
+		);
+	`)
+	const insert = sqlite.prepare(
+		`INSERT INTO email_messages (
+			id, direction, user_id, from_address, subject, processing_status,
+			created_at, updated_at
+		) VALUES (?, 'inbound', 'user-aaa', 'sender@example.com', ?, 'stored', '2026-07-05', '2026-07-05')`,
+	)
+	for (let index = 0; index < 1201; index += 1) {
+		insert.run(`mail-${String(index).padStart(4, '0')}`, `Mail ${index}`)
+	}
+	const page = await readAccountExportSection({
+		env: {
+			APP_DB: db,
+			COOKIE_SECRET: 'test-cookie-secret',
+			EMAIL_BLOBS: { get: vi.fn(async () => null) },
+			COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
+		} as unknown as Env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+	})
+	expect(page.items).toEqual([
+		expect.objectContaining({
+			key: 'email-raw:v1:user-aaa/mail-0000',
+			missing: true,
+		}),
+	])
+	expect(queries.length).toBeLessThanOrEqual(4)
+	expect(
+		queries.some(
+			(query) => query === 'SELECT id FROM email_messages WHERE user_id = ?',
+		),
+	).toBe(false)
+})
+
+test('R2 export cursor detects object overwrite before continuing bytes', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id, avatar_key
+		) VALUES (
+			1, 'user-a', 'a@example.com', 'hash', '2026-07-05', '2026-07-05',
+			'2026-07-05', 'user-aaa', 'user-avatars/user-aaa/avatar.png'
+		);
+	`)
+	const bytes = new Uint8Array(300 * 1024).fill(1)
+	let etag = '"v1"'
+	const get = vi.fn(
+		async (
+			_key: string,
+			options?: { range?: { offset: number; length: number } },
+		) => {
+			const offset = options?.range?.offset ?? 0
+			const length = options?.range?.length ?? bytes.byteLength
+			const chunk = bytes.slice(offset, offset + length)
+			return {
+				size: bytes.byteLength,
+				httpEtag: etag,
+				httpMetadata: { contentType: 'image/png' },
+				arrayBuffer: async () => chunk.buffer,
+			}
+		},
+	)
+	const head = vi.fn(async () => ({
+		size: bytes.byteLength,
+		httpEtag: etag,
+	}))
+	const env = {
+		APP_DB: db,
+		COOKIE_SECRET: 'test-cookie-secret',
+		COMMUNITY_ASSETS: { get, head },
+		EMAIL_BLOBS: { get: vi.fn(async () => null), head },
+	} as unknown as Env
+	const first = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+	})
+	expect(first.items).toEqual([
+		expect.objectContaining({
+			offset: 0,
+			etag: '"v1"',
+			objectComplete: false,
+		}),
+	])
+	etag = '"v2"'
+	const second = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+		startAfter: first.nextStartAfter ?? undefined,
+	})
+	expect(second.items).toEqual([
+		expect.objectContaining({
+			changed: true,
+			change: 'object_overwritten',
+			expectedEtag: '"v1"',
+			actualEtag: '"v2"',
+		}),
+	])
+	expect(get).toHaveBeenCalledTimes(1)
+})
+
+test('R2 export cursor keeps stable row identity when inventory mutates', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		) VALUES (
+			1, 'user-a', 'a@example.com', 'hash', '2026-07-05', '2026-07-05',
+			'2026-07-05', 'user-aaa'
+		);
+		INSERT INTO email_messages (
+			id, direction, user_id, from_address, subject, processing_status,
+			created_at, updated_at
+		) VALUES
+			('mail-a', 'inbound', 'user-aaa', 'sender@example.com', 'A', 'stored', '2026-07-05', '2026-07-05'),
+			('mail-b', 'inbound', 'user-aaa', 'sender@example.com', 'B', 'stored', '2026-07-05', '2026-07-05');
+	`)
+	const requestedKeys: Array<string> = []
+	const get = vi.fn(async (key: string) => {
+		requestedKeys.push(key)
+		const bytes = new TextEncoder().encode(key)
+		return {
+			size: bytes.byteLength,
+			httpEtag: `"${key}"`,
+			arrayBuffer: async () => bytes.buffer,
+		}
+	})
+	const env = {
+		APP_DB: db,
+		COOKIE_SECRET: 'test-cookie-secret',
+		EMAIL_BLOBS: { get },
+		COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
+	} as unknown as Env
+	const first = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+	})
+	sqlite.exec(`
+		INSERT INTO email_messages (
+			id, direction, user_id, from_address, subject, processing_status,
+			created_at, updated_at
+		) VALUES (
+			'mail-00', 'inbound', 'user-aaa', 'sender@example.com', 'Inserted',
+			'stored', '2026-07-05', '2026-07-05'
+		);
+	`)
+	const second = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'r2_object',
+		startAfter: first.nextStartAfter ?? undefined,
+	})
+	expect(second.items).toEqual([
+		expect.objectContaining({ key: 'email-raw:v1:user-aaa/mail-b' }),
+	])
+	expect(requestedKeys).toEqual([
+		'email-raw:v1:user-aaa/mail-a',
+		'email-raw:v1:user-aaa/mail-b',
+	])
+})
+
+test('DO export sections expose bounded job manager and owned connector state', async () => {
+	const db = {
+		prepare(query: string) {
+			return {
+				bind() {
+					return {
+						async first<T>() {
+							if (query.includes('FROM remote_connector_settings')) {
+								return { owned: 1 } as T
+							}
+							return null
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+	const env = {
+		APP_DB: db,
+		JOB_MANAGER: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				exportUser: async () => ({
+					userId: 'user-aaa',
+					alarm: null,
+					status: 'idle',
+				}),
+			}),
+		},
+		REMOTE_CONNECTOR_SESSION: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				rpcExportUserSessionPage: async () => ({
+					persisted: { instanceId: 'home' },
+					tools: [],
+					connected: false,
+					truncated: false,
+					nextStartAfter: null,
+					pageSize: 100,
+				}),
+			}),
+		},
+	} as unknown as Env
+	const jobManager = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'job_manager',
+	})
+	expect(jobManager.items).toEqual([
+		expect.objectContaining({ userId: 'user-aaa' }),
+	])
+	expect(jobManager.truncated).toBe(false)
+
+	const connector = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'remote_connector_session',
+		instanceId: 'home',
+	})
+	expect(connector.items).toEqual([
+		expect.objectContaining({
+			instanceId: 'home',
+			connected: false,
+		}),
+	])
+})
+
+test('durable object discovery pages high-cardinality storage ids without nested arrays', async () => {
+	const ids = Array.from(
+		{ length: 1201 },
+		(_, index) => `storage-${String(index).padStart(4, '0')}`,
+	)
+	let maxRows = 0
+	const db = {
+		prepare(query: string) {
+			return {
+				bind(...params: Array<unknown>) {
+					return {
+						async all<T>() {
+							if (query.includes('SELECT id FROM (')) {
+								const afterId = String(params[4])
+								const limit = Number(params[5])
+								const rows = ids
+									.filter((id) => id > afterId)
+									.slice(0, limit)
+									.map((id) => ({ id }))
+								maxRows = Math.max(maxRows, rows.length)
+								return { results: rows as Array<T> }
+							}
+							if (query.includes('SELECT DISTINCT package_id, name')) {
+								return { results: [] as Array<T> }
+							}
+							throw new Error(`Unexpected query: ${query}`)
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database
+	const seen = new Set<string>()
+	let startAfter: string | undefined
+	for (;;) {
+		const page = await readAccountExportSection({
+			env: { APP_DB: db } as Env,
+			dbUserId: 1,
+			mcpUserId: 'user-a',
+			section: 'durable_object_summaries',
+			kind: 'storage_runner',
+			pageSize: 100,
+			startAfter,
+		})
+		for (const item of page.items as Array<{ storageId: string }>) {
+			expect(Array.isArray(item.storageId)).toBe(false)
+			seen.add(item.storageId)
+		}
+		if (!page.truncated) break
+		startAfter = page.nextStartAfter ?? undefined
+	}
+	expect(seen.size).toBe(1201)
+	expect(maxRows).toBeLessThanOrEqual(101)
 })
 
 test('createAccountExport redacts secrets and credential-equivalent hashes', async () => {
@@ -627,8 +1159,10 @@ test('createAccountExport records partial-failure warnings and section paginatio
 
 test('D1 export reads large tables in bounded keyset pages', async () => {
 	const rowCounts: Array<number> = []
+	const queries: Array<string> = []
 	const { sqlite, db } = createMigratedDb({
 		onQueryRows: (rowCount) => rowCounts.push(rowCount),
+		onQuery: (query) => queries.push(query),
 	})
 	sqlite.exec(`
 		INSERT INTO users (
@@ -649,6 +1183,16 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 	for (let index = 0; index < totalMessages; index += 1) {
 		insert.run(`message-${String(index).padStart(4, '0')}`, `Mail ${index}`)
 	}
+	sqlite.exec(`
+		INSERT INTO package_runtime_runs (
+			id, user_id, package_id, package_kody_id, surface, name, status,
+			started_at, storage_id, created_at, updated_at
+		) VALUES (
+			'service-run', 'user-aaa', 'pkg:1', 'pkg', 'service', 'svc x',
+			'success', '2026-07-05', 'service:pkg%3A1:svc%20x',
+			'2026-07-05', '2026-07-05'
+		);
+	`)
 
 	const accountExport = await createAccountExport({
 		env: { APP_DB: db } as Env,
@@ -688,4 +1232,34 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 	expect(pages).toBe(3)
 	expect(seenIds.size).toBe(totalMessages)
 	expect(Math.max(...rowCounts)).toBeLessThanOrEqual(501)
+
+	rowCounts.length = 0
+	queries.length = 0
+	let oauthPage = 0
+	const manifest = await createAccountExportManifest({
+		env: {
+			APP_DB: db,
+			OAUTH_PROVIDER: {
+				async listUserGrants() {
+					oauthPage += 1
+					return {
+						items: [{ id: `grant-${oauthPage}`, clientId: 'client' }],
+						cursor: oauthPage < 100 ? String(oauthPage) : undefined,
+					}
+				},
+			},
+		} as unknown as Env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+	})
+	expect(manifest.sections['d1.email_messages']?.count).toBe(totalMessages)
+	expect(manifest.sections.oauth_grants?.count).toBe(100)
+	expect(manifest.sections.storage_runners?.count).toBe(1)
+	expect(Math.max(...rowCounts)).toBeLessThanOrEqual(1)
+	expect(
+		queries.some((query) => query.includes('__account_export_rowid')),
+	).toBe(false)
+	expect(
+		queries.some((query) => query.startsWith('SELECT storage_id FROM jobs')),
+	).toBe(false)
 })

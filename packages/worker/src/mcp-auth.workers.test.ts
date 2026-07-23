@@ -95,6 +95,8 @@ type MockDbOptions = {
 function createMockDb(options: MockDbOptions = {}) {
 	const defaultEmail = options.expectedEmail ?? 'user@example.com'
 	const defaultStableUserId = options.expectedStableUserId ?? 'user'
+	const expectedLeaseUserId =
+		options.accountByStableId?.stable_user_id ?? defaultStableUserId
 	const recordVerificationLookup = (kind: VerificationLookupKind) => {
 		options.verificationLookups?.push(kind)
 	}
@@ -114,6 +116,18 @@ function createMockDb(options: MockDbOptions = {}) {
 					results: options.connectorRows ?? [],
 					meta: { changes: 0 },
 				}
+			},
+			async run() {
+				if (normalized.startsWith('update users')) {
+					if (
+						!normalized.includes('where stable_user_id = ?') ||
+						!boundParams.includes(expectedLeaseUserId)
+					) {
+						throw new Error('Unscoped account write lease update.')
+					}
+					return { meta: { changes: 1 } }
+				}
+				throw new Error(`Unsupported run query: ${query}`)
 			},
 			async first() {
 				const boundStableUserId =

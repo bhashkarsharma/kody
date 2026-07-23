@@ -18,6 +18,9 @@ export async function ensurePackageScopeGrantsTestSchema(db: D1Database) {
 	stable_user_id TEXT NOT NULL,
 	account_type TEXT NOT NULL DEFAULT 'person' CHECK (account_type IN ('person', 'platform')),
 	plan TEXT NOT NULL DEFAULT 'free',
+	deleting_at TEXT,
+	active_write_count INTEGER NOT NULL DEFAULT 0,
+	active_write_expires_at TEXT,
 	created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
 	updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 )`,
@@ -28,6 +31,9 @@ export async function ensurePackageScopeGrantsTestSchema(db: D1Database) {
 		'stable_user_id TEXT',
 		`account_type TEXT NOT NULL DEFAULT 'person'`,
 		`plan TEXT NOT NULL DEFAULT 'free'`,
+		'deleting_at TEXT',
+		'active_write_count INTEGER NOT NULL DEFAULT 0',
+		'active_write_expires_at TEXT',
 	]) {
 		try {
 			await db.prepare(`ALTER TABLE users ADD COLUMN ${column}`).run()
@@ -35,6 +41,17 @@ export async function ensurePackageScopeGrantsTestSchema(db: D1Database) {
 			// Column already exists (fresh CREATE above or prior suite setup).
 		}
 	}
+	await db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS account_write_leases (
+				token TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				holder TEXT NOT NULL,
+				acquired_at TEXT NOT NULL,
+				released_at TEXT
+			)`,
+		)
+		.run()
 	try {
 		await db
 			.prepare(

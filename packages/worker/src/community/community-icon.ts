@@ -2,6 +2,11 @@ import { cachified } from '@epic-web/cachified'
 import { Resvg } from '@resvg/resvg-wasm'
 import { invalidateCommunityPublicCache } from '#app/data-cache.ts'
 import {
+	AccountDeletionInProgressError,
+	assertAccountWritableDb,
+	withAccountWriteLease,
+} from '#app/account-deletion-state.ts'
+import {
 	createKvCachifiedCache,
 	derivedCacheKeyPrefix,
 } from '#worker/kv-cachified.ts'
@@ -90,7 +95,16 @@ export async function getCommunityIconObject(input: {
 		...baseCache,
 		async set(key: string, entry: Parameters<typeof baseCache.set>[1]) {
 			if (await isServableIconCommit(input)) {
-				await baseCache.set(key, entry)
+				const write = async () => await baseCache.set(key, entry)
+				if (typeof input.env.APP_DB.prepare === 'function') {
+					await withAccountWriteLease({
+						db: input.env.APP_DB,
+						stableUserId: input.listing.ownerUserId,
+						write,
+					})
+				} else {
+					await write()
+				}
 			}
 		},
 	}
@@ -298,49 +312,58 @@ async function createCommunityIconDescriptor(input: {
 	listing: CommunityListingRecord
 	iconCommit: string
 }): Promise<CommunityIconDescriptor> {
-	const iconSource = await loadCommunityIconSource(input)
-	const processed: ProcessedCommunityIcon = iconSource
-		? await processCommunityIcon({
-				path: iconSource.path,
-				sourceBytes: iconSource.bytes,
-			})
-		: {
-				bytes: await renderCommunitySvgIcon(
-					buildCommunityIconFallbackSvg(input.listing.name),
-				),
-				contentType: 'image/png',
-			}
+	const write = async () => {
+		const iconSource = await loadCommunityIconSource(input)
+		const processed: ProcessedCommunityIcon = iconSource
+			? await processCommunityIcon({
+					path: iconSource.path,
+					sourceBytes: iconSource.bytes,
+				})
+			: {
+					bytes: await renderCommunitySvgIcon(
+						buildCommunityIconFallbackSvg(input.listing.name),
+					),
+					contentType: 'image/png',
+				}
 
-	const r2Key = buildCommunityIconR2Key({
-		listingId: input.listing.id,
-		commit: input.iconCommit,
-	})
-	await input.env.COMMUNITY_ASSETS.put(r2Key, processed.bytes, {
-		httpMetadata: {
-			contentType: processed.contentType,
-			cacheControl: 'public, max-age=3600',
-		},
-		customMetadata: {
+		const r2Key = buildCommunityIconR2Key({
+			listingId: input.listing.id,
+			commit: input.iconCommit,
+		})
+		await input.env.COMMUNITY_ASSETS.put(r2Key, processed.bytes, {
+			httpMetadata: {
+				contentType: processed.contentType,
+				cacheControl: 'public, max-age=3600',
+			},
+			customMetadata: {
+				listingId: input.listing.id,
+				iconCommit: input.iconCommit,
+				sourcePath: iconSource?.path ?? '',
+			},
+		})
+		if (!(await isServableIconCommit(input))) {
+			await input.env.COMMUNITY_ASSETS.delete(r2Key)
+			throw new Error(
+				`Community listing "${input.listing.id}" was removed while its icon was generated.`,
+			)
+		}
+		return {
+			version: communityIconVersion,
 			listingId: input.listing.id,
 			iconCommit: input.iconCommit,
-			sourcePath: iconSource?.path ?? '',
-		},
-	})
-	if (!(await isServableIconCommit(input))) {
-		await input.env.COMMUNITY_ASSETS.delete(r2Key)
-		throw new Error(
-			`Community listing "${input.listing.id}" was removed while its icon was generated.`,
-		)
+			r2Key,
+			contentType: processed.contentType,
+			sourcePath: iconSource?.path ?? null,
+			byteLength: processed.bytes.byteLength,
+		}
 	}
-	return {
-		version: communityIconVersion,
-		listingId: input.listing.id,
-		iconCommit: input.iconCommit,
-		r2Key,
-		contentType: processed.contentType,
-		sourcePath: iconSource?.path ?? null,
-		byteLength: processed.bytes.byteLength,
-	}
+	return typeof input.env.APP_DB.prepare === 'function'
+		? await withAccountWriteLease({
+				db: input.env.APP_DB,
+				stableUserId: input.listing.ownerUserId,
+				write,
+			})
+		: await write()
 }
 
 /**
@@ -354,6 +377,14 @@ async function isServableIconCommit(input: {
 	listing: CommunityListingRecord
 	iconCommit: string
 }) {
+	if (typeof input.env.APP_DB.prepare === 'function') {
+		try {
+			await assertAccountWritableDb(input.env.APP_DB, input.listing.ownerUserId)
+		} catch (error) {
+			if (error instanceof AccountDeletionInProgressError) return false
+			throw error
+		}
+	}
 	const current = await getCommunityListingById(input.env.APP_DB, {
 		listingId: input.listing.id,
 		includeDelisted: false,

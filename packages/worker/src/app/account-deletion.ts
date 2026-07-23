@@ -25,17 +25,31 @@ import {
 	getAccountDeletionDurableObjectResultKeys,
 } from '#app/account-user-owned-surfaces.ts'
 import {
+	collectAccountR2Inventory,
+	type AccountCommunityListingSnapshot,
+	type AccountR2ObjectRef,
+} from '#app/account-r2-inventory.ts'
+import {
+	deleteAccountCommunityAssetPrefixes,
+	deleteAccountEmailBlobPrefixes,
+} from '#app/account-r2-prefix-cleanup.ts'
+import {
+	listMcpAgentSessionsForUser,
+	type McpAgentSession,
+} from '#mcp/session-registry.ts'
+import { assertMcpAgentSessionBackfillComplete } from '#mcp/session-backfill-marker.ts'
+import {
+	AccountDeletionWritersActiveError,
+	markAccountDeleting,
+} from '#app/account-deletion-state.ts'
+import {
 	buildPublishedSourceManifestSnapshotKvKey,
 	buildPublishedSourceSnapshotKvKey,
 } from '#worker/package-runtime/published-runtime-artifacts.ts'
 import { deleteAllPackageRetrieverCacheEntriesForUser } from '#worker/package-retrievers/manifest-cache.ts'
 import { buildCommunitySnapshotKvKey } from '#worker/community/snapshot.ts'
-import {
-	buildCommunityIconCacheKey,
-	buildCommunityIconR2Key,
-} from '#worker/community/community-icon.ts'
+import { buildCommunityIconCacheKey } from '#worker/community/community-icon.ts'
 import { derivedCacheKeyPrefix } from '#worker/kv-cachified.ts'
-import { emailRawMimeKey } from '#worker/email/repo.ts'
 
 // Imported manually instead of via `@cloudflare/workers-oauth-provider` so
 // node-only unit tests can require this module without dragging in
@@ -105,25 +119,44 @@ type UserPackageServiceSnapshot = {
 	serviceName: string
 }
 
-type UserCommunityListingSnapshot = {
-	id: string
-	pinnedCommit: string
-	iconCommit: string
-}
-
 type UserDeletionInventory = {
 	vectorIds: Array<string>
 	storageIds: Array<string>
 	bundleKvKeys: Array<string>
-	emailBlobKeys: Array<string>
+	r2Objects: Array<AccountR2ObjectRef>
 	sourceSnapshots: Array<UserSourceSnapshot>
 	savedPackages: Array<UserSavedPackageSnapshot>
 	repoSessions: Array<UserRepoSessionSnapshot>
 	remoteConnectors: Array<UserRemoteConnectorSnapshot>
 	mcpServers: Array<UserMcpServerSnapshot>
+	mcpAgentSessions: Array<McpAgentSession>
 	packageServices: Array<UserPackageServiceSnapshot>
-	communityListings: Array<UserCommunityListingSnapshot>
-	avatarR2Key: string | null
+	communityListings: Array<AccountCommunityListingSnapshot>
+}
+
+export class AccountDeletionInventoryError extends Error {
+	readonly inventoryErrors: ReadonlyArray<string>
+
+	constructor(inventoryErrors: ReadonlyArray<string>) {
+		super('Account deletion inventory could not be collected safely.')
+		this.name = 'AccountDeletionInventoryError'
+		this.inventoryErrors = [...inventoryErrors]
+	}
+}
+
+export class AccountDeletionCleanupError extends Error {
+	readonly cleanupErrors: ReadonlyArray<string>
+	readonly partialResult: AccountDeletionResult
+
+	constructor(
+		cleanupErrors: ReadonlyArray<string>,
+		partialResult: AccountDeletionResult,
+	) {
+		super('Account deletion cleanup could not complete safely.')
+		this.name = 'AccountDeletionCleanupError'
+		this.cleanupErrors = [...cleanupErrors]
+		this.partialResult = partialResult
+	}
 }
 
 function uniqueStrings(values: Iterable<string | null | undefined>) {
@@ -297,65 +330,11 @@ async function listUserPackageServices(env: Env, userId: string) {
 	}))
 }
 
-async function listUserEmailBlobKeys(env: Env, userId: string) {
-	const [rawMimeRows, attachmentRows] = await Promise.all([
-		// Deterministic canonical keys for every message id.
-		env.APP_DB.prepare(
-			`SELECT id
-			FROM email_messages
-			WHERE user_id = ?`,
-		)
-			.bind(userId)
-			.all<{ id: string }>(),
-		// Externally stored attachments (outbound mail) have their own R2
-		// objects, separate from any raw-MIME blob.
-		env.APP_DB.prepare(
-			`SELECT attachment.storage_key AS storage_key
-			FROM email_attachments attachment
-			JOIN email_messages message ON message.id = attachment.message_id
-			WHERE message.user_id = ? AND attachment.storage_key IS NOT NULL`,
-		)
-			.bind(userId)
-			.all<{ storage_key: string }>(),
-	])
-	return uniqueStrings([
-		...(rawMimeRows.results ?? []).map((row) =>
-			emailRawMimeKey(userId, row.id),
-		),
-		...(attachmentRows.results ?? []).map((row) => row.storage_key),
-	])
-}
-
-async function listUserCommunityListings(env: Env, userId: string) {
-	const rows = await env.APP_DB.prepare(
-		`SELECT community_listings.id, community_listings.pinned_commit,
-			entity_sources.published_commit AS source_published_commit
-		FROM community_listings
-		LEFT JOIN entity_sources
-			ON entity_sources.id = community_listings.source_id
-			AND entity_sources.user_id = community_listings.owner_user_id
-			AND entity_sources.entity_kind = 'package'
-			AND entity_sources.entity_id = community_listings.package_id
-		WHERE community_listings.owner_user_id = ?`,
-	)
-		.bind(userId)
-		.all<{
-			id: string
-			pinned_commit: string
-			source_published_commit: string | null
-		}>()
-	return (rows.results ?? []).map((row) => ({
-		id: row.id,
-		pinnedCommit: row.pinned_commit,
-		iconCommit: row.source_published_commit ?? row.pinned_commit,
-	}))
-}
-
 async function listUserBundleKvKeys(input: {
 	env: Env
 	userId: string
 	sourceSnapshots: ReadonlyArray<UserSourceSnapshot>
-	communityListings: ReadonlyArray<UserCommunityListingSnapshot>
+	communityListings: ReadonlyArray<AccountCommunityListingSnapshot>
 }) {
 	const published = await input.env.APP_DB.prepare(
 		`SELECT kv_key FROM published_bundle_artifacts WHERE user_id = ?`,
@@ -394,116 +373,105 @@ async function listUserBundleKvKeys(input: {
 	])
 }
 
-async function listUserAvatarR2Key(
-	env: Env,
-	dbUserId: number,
-): Promise<string | null> {
-	const row = await env.APP_DB.prepare(
-		`SELECT avatar_key FROM users WHERE id = ?`,
-	)
-		.bind(dbUserId)
-		.first<{ avatar_key: string | null }>()
-	return row?.avatar_key == null ? null : String(row.avatar_key)
-}
-
 async function collectUserDeletionInventory(input: {
 	env: Env
 	userId: string
 	dbUserId: number
 	warnings: Array<string>
 }): Promise<UserDeletionInventory> {
+	const inventoryErrors: Array<string> = []
+	const recordInventoryError = (label: string, error: unknown) => {
+		const warning = `Failed to enumerate ${label}: ${getErrorMessage(error)}`
+		input.warnings.push(warning)
+		inventoryErrors.push(warning)
+	}
 	const [
 		vectorIds,
 		storageIds,
-		emailBlobKeys,
+		r2Inventory,
 		sourceSnapshots,
 		savedPackages,
 		repoSessions,
 		remoteConnectors,
 		mcpServers,
+		mcpAgentSessions,
 		packageServices,
-		communityListings,
-		avatarR2Key,
 	] = await Promise.all([
 		listUserVectorIds(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate vector ids: ${message}`)
+			recordInventoryError('vector ids', error)
 			return [] as Array<string>
 		}),
 		listUserStorageIds(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate storage ids: ${message}`)
+			recordInventoryError('storage ids', error)
 			return [] as Array<string>
 		}),
-		listUserEmailBlobKeys(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate email blob keys: ${message}`)
-			return [] as Array<string>
+		collectAccountR2Inventory({
+			env: input.env,
+			userId: input.userId,
+			dbUserId: input.dbUserId,
+		}).catch((error) => {
+			recordInventoryError('R2 objects', error)
+			return {
+				objects: [] as Array<AccountR2ObjectRef>,
+				communityListings: [] as Array<AccountCommunityListingSnapshot>,
+			}
 		}),
 		listUserSourceSnapshots(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate source snapshots: ${message}`)
+			recordInventoryError('source snapshots', error)
 			return [] as Array<UserSourceSnapshot>
 		}),
 		listUserSavedPackages(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate saved packages: ${message}`)
+			recordInventoryError('saved packages', error)
 			return [] as Array<UserSavedPackageSnapshot>
 		}),
 		listUserRepoSessions(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate repo sessions: ${message}`)
+			recordInventoryError('repo sessions', error)
 			return [] as Array<UserRepoSessionSnapshot>
 		}),
 		listUserRemoteConnectors(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate remote connectors: ${message}`)
+			recordInventoryError('remote connectors', error)
 			return [] as Array<UserRemoteConnectorSnapshot>
 		}),
 		listUserMcpServers(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate MCP servers: ${message}`)
+			recordInventoryError('MCP servers', error)
 			return [] as Array<UserMcpServerSnapshot>
 		}),
+		listMcpAgentSessionsForUser(input.env.APP_DB, input.userId).catch(
+			(error) => {
+				recordInventoryError('MCP agent sessions', error)
+				return [] as Array<McpAgentSession>
+			},
+		),
 		listUserPackageServices(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate package services: ${message}`)
+			recordInventoryError('package services', error)
 			return [] as Array<UserPackageServiceSnapshot>
-		}),
-		listUserCommunityListings(input.env, input.userId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate community listings: ${message}`)
-			return [] as Array<UserCommunityListingSnapshot>
-		}),
-		listUserAvatarR2Key(input.env, input.dbUserId).catch((error) => {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to enumerate user avatar key: ${message}`)
-			return null as string | null
 		}),
 	])
 	const bundleKvKeys = await listUserBundleKvKeys({
 		env: input.env,
 		userId: input.userId,
 		sourceSnapshots,
-		communityListings,
+		communityListings: r2Inventory.communityListings,
 	}).catch((error) => {
-		const message = getErrorMessage(error)
-		input.warnings.push(`Failed to enumerate bundle KV keys: ${message}`)
+		recordInventoryError('bundle KV keys', error)
 		return [] as Array<string>
 	})
+	if (inventoryErrors.length > 0) {
+		throw new AccountDeletionInventoryError(inventoryErrors)
+	}
 	return {
 		vectorIds,
 		storageIds,
 		bundleKvKeys,
-		emailBlobKeys,
+		r2Objects: r2Inventory.objects,
 		sourceSnapshots,
 		savedPackages,
 		repoSessions,
 		remoteConnectors,
 		mcpServers,
+		mcpAgentSessions,
 		packageServices,
-		communityListings,
-		avatarR2Key,
+		communityListings: r2Inventory.communityListings,
 	}
 }
 
@@ -693,6 +661,40 @@ async function purgeMcpClientHub(input: {
 	}
 }
 
+async function purgeMcpAgentSessions(input: {
+	env: Env
+	userId: string
+	sessions: ReadonlyArray<McpAgentSession>
+	warnings: Array<string>
+}) {
+	const namespace = input.env.MCP_OBJECT
+	if (!namespace) {
+		if (input.sessions.length > 0) {
+			input.warnings.push(
+				`MCP_OBJECT binding was unavailable; ${input.sessions.length} MCP agent session(s) were not purged.`,
+			)
+		}
+		return 0
+	}
+	let purged = 0
+	for (const session of input.sessions) {
+		try {
+			const stub = namespace.get(
+				namespace.idFromString(session.doId),
+			) as unknown as {
+				purgeForAccountDeletion: (payload: { userId: string }) => Promise<void>
+			}
+			await stub.purgeForAccountDeletion({ userId: input.userId })
+			purged += 1
+		} catch (error) {
+			input.warnings.push(
+				`MCP agent session purge failed for ${session.doId}: ${getErrorMessage(error)}`,
+			)
+		}
+	}
+	return purged
+}
+
 async function purgePackageRealtimeSessions(input: {
 	env: Env
 	userId: string
@@ -757,7 +759,12 @@ async function deleteVectorsByIds(input: {
 }): Promise<number> {
 	if (input.ids.length === 0) return 0
 	const index = getCapabilityVectorIndex(input.env)
-	if (!index) return 0
+	if (!index) {
+		input.warnings.push(
+			`CAPABILITY_VECTOR_INDEX binding was unavailable; ${input.ids.length} user vector(s) were not removed.`,
+		)
+		return 0
+	}
 	let deleted = 0
 	const batchSize = 100
 	for (let offset = 0; offset < input.ids.length; offset += batchSize) {
@@ -844,14 +851,12 @@ async function listKvKeysByPrefix(input: {
 async function deleteRetrieverCache(input: {
 	env: Env
 	userId: string
-	packageIds: ReadonlyArray<string>
 	warnings: Array<string>
 }) {
 	try {
 		return await deleteAllPackageRetrieverCacheEntriesForUser({
 			env: input.env,
 			userId: input.userId,
-			packageIds: input.packageIds,
 		})
 	} catch (error) {
 		const message = getErrorMessage(error)
@@ -860,11 +865,10 @@ async function deleteRetrieverCache(input: {
 	}
 }
 
-async function deleteUserScopedRows(input: {
+async function deleteUserScopedRowsAndUser(input: {
 	env: Env
 	mcpUserId: string
 	dbUserId: number
-	warnings: Array<string>
 }): Promise<{
 	deletedRowCounts: Record<string, number>
 	updatedRowCounts: Record<string, number>
@@ -879,52 +883,35 @@ async function deleteUserScopedRows(input: {
 		updatedRowCounts[tableName] =
 			(updatedRowCounts[tableName] ?? 0) + (changes ?? 0)
 	}
-	for (const target of accountUserDataTargets) {
+	const operations = accountUserDataTargets.map((target) => {
 		const match = buildUserScopedTargetMatch({
 			target,
 			mcpUserId: input.mcpUserId,
 			dbUserId: input.dbUserId,
 		})
-		try {
-			const { sql, params } = buildUserScopedDeleteOrUpdateSql(match)
-			const result = await input.env.APP_DB.prepare(sql)
-				.bind(...params)
-				.run()
-			if (match.mutation.kind === 'delete') {
-				recordDeleted(match.table, result.meta.changes)
-			} else {
-				recordUpdated(match.table, result.meta.changes)
-			}
-		} catch (error) {
-			const message = getErrorMessage(error)
-			input.warnings.push(`Failed to delete from ${match.table}: ${message}`)
-			if (match.mutation.kind === 'delete') {
-				recordDeleted(match.table, 0)
-			} else {
-				recordUpdated(match.table, 0)
-			}
+		const { sql, params } = buildUserScopedDeleteOrUpdateSql(match)
+		return {
+			match,
+			statement: input.env.APP_DB.prepare(sql).bind(...params),
+		}
+	})
+	const userStatement = input.env.APP_DB.prepare(
+		`DELETE FROM users WHERE id = ?`,
+	).bind(input.dbUserId)
+	const results = await input.env.APP_DB.batch([
+		...operations.map((operation) => operation.statement),
+		userStatement,
+	])
+	for (const [index, operation] of operations.entries()) {
+		const changes = results[index]?.meta.changes
+		if (operation.match.mutation.kind === 'delete') {
+			recordDeleted(operation.match.table, changes)
+		} else {
+			recordUpdated(operation.match.table, changes)
 		}
 	}
+	deletedRowCounts.users = results.at(-1)?.meta.changes ?? 0
 	return { deletedRowCounts, updatedRowCounts }
-}
-
-async function deleteUserRow(input: {
-	env: Env
-	dbUserId: number
-	warnings: Array<string>
-}): Promise<number> {
-	try {
-		const result = await input.env.APP_DB.prepare(
-			`DELETE FROM users WHERE id = ?`,
-		)
-			.bind(input.dbUserId)
-			.run()
-		return result.meta.changes ?? 0
-	} catch (error) {
-		const message = getErrorMessage(error)
-		input.warnings.push(`Failed to delete user row: ${message}`)
-		return 0
-	}
 }
 
 /**
@@ -935,18 +922,25 @@ async function deleteUserRow(input: {
  * The cleanup ordering is:
  *   1. Pre-collect identifiers we need (vector ids, storage ids, KV keys,
  *      repo/session/package ids) while their owning rows still exist.
- *   2. Best-effort destructive cleanup of out-of-band stores (Vectorize,
- *      Artifacts repos, Durable Objects, KV) - each batch records a warning on
- *      failure but does not abort the cascade.
- *   3. Delete user-scoped D1 rows in dependency-safe order.
- *   4. Revoke OAuth grants and delete the user's row last so a partially
- *      failed run can be retried with the same email.
+ *   2. Idempotent cleanup of out-of-band stores and OAuth grants.
+ *   3. Abort while preserving D1 inventory and the user row if any critical
+ *      cleanup failed. The five-minute usage-rollup derived cache is the sole
+ *      TTL-owned omission and does not participate in this gate.
+ *   4. Atomically delete user-scoped D1 rows and the user row in one batch.
  */
 export async function deleteUserAccount(input: {
 	env: AccountDeletionEnv
 	dbUserId: number
 	mcpUserId: string
 }): Promise<AccountDeletionResult> {
+	await assertMcpAgentSessionBackfillComplete(input.env.APP_DB)
+	const activeWriteCount = await markAccountDeleting({
+		db: input.env.APP_DB,
+		dbUserId: input.dbUserId,
+	})
+	if (activeWriteCount > 0) {
+		throw new AccountDeletionWritersActiveError(activeWriteCount)
+	}
 	const warnings: Array<string> = []
 	const clearedDurableObjects: Record<string, number> = {}
 	for (const key of getAccountDeletionDurableObjectResultKeys()) {
@@ -1011,6 +1005,12 @@ export async function deleteUserAccount(input: {
 		userId: input.mcpUserId,
 		warnings,
 	})
+	result.clearedDurableObjects.mcpAgentSessions = await purgeMcpAgentSessions({
+		env: input.env,
+		userId: input.mcpUserId,
+		sessions: inventory.mcpAgentSessions,
+		warnings,
+	})
 	result.clearedDurableObjects.packageRealtimeSessions =
 		await purgePackageRealtimeSessions({
 			env: input.env,
@@ -1040,7 +1040,10 @@ export async function deleteUserAccount(input: {
 					`source-snapshot:v1:${source.sourceId}:`,
 					`source-manifest-snapshot:v1:${source.sourceId}:`,
 				]),
-				`package-retriever-index:v1:${input.mcpUserId}:`,
+				...inventory.communityListings.map(
+					(listing) =>
+						`${derivedCacheKeyPrefix}community-icon:v1:${listing.id}:`,
+				),
 			],
 			warnings,
 		})
@@ -1055,7 +1058,6 @@ export async function deleteUserAccount(input: {
 			(await deleteRetrieverCache({
 				env: input.env,
 				userId: input.mcpUserId,
-				packageIds: inventory.savedPackages.map((pkg) => pkg.id),
 				warnings,
 			}))
 	} else if (
@@ -1067,39 +1069,43 @@ export async function deleteUserAccount(input: {
 		)
 	}
 
-	result.deletedCommunityAssets = await deleteR2Objects({
-		blobs: input.env.COMMUNITY_ASSETS,
-		keys: uniqueStrings([
-			...inventory.communityListings.flatMap((listing) => [
-				buildCommunityIconR2Key({
-					listingId: listing.id,
-					commit: listing.pinnedCommit,
-				}),
-				buildCommunityIconR2Key({
-					listingId: listing.id,
-					commit: listing.iconCommit,
-				}),
-			]),
-			inventory.avatarR2Key,
-		]),
-		label: 'Community asset',
-		warnings,
-	})
-	result.deletedEmailBlobs = await deleteR2Objects({
-		blobs: input.env.EMAIL_BLOBS,
-		keys: inventory.emailBlobKeys,
-		label: 'Email blob',
-		warnings,
-	})
-
-	const d1Cleanup = await deleteUserScopedRows({
-		env: input.env,
-		mcpUserId: input.mcpUserId,
-		dbUserId: input.dbUserId,
-		warnings,
-	})
-	result.deletedRowCounts = d1Cleanup.deletedRowCounts
-	result.updatedRowCounts = d1Cleanup.updatedRowCounts
+	try {
+		result.deletedCommunityAssets = await deleteAccountCommunityAssetPrefixes({
+			bucket: input.env.COMMUNITY_ASSETS,
+			stableUserId: input.mcpUserId,
+			listingIds: inventory.communityListings.map((listing) => listing.id),
+		})
+	} catch (error) {
+		warnings.push(getErrorMessage(error))
+	}
+	const emailBlobs = input.env.EMAIL_BLOBS
+	if (!emailBlobs) {
+		warnings.push(
+			'EMAIL_BLOBS binding was unavailable; email objects were not removed.',
+		)
+	} else {
+		try {
+			result.deletedEmailBlobs = await deleteAccountEmailBlobPrefixes({
+				bucket: emailBlobs,
+				stableUserId: input.mcpUserId,
+			})
+		} catch (error) {
+			warnings.push(getErrorMessage(error))
+		}
+		result.deletedEmailBlobs += await deleteR2Objects({
+			blobs: emailBlobs,
+			keys: inventory.r2Objects
+				.filter((object) => object.binding === 'EMAIL_BLOBS')
+				.filter(
+					(object) =>
+						!object.key.startsWith(`email-raw:v1:${input.mcpUserId}/`) &&
+						!object.key.startsWith(`email-attachment:v1:${input.mcpUserId}/`),
+				)
+				.map((object) => object.key),
+			label: 'Email blob',
+			warnings,
+		})
+	}
 
 	const helpers = input.env.OAUTH_PROVIDER
 	if (helpers) {
@@ -1119,12 +1125,23 @@ export async function deleteUserAccount(input: {
 		)
 	}
 
-	const deletedUserRows = await deleteUserRow({
-		env: input.env,
-		dbUserId: input.dbUserId,
-		warnings,
-	})
-	result.deletedRowCounts.users = deletedUserRows
+	if (warnings.length > 0) {
+		throw new AccountDeletionCleanupError(warnings, result)
+	}
+
+	try {
+		const d1Cleanup = await deleteUserScopedRowsAndUser({
+			env: input.env,
+			mcpUserId: input.mcpUserId,
+			dbUserId: input.dbUserId,
+		})
+		result.deletedRowCounts = d1Cleanup.deletedRowCounts
+		result.updatedRowCounts = d1Cleanup.updatedRowCounts
+	} catch (error) {
+		const failure = `Atomic D1 account deletion failed: ${getErrorMessage(error)}`
+		warnings.push(failure)
+		throw new AccountDeletionCleanupError(warnings, result)
+	}
 
 	return result
 }

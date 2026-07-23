@@ -19,6 +19,12 @@ const accountExportSource = readFileSync(
 	fileURLToPath(new URL('./account-export.ts', import.meta.url)),
 	'utf8',
 )
+const manifestCacheSource = readFileSync(
+	fileURLToPath(
+		new URL('../package-retrievers/manifest-cache.ts', import.meta.url),
+	),
+	'utf8',
+)
 
 test('account export excluded durable objects preserve the legacy manifest list', () => {
 	expect(getAccountExportExcludedDurableObjects()).toEqual([
@@ -43,6 +49,7 @@ test('account export excluded durable objects preserve the legacy manifest list'
 test('account deletion durable object result keys are declared by the registry', () => {
 	expect([...getAccountDeletionDurableObjectResultKeys()].sort()).toEqual([
 		'jobManagers',
+		'mcpAgentSessions',
 		'mcpClientHubs',
 		'packageRealtimeSessions',
 		'packageServiceInstances',
@@ -78,6 +85,7 @@ test('account user-owned surface registry covers known out-of-band surfaces', ()
 		'published_bundle_artifact_kv_key',
 		'source_manifest_snapshot',
 		'source_snapshot',
+		'usage_rollup_derived_cache',
 	])
 	expect([...coverage.r2SurfaceIds].sort()).toEqual([
 		'community_icon',
@@ -136,6 +144,11 @@ test('R2 surfaces cover email blobs, community icons, and user avatars', () => {
 			}),
 		]),
 	)
+	expect(
+		accountUserOwnedR2Surfaces.every(
+			(surface) => surface.export === 'chunked_bytes',
+		),
+	).toBe(true)
 })
 
 test('account deletion and export consume the out-of-band surface registry', () => {
@@ -146,14 +159,16 @@ test('account deletion and export consume the out-of-band surface registry', () 
 		'getAccountDeletionDurableObjectResultKeys',
 	)
 	expect(accountDeletionSource).toContain('accountUserOwnedVectorizeSurfaces')
+	expect(accountDeletionSource).toContain('deleteAccountCommunityAssetPrefixes')
 	expect(accountExportSource).toContain(
 		'getAccountExportExcludedDurableObjects',
 	)
+	expect(accountExportSource).toContain('readAccountR2ExportPage')
+	expect(accountExportSource).not.toContain('collectAccountR2Inventory')
 
 	for (const prefix of [
 		'source-snapshot:v1:',
 		'source-manifest-snapshot:v1:',
-		'package-retriever-index:v1:',
 	]) {
 		expect(
 			accountUserOwnedKvKeySchemes.some((scheme) =>
@@ -166,6 +181,10 @@ test('account deletion and export consume the out-of-band surface registry', () 
 			`account-deletion.ts must still enumerate prefix ${prefix}`,
 		).toBe(true)
 	}
+	expect(manifestCacheSource).toContain('legacyRetrieverScopeIndexPrefix')
+	expect(manifestCacheSource).toContain(
+		'deleteLegacyPackageRetrieverScopeIndexes',
+	)
 
 	for (const surface of accountUserOwnedDurableObjectSurfaces) {
 		if (surface.deletionResultKey == null) continue
