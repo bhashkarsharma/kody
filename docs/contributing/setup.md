@@ -119,19 +119,29 @@ Quick notes for getting a local kody environment running.
   freely until they land in `main`; once deployed, any schema correction should
   ship as a new migration instead.
 - `npm run migrations:check` (also run by `npm run validate` and the pre-commit
-  hook) enforces the naming rules above.
+  hook) enforces the naming rules above against the checked-in, append-only
+  `tools/migration-ledger.json`. When adding a migration, append its filename
+  and SHA-256 digest to the ledger; never edit or remove an existing ledger
+  entry. The check compares historical entries and SQL contents with a
+  pre-change Git commit: CI supplies the PR base or push-before SHA, local
+  branches use their `main` merge base, and main/detached checkouts fall back to
+  the first parent. `HEAD` itself is never trusted. CI fetches complete history;
+  local and cloud checkouts must retain or fetch `origin/main`. If no pre-change
+  commit is available, validation fails safely once migrations exist beyond the
+  frozen bootstrap baseline. Migration SQL is hashed with canonical LF line
+  endings, and `.gitattributes` enforces LF checkouts.
 - Seven historical duplicate prefixes are permanently accepted only for their
   exact existing filename pairs — applied migrations cannot be renamed, and
   Wrangler orders lexicographically. Do not rename these files or add a third
   file to any of these prefixes:
-  - `0009-ui-artifact-parameters.sql` / `0009-secret-allowed-hosts.sql`
-  - `0010-value-buckets.sql` / `0010-secret-allowed-capabilities.sql`
-  - `0018-mcp-memory-source-uris.sql` / `0018-jobs.sql`
-  - `0023-secret-allowed-packages.sql` / `0023-entity-sources.sql`
-  - `0037-package-runtime-debug.sql` / `0037-drop-chat-threads.sql`
-  - `0053-two-factor-passkeys.sql` / `0053-mcp-server-settings.sql`
-  - `0073-community-forks-forked-package-index.sql` /
-    `0073-agent-package-conversation-uses.sql`
+  - `0009-secret-allowed-hosts.sql` / `0009-ui-artifact-parameters.sql`
+  - `0010-secret-allowed-capabilities.sql` / `0010-value-buckets.sql`
+  - `0018-jobs.sql` / `0018-mcp-memory-source-uris.sql`
+  - `0023-entity-sources.sql` / `0023-secret-allowed-packages.sql`
+  - `0037-drop-chat-threads.sql` / `0037-package-runtime-debug.sql`
+  - `0053-mcp-server-settings.sql` / `0053-two-factor-passkeys.sql`
+  - `0073-agent-package-conversation-uses.sql` /
+    `0073-community-forks-forked-package-index.sql`
 
 ## Documentation maintenance
 

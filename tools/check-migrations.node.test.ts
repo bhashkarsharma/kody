@@ -1,12 +1,24 @@
+import { execFileSync, spawnSync } from 'node:child_process'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
 import {
 	allowedHistoricalDuplicateMigrationFilenames,
 	checkMigrationFilenames,
+	checkMigrationLedger,
 	checkMigrationsDirectory,
 	formatMigrationPrefix,
 	getMaxMigrationPrefix,
 	getNextMigrationPrefix,
+	hashMigrationContent,
 	parseMigrationFilename,
+	readMigrationLedger,
+	resolveTrustedMigrationBase,
+	type MigrationLedger,
+	type MigrationLedgerEntry,
+	type TrustedMigrationHistory,
 } from './check-migrations.ts'
 
 const historicalPair0009 = [
@@ -28,6 +40,12 @@ function expectErrorsMention(
 	for (const needle of needles) {
 		expect(errors.some((error) => error.includes(needle))).toBe(true)
 	}
+}
+
+function mockGit(
+	responses: Readonly<Record<string, string | null>>,
+): (args: ReadonlyArray<string>) => Promise<string | null> {
+	return async (args) => responses[args.join(' ')] ?? null
 }
 
 test('migration filename helpers parse, score prefixes, and accept unique plus grandfathered pairs', async () => {
@@ -60,6 +78,9 @@ test('migration filename helpers parse, score prefixes, and accept unique plus g
 	expect(formatMigrationPrefix(76)).toBe('0076')
 	expect(formatMigrationPrefix(1)).toBe('0001')
 	expect(getNextMigrationPrefix([])).toBe('0001')
+	expect(
+		getNextMigrationPrefix([...filenamesWithGap, '9999-BadName.sql']),
+	).toBe('0076')
 
 	const withGap = checkMigrationFilenames(filenamesWithGap)
 	expect(withGap).toMatchObject({ ok: true, errors: [], nextPrefix: '0076' })
@@ -102,6 +123,305 @@ test('migration filename helpers parse, score prefixes, and accept unique plus g
 	expect(live.errors).toEqual([])
 	expect(live.nextPrefix).toBe(formatMigrationPrefix(live.maxPrefix + 1))
 	expect(live.nextPrefix).toMatch(/^\d{4}$/)
+})
+
+test('migration ledger rejects historical mutation and lower-prefix additions while accepting monotonic additions', async () => {
+	const ledger = await readMigrationLedger()
+	const baselineFiles = ledger.migrations.map((entry) => ({ ...entry }))
+	const trustedHistory: TrustedMigrationHistory = {
+		ref: 'trusted-base',
+		files: baselineFiles,
+		ledgerEntries: baselineFiles,
+	}
+
+	expect(checkMigrationLedger(baselineFiles, ledger)).toMatchObject({
+		ok: true,
+		errors: [],
+	})
+	expect(
+		checkMigrationLedger(baselineFiles, ledger, trustedHistory),
+	).toMatchObject({
+		ok: true,
+		errors: [],
+		nextPrefix: '0084',
+		maxPrefix: 83,
+	})
+
+	const modifiedFiles = baselineFiles.map((entry) =>
+		entry.filename === '0001-init.sql'
+			? { ...entry, sha256: '0'.repeat(64) }
+			: entry,
+	)
+	const modified = checkMigrationLedger(modifiedFiles, ledger, trustedHistory)
+	expect(modified.ok).toBe(false)
+	expectErrorsMention(modified.errors, ['0001-init.sql', 'modified'])
+
+	const withoutHistoricalPairMember = baselineFiles.filter(
+		(entry) => entry.filename !== historicalPair0009[0],
+	)
+	const deleted = checkMigrationLedger(
+		withoutHistoricalPairMember,
+		ledger,
+		trustedHistory,
+	)
+	expect(deleted.ok).toBe(false)
+	expectErrorsMention(deleted.errors, [
+		historicalPair0009[0],
+		'missing',
+		'cannot be deleted or renamed',
+	])
+
+	const renamedFiles = baselineFiles.map((entry) =>
+		entry.filename === historicalPair0009[1]
+			? { ...entry, filename: '0009-renamed.sql' }
+			: entry,
+	)
+	const renamed = checkMigrationLedger(renamedFiles, ledger, trustedHistory)
+	expect(renamed.ok).toBe(false)
+	expectErrorsMention(renamed.errors, [
+		historicalPair0009[1],
+		'missing',
+		'0009-renamed.sql',
+		'not in tools/migration-ledger.json',
+	])
+
+	const lowerAddition: MigrationLedgerEntry = {
+		filename: '0039-too-low.sql',
+		sha256: '1'.repeat(64),
+	}
+	const ledgerWithLowerAddition = structuredClone(ledger)
+	ledgerWithLowerAddition.migrations.push(lowerAddition)
+	const lower = checkMigrationLedger(
+		[...baselineFiles, lowerAddition],
+		ledgerWithLowerAddition,
+		trustedHistory,
+	)
+	expect(lower.ok).toBe(false)
+	expectErrorsMention(lower.errors, [
+		'0039-too-low.sql',
+		'at or below frozen baseline maximum 0083',
+	])
+
+	const monotonicAddition: MigrationLedgerEntry = {
+		filename: '0084-normal-addition.sql',
+		sha256: '2'.repeat(64),
+	}
+	const ledgerWithMonotonicAddition = structuredClone(ledger)
+	ledgerWithMonotonicAddition.migrations.push(monotonicAddition)
+	expect(
+		checkMigrationLedger(
+			[...baselineFiles, monotonicAddition],
+			ledgerWithMonotonicAddition,
+			trustedHistory,
+		),
+	).toMatchObject({
+		ok: true,
+		errors: [],
+		nextPrefix: '0085',
+		maxPrefix: 84,
+	})
+})
+
+test('trusted history rejects a migration and ledger digest co-edit', async () => {
+	const ledger = await readMigrationLedger()
+	const bootstrapFiles = ledger.migrations.map((entry) => ({ ...entry }))
+	const historicalEntry = {
+		filename: '0084-historical.sql',
+		sha256: hashMigrationContent('SELECT 1;\n'),
+	}
+	const trustedHistory: TrustedMigrationHistory = {
+		ref: 'trusted-base-with-0084',
+		files: [...bootstrapFiles, historicalEntry],
+		ledgerEntries: [...bootstrapFiles, historicalEntry],
+	}
+	const editedEntry = {
+		...historicalEntry,
+		sha256: hashMigrationContent('SELECT 2;\n'),
+	}
+	const editedLedger = structuredClone(ledger)
+	editedLedger.migrations.push(editedEntry)
+
+	const result = checkMigrationLedger(
+		[...bootstrapFiles, editedEntry],
+		editedLedger,
+		trustedHistory,
+	)
+	expect(result.ok).toBe(false)
+	expectErrorsMention(result.errors, [
+		'0084-historical.sql',
+		'Historical ledger entries cannot be edited',
+		'differs from trusted history',
+		'Migration and ledger digests cannot be changed together',
+	])
+
+	const withoutTrustedBase = checkMigrationLedger(
+		[...bootstrapFiles, editedEntry],
+		editedLedger,
+	)
+	expect(withoutTrustedBase.ok).toBe(false)
+	expectErrorsMention(withoutTrustedBase.errors, [
+		'no trusted Git base is available',
+		'Fetch origin/main history',
+	])
+})
+
+test('migration content hashing canonicalizes CRLF to LF', () => {
+	expect(hashMigrationContent('CREATE TABLE example (id TEXT);\r\n')).toBe(
+		hashMigrationContent('CREATE TABLE example (id TEXT);\n'),
+	)
+	expect(hashMigrationContent('line one\r\nline two\r\n')).toBe(
+		hashMigrationContent('line one\nline two\n'),
+	)
+})
+
+test.each([
+	{
+		name: 'pull request base SHA',
+		env: {
+			MIGRATION_VALIDATION_BASE: 'pr-base',
+			GITHUB_BASE_REF: 'main',
+		},
+		responses: {
+			'rev-parse HEAD^{commit}': 'head',
+			'rev-parse pr-base^{commit}': 'pr-base-sha',
+		},
+		expected: 'pr-base-sha',
+	},
+	{
+		name: 'main push before SHA',
+		env: { MIGRATION_VALIDATION_BASE: 'push-before' },
+		responses: {
+			'rev-parse HEAD^{commit}': 'head',
+			'rev-parse push-before^{commit}': 'before-sha',
+		},
+		expected: 'before-sha',
+	},
+	{
+		name: 'local feature branch merge base',
+		env: {},
+		responses: {
+			'rev-parse HEAD^{commit}': 'head',
+			'merge-base HEAD origin/main': 'branch-base',
+		},
+		expected: 'branch-base',
+	},
+	{
+		name: 'main or detached checkout first parent',
+		env: {},
+		responses: {
+			'rev-parse HEAD^{commit}': 'head',
+			'merge-base HEAD origin/main': 'head',
+			'merge-base HEAD main': 'head',
+			'rev-parse HEAD^1': 'parent-sha',
+		},
+		expected: 'parent-sha',
+	},
+	{
+		name: 'depth-one detached cloud checkout',
+		env: {},
+		responses: {
+			'rev-parse HEAD^{commit}': 'head',
+			'merge-base HEAD origin/main': 'head',
+			'merge-base HEAD main': 'head',
+			'rev-parse HEAD^1': null,
+		},
+		expected: null,
+	},
+])(
+	'trusted migration base resolves $name without accepting HEAD',
+	async ({ env, responses, expected }) => {
+		await expect(
+			resolveTrustedMigrationBase({
+				env: env as NodeJS.ProcessEnv,
+				git: mockGit(responses),
+			}),
+		).resolves.toBe(expected)
+	},
+)
+
+test('runtime main validation rejects a historical migration and ledger co-edit', async () => {
+	const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'kody-migration-main-'))
+	const checkerPath = fileURLToPath(
+		new URL('./check-migrations.ts', import.meta.url),
+	)
+	const runGit = (...args: Array<string>) =>
+		execFileSync('git', args, {
+			cwd: tempRoot,
+			encoding: 'utf8',
+			stdio: 'pipe',
+		})
+
+	try {
+		await mkdir(path.join(tempRoot, 'packages', 'worker'), {
+			recursive: true,
+		})
+		await mkdir(path.join(tempRoot, 'tools'), { recursive: true })
+		await cp(
+			path.join('packages', 'worker', 'migrations'),
+			path.join(tempRoot, 'packages', 'worker', 'migrations'),
+			{ recursive: true },
+		)
+		await cp(
+			path.join('tools', 'migration-ledger.json'),
+			path.join(tempRoot, 'tools', 'migration-ledger.json'),
+		)
+		runGit('init', '-b', 'main')
+		runGit('config', 'user.name', 'Migration Test')
+		runGit('config', 'user.email', 'migration-test@example.com')
+		runGit('add', '.')
+		runGit('commit', '-m', 'bootstrap')
+
+		const migrationPath = path.join(
+			tempRoot,
+			'packages',
+			'worker',
+			'migrations',
+			'0084-future.sql',
+		)
+		const ledgerPath = path.join(tempRoot, 'tools', 'migration-ledger.json')
+		const ledger = JSON.parse(
+			await readFile(ledgerPath, 'utf8'),
+		) as MigrationLedger
+		const originalSql = 'SELECT 1;\n'
+		await writeFile(migrationPath, originalSql)
+		ledger.migrations.push({
+			filename: '0084-future.sql',
+			sha256: hashMigrationContent(originalSql),
+		})
+		await writeFile(ledgerPath, `${JSON.stringify(ledger, null, '\t')}\n`)
+		runGit('add', '.')
+		runGit('commit', '-m', 'land migration')
+
+		const editedSql = 'SELECT 2;\n'
+		await writeFile(migrationPath, editedSql)
+		const futureEntry = ledger.migrations.at(-1)
+		if (!futureEntry) {
+			throw new Error('Expected the future migration ledger entry.')
+		}
+		futureEntry.sha256 = hashMigrationContent(editedSql)
+		await writeFile(ledgerPath, `${JSON.stringify(ledger, null, '\t')}\n`)
+		runGit('add', '.')
+		runGit('commit', '-m', 'co-edit migration and ledger')
+
+		const result = spawnSync(process.execPath, [checkerPath], {
+			cwd: tempRoot,
+			encoding: 'utf8',
+			env: {
+				...process.env,
+				GITHUB_BASE_REF: '',
+				GITHUB_REF_NAME: 'main',
+				MIGRATION_VALIDATION_BASE: '',
+			},
+		})
+		expect(result.status).toBe(1)
+		expect(result.stderr).toContain('0084-future.sql')
+		expect(result.stderr).toContain(
+			'Historical ledger entries cannot be edited',
+		)
+		expect(result.stderr).toContain('differs from trusted history')
+	} finally {
+		await rm(tempRoot, { recursive: true, force: true })
+	}
 })
 
 test('checkMigrationFilenames rejects malformed names, ordinary duplicates, and non-allowlisted prefix reuse', () => {
