@@ -383,6 +383,10 @@
 		{
 			"filename": "0089-email-delivery-reconciliation-index.sql",
 			"sha256": "f4304dbfbf3d3ab0bdfea0b8f769a16ac39241411597ce1e693430f7888ecc5b"
+		},
+		{
+			"filename": "0090-webhook-endpoints.sql",
+			"sha256": "59e680a93e93300b520ddd87ff6d86da24a97a33d651fe10ff7a842b66cfe355"
 		}
 	]
 }
