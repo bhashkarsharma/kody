@@ -589,7 +589,12 @@ export function CommunityDetailRoute(handle: Handle) {
 		shellLoadedForListingId = listingId
 		shellStatus = 'ready'
 		if (stargazersLoadedForListingId !== listingId) {
-			void loadStargazers(listingId)
+			// This runs during render, and `loadStargazers` calls
+			// `handle.update()` before its first await. The runtime only wires
+			// up a component's update scheduler after its first render
+			// returns, so calling it inline throws instead of scheduling:
+			// https://github.com/remix-run/remix/issues/11642
+			handle.queueTask(() => void loadStargazers(listingId))
 		}
 		return true
 	}
