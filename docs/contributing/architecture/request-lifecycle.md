@@ -177,7 +177,7 @@ Full page navigations occur for:
 This keeps cross-origin behavior narrow while allowing same-origin browser and
 API requests.
 
-## Observability (Sentry)
+## Observability (Sentry and Workers tracing)
 
 The Worker default export is wrapped with `Sentry.withSentry` from
 `@sentry/cloudflare` (see `packages/worker/src/index.ts`) so incoming `fetch`
@@ -211,6 +211,31 @@ MCP tools emit structured `mcp-event` logs via
 `packages/worker/src/mcp/observability.ts`. On failures, the same module sends
 Sentry events (with MCP tags and context); sandbox user-code failures are
 reported at **warning** severity, while capability handler bugs use **error**.
+
+### Workers native tracing (OpenTelemetry)
+
+`packages/worker/wrangler.jsonc` also enables
+[Workers automatic tracing](https://developers.cloudflare.com/workers/observability/traces/)
+(`observability.traces.enabled`, beta). The runtime emits OTel-standard spans
+for handler invocations, outbound fetches, and binding calls (D1, KV, R2,
+Durable Objects, queues) with no SDK in the bundle; traces appear in the Workers
+Observability dashboard next to Workers Logs, and `console.*` output inside a
+span is attributed to that span. Custom spans are available via
+`tracing.enterSpan()` from `cloudflare:workers` when application-level spans are
+worth adding.
+
+Production deploys additionally export these traces to Sentry through the
+account-level `sentry-otlp-traces` destination; preview and test deploys inherit
+the top-level block without a destination, so their spans stay in the Cloudflare
+dashboard. The destination itself (endpoint, auth header, fork provisioning) is
+documented in [setup-manifest.md](../setup-manifest.md), and the
+`SENTRY_TRACES_SAMPLE_RATE=0` follow-up that avoids duplicate SDK traces in
+[environment-variables.md](../environment-variables.md).
+
+Billing note: each span is one observability event sharing the Workers Logs
+quota (10M events/month included on Workers Paid). Sampling is controlled by
+`observability.traces.head_sampling_rate` (defaults to full sampling, fine at
+current traffic).
 
 ### Source maps
 

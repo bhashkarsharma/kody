@@ -61,6 +61,43 @@ This project uses the following resources:
   - Production and preview route embedding calls through this binding. When
     `AI_GATEWAY_ID` is configured, calls are sent through AI Gateway via the
     Workers AI binding options.
+- Workers Observability OTLP destination (account-level)
+  - Workers automatic tracing is enabled via `observability.traces` in
+    `packages/worker/wrangler.jsonc`; traces are viewable in the Workers
+    Observability dashboard with no further setup.
+  - Production traces are additionally exported to Sentry through the
+    account-level **Traces** destination `sentry-otlp-traces`, referenced from
+    `observability.traces.destinations` in the **production** environment only
+    (preview and test deploys keep dashboard-only tracing). In the production
+    Cloudflare account it points at the `kody-cloudflare` Sentry project's OTLP
+    endpoint (`https://<HOST>/api/<PROJECT_ID>/integration/otlp/v1/traces` with
+    the `x-sentry-auth: sentry sentry_key=<public key>` header derived from the
+    project DSN).
+  - Forks must create their own destination under the same name, or remove the
+    `destinations` line — deploys can fail on unknown destinations. Create it in
+    the dashboard (**Workers Observability → Destinations**, type Traces) or via
+    the API:
+
+    ```sh
+    curl -X POST \
+      "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/workers/observability/destinations" \
+      -H "Authorization: Bearer <API_TOKEN>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "sentry-otlp-traces",
+        "enabled": true,
+        "configuration": {
+          "type": "logpush",
+          "logpushDataset": "opentelemetry-traces",
+          "url": "https://<HOST>/api/<PROJECT_ID>/integration/otlp/v1/traces",
+          "headers": { "x-sentry-auth": "sentry sentry_key=<public key>" }
+        }
+      }'
+    ```
+
+  - Once Sentry ingests exported OTLP traces, set `SENTRY_TRACES_SAMPLE_RATE=0`
+    to avoid duplicate SDK traces; see
+    [environment-variables.md](./environment-variables.md).
 
 The checked-in
 [`packages/worker/wrangler.jsonc`](../../packages/worker/wrangler.jsonc)
