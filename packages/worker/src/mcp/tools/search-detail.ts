@@ -1,4 +1,5 @@
 import { buildPackageAppUrl } from '@kody-internal/shared/public-urls.ts'
+import { McpCallerError } from '#mcp/caller-error.ts'
 import {
 	parseIntegrationConfig,
 	parseIntegrationJson,
@@ -51,7 +52,7 @@ export async function resolveEntityDetail(input: {
 	if (ref.type === 'capability') {
 		const spec = input.searchRows.registry.capabilitySpecs[ref.id]
 		if (!spec) {
-			throw new Error('Capability not found.')
+			throw new McpCallerError('Capability not found.')
 		}
 		const relatedOperations = collectRelatedCapabilityOperations({
 			spec,
@@ -68,7 +69,9 @@ export async function resolveEntityDetail(input: {
 	}
 
 	if (!input.userId) {
-		throw new Error('Authentication required to access saved user entities.')
+		throw new McpCallerError(
+			'Authentication required to access saved user entities.',
+		)
 	}
 
 	if (ref.type === 'package') {
@@ -82,7 +85,7 @@ export async function resolveEntityDetail(input: {
 				kodyId: ref.id,
 			}))
 		if (!record) {
-			throw new Error('Saved package not found for this user.')
+			throw new McpCallerError('Saved package not found for this user.')
 		}
 		const loaded = await loadPackageSourceBySourceId({
 			env: input.agent.getEnv(),
@@ -129,7 +132,7 @@ export async function resolveEntityDetail(input: {
 				},
 			}))
 		if (!row) {
-			throw new Error('Persisted value not found for this user.')
+			throw new McpCallerError('Persisted value not found for this user.')
 		}
 		return {
 			type: 'value' as const,
@@ -146,7 +149,7 @@ export async function resolveEntityDetail(input: {
 			ref.id,
 		)
 		if (!integration) {
-			throw new Error('Saved integration not found for this user.')
+			throw new McpCallerError('Saved integration not found for this user.')
 		}
 		const relatedPackageSuggestions =
 			await collectIntegrationPackageSuggestions({
@@ -174,7 +177,7 @@ export async function resolveEntityDetail(input: {
 		(secret) => secret.name === ref.id,
 	)
 	if (!row) {
-		throw new Error('Secret not found for this user.')
+		throw new McpCallerError('Secret not found for this user.')
 	}
 	return {
 		type: 'secret' as const,

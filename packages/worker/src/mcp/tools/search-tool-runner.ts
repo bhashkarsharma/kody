@@ -1,5 +1,6 @@
 import * as Sentry from '@sentry/cloudflare'
 import { resolvePublicUsername } from '#app/user-lookup.ts'
+import { isMcpCallerError } from '#mcp/caller-error.ts'
 import { type McpRegistrationAgent } from '#mcp/mcp-registration-agent.ts'
 import {
 	callerContextFields,
@@ -78,6 +79,7 @@ export async function runSearchTool(input: {
 			hasUser,
 			userId: userId ?? undefined,
 			sandboxError: false,
+			callerError: true,
 			errorName: 'ValidationError',
 			errorMessage: 'Provide "query", "entity", or "domain".',
 			message: 'Search request missing query, entity, and domain.',
@@ -189,6 +191,7 @@ export async function runSearchTool(input: {
 							ok: false as const,
 							entityRef,
 							error: error.message,
+							callerError: isMcpCallerError(cause),
 						}
 					}
 				}),
@@ -233,6 +236,7 @@ export async function runSearchTool(input: {
 								ok: false
 								entityRef: string
 								error: string
+								callerError: boolean
 						  }
 					>
 			  } = await Sentry.startSpan(
@@ -320,6 +324,18 @@ export async function runSearchTool(input: {
 				markdownParts.push(entityResult.markdown)
 			}
 			const allFailed = successCount === 0
+			const failedEntries = outcome.results.filter(
+				(
+					entry,
+				): entry is Extract<(typeof outcome.results)[number], { ok: false }> =>
+					!entry.ok,
+			)
+			// Only treat a total batch failure as caller-caused when every
+			// failed lookup was a caller mistake. Shared platform failures
+			// (DB/load) still reach Sentry.
+			const allCallerFailures =
+				failedEntries.length > 0 &&
+				failedEntries.every((entry) => entry.callerError)
 			logMcpEvent({
 				category: 'mcp',
 				tool: 'search',
@@ -332,6 +348,7 @@ export async function runSearchTool(input: {
 				...(allFailed
 					? {
 							sandboxError: false,
+							...(allCallerFailures ? { callerError: true } : {}),
 							errorName: 'EntityBatchError',
 							errorMessage: 'All entity lookups failed.',
 						}
