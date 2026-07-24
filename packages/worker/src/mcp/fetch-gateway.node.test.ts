@@ -14,8 +14,49 @@ import * as secretService from '#mcp/secrets/service.ts'
 import * as communityRepo from '#worker/community/repo.ts'
 import * as packageRepo from '#worker/package-registry/repo.ts'
 
+/**
+ * Minimal D1 stub for the entitlement reads/writes executeGatewayFetch
+ * performs (account reverse-resolution `first()` and the conditional
+ * counter upsert `run()`); secret resolution itself is spied at the
+ * service layer. Both statements must bind the acting userId — the stub
+ * fails loudly when a query drops the per-user scoping.
+ */
 const env = {
-	APP_DB: {} as D1Database,
+	APP_DB: {
+		prepare(query: string) {
+			const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase()
+			return {
+				bind(...params: Array<unknown>) {
+					return {
+						async run() {
+							if (
+								normalizedQuery.includes(
+									'insert into entitlement_daily_counters',
+								) &&
+								params[0] !== 'user-123'
+							) {
+								throw new Error(
+									'Entitlement counter upsert must bind the acting userId.',
+								)
+							}
+							return { meta: { changes: 1 } }
+						},
+						async first() {
+							if (
+								normalizedQuery.includes('where stable_user_id') &&
+								params[0] !== 'user-123'
+							) {
+								throw new Error(
+									'Account reverse-resolution must bind the acting userId.',
+								)
+							}
+							return null
+						},
+					}
+				},
+			}
+		},
+	} as unknown as D1Database,
 	COOKIE_SECRET: 'test-cookie-secret',
 	SECRET_STORE_KEY: 'test-secret-store-key-32-chars-minimum',
 }
@@ -23,6 +64,7 @@ const env = {
 const props = {
 	baseUrl: 'https://example.com',
 	userId: 'user-123',
+	email: null,
 	storageContext: null,
 }
 
