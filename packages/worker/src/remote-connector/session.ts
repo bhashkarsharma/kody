@@ -27,6 +27,23 @@ const connectorTag = 'connector'
 const stateStorageKey = 'remote-connector-session-state'
 const rpcTimeoutMs = 15_000
 
+const remoteConnectorToolsListRpcErrorName = 'RemoteConnectorToolsListRpcError'
+
+function isExpectedToolsSnapshotRefreshFailure(error: unknown) {
+	if (
+		error instanceof Error &&
+		error.name === remoteConnectorToolsListRpcErrorName
+	) {
+		return true
+	}
+	const message = getErrorMessage(error)
+	return (
+		message === 'No remote connector is connected.' ||
+		message.startsWith('Timed out waiting for remote connector response to ') ||
+		message.includes(' before RPC response.')
+	)
+}
+
 type PendingRpcRequest = {
 	resolve: (message: RemoteConnectorJsonRpcResponse) => void
 	reject: (error: Error) => void
@@ -502,18 +519,10 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 		try {
 			await this.refreshToolsSnapshot()
 		} catch (error) {
-			this.stateSnapshot.tools = []
-			this.captureSessionMessage(
-				'Remote connector tools snapshot refresh failed after websocket hello.',
-				{
-					level: 'error',
-					extra: {
-						connectorId: this.stateSnapshot.persisted.connectorId,
-						error: getErrorMessage(error),
-					},
-				},
-			)
-			await this.persistState()
+			await this.handleToolsSnapshotRefreshFailure({
+				phase: 'after websocket hello',
+				error,
+			})
 		}
 	}
 
@@ -538,32 +547,64 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 			try {
 				await this.refreshToolsSnapshot()
 			} catch (error) {
-				this.stateSnapshot.tools = []
-				this.captureSessionMessage(
-					'Remote connector tools snapshot refresh failed.',
-					{
-						level: 'error',
-						extra: {
-							connectorId: this.stateSnapshot.persisted.connectorId,
-							error: getErrorMessage(error),
-						},
-					},
-				)
-				await this.persistState()
-				return
+				await this.handleToolsSnapshotRefreshFailure({
+					phase: 'on tools/list_changed',
+					error,
+				})
 			}
+		}
+	}
+
+	private async handleToolsSnapshotRefreshFailure(input: {
+		phase: 'after websocket hello' | 'on tools/list_changed'
+		error: unknown
+	}) {
+		if (!isExpectedToolsSnapshotRefreshFailure(input.error)) {
+			// Malformed tools/list payloads, storage failures, and other
+			// implementation bugs should still open Sentry via the outer
+			// message-handler catch — do not clear a still-valid tool cache.
+			throw input.error
+		}
+		// Timeouts, disconnects mid-RPC, and "not connected" are expected
+		// remote-connector lifecycle noise (same class as websocket closes).
+		// Soft-fail by clearing tools; keep an ops log line and do not open
+		// Sentry issues. Restore the in-memory cache if persistence fails so
+		// later reads are not left empty while Sentry captures the storage bug.
+		const previousTools = this.stateSnapshot.tools
+		this.stateSnapshot.tools = []
+		console.warn(
+			`Remote connector tools snapshot refresh failed ${input.phase}. connectorId=${this.stateSnapshot.persisted.connectorId ?? 'null'} error=${getErrorMessage(input.error)}`,
+		)
+		try {
+			await this.persistState()
+		} catch (persistError) {
+			this.stateSnapshot.tools = previousTools
+			throw persistError
 		}
 	}
 
 	private async refreshToolsSnapshot() {
 		const response = await this.sendRpcRequest('tools/list', {})
 		if ('error' in response) {
-			throw new Error(response.error.message)
+			const error = new Error(response.error.message)
+			error.name = remoteConnectorToolsListRpcErrorName
+			throw error
 		}
-		const result = response.result as {
-			tools?: Array<RemoteConnectorSnapshot['tools'][number]>
+		const result = response.result
+		if (
+			result === null ||
+			typeof result !== 'object' ||
+			Array.isArray(result)
+		) {
+			throw new Error('Malformed tools/list result.')
 		}
-		this.stateSnapshot.tools = result.tools ?? []
+		const tools = (result as { tools?: unknown }).tools
+		if (tools !== undefined && !Array.isArray(tools)) {
+			throw new Error('Malformed tools/list tools.')
+		}
+		this.stateSnapshot.tools =
+			(tools as Array<RemoteConnectorSnapshot['tools'][number]> | undefined) ??
+			[]
 		this.stateSnapshot.persisted.lastSeenAt = new Date().toISOString()
 		await this.persistState()
 	}
