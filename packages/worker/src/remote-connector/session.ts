@@ -108,16 +108,33 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 		message: string,
 		input: {
 			level?: 'warning' | 'error'
+			/** Owning user for the socket/event that triggered this capture. */
+			userId?: string | null
 			extra?: Record<string, unknown>
 		} = {},
 	) {
-		Sentry.captureMessage(message, {
-			level: input.level ?? 'warning',
-			tags: {
-				service: 'worker',
-				worker_component: 'remote-connector-session',
-			},
-			extra: input.extra ?? {},
+		const connectorId =
+			typeof input.extra?.connectorId === 'string'
+				? input.extra.connectorId
+				: (this.stateSnapshot.persisted.connectorId ?? undefined)
+		const userId = input.userId ?? null
+		Sentry.withScope((scope) => {
+			scope.setLevel(input.level ?? 'warning')
+			scope.setTag('service', 'worker')
+			scope.setTag('worker_component', 'remote-connector-session')
+			if (connectorId) {
+				scope.setTag('remote_connector.id', connectorId)
+			}
+			if (userId) {
+				scope.setUser({ id: userId })
+			}
+			scope.setContext('remote_connector', {
+				connectorId: connectorId ?? null,
+				userId,
+				connected: this.ctx.getWebSockets(connectorTag).length > 0,
+				...input.extra,
+			})
+			Sentry.captureMessage(message)
 		})
 	}
 
@@ -361,6 +378,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 				'Remote connector session received invalid websocket payload.',
 				{
 					level: 'error',
+					userId: this.loadIngressUserId(ws),
 					extra: {
 						connectorId: this.stateSnapshot.persisted.connectorId,
 						error: getErrorMessage(error),
@@ -393,6 +411,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 				'Remote connector session message handler threw.',
 				{
 					level: 'error',
+					userId: this.loadIngressUserId(ws),
 					extra: {
 						connectorId: this.stateSnapshot.persisted.connectorId,
 						messageType: parsed.type,
@@ -427,6 +446,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 				'Remote connector session rejected hello (missing user id on ingress).',
 				{
 					level: 'error',
+					userId: null,
 					extra: {
 						connectorId: canonicalInstanceId,
 					},
@@ -452,6 +472,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 				'Remote connector session rejected hello (session key mismatch).',
 				{
 					level: 'error',
+					userId: ingressUserId,
 					extra: {
 						connectorId: canonicalInstanceId,
 						ingressSessionKeySummary: summarizeSessionKey(ingressSessionKey),
@@ -486,6 +507,7 @@ class RemoteConnectorSessionBase extends DurableObject<Env> {
 				'Remote connector session rejected websocket hello.',
 				{
 					level: 'error',
+					userId: ingressUserId,
 					extra: {
 						connectorId: canonicalInstanceId,
 						hasExpectedSecret,
