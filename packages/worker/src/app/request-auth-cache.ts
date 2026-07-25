@@ -11,8 +11,9 @@
 import * as Sentry from '@sentry/cloudflare'
 import {
 	destroyAuthCookie,
+	isAuthSessionInvalidatedByPasswordChange,
 	isSecureRequest,
-	readAuthSessionResult,
+	readParsedAuthSession,
 } from '#app/auth-session.ts'
 import { getUserRolesAndPermissions } from '#app/permissions-db.ts'
 import { type PermissionString, type RoleName } from '#app/permissions.ts'
@@ -56,14 +57,15 @@ async function resolveRequestAuth(
 	request: Request,
 	env: Env,
 ): Promise<ResolvedRequestAuth> {
-	const { session, setCookie } = await readAuthSessionResult(request)
-	if (!session) {
+	const parsedSession = await readParsedAuthSession(request)
+	if (!parsedSession) {
 		return {
 			sessionUserId: null,
-			setCookie: setCookie ?? undefined,
+			setCookie: undefined,
 			user: null,
 		}
 	}
+	const { session, issuedAt, setCookie } = parsedSession
 
 	const userId = /^\d+$/.test(session.id) ? Number(session.id) : NaN
 	const db = createDb(env.APP_DB)
@@ -73,6 +75,23 @@ async function resolveRequestAuth(
 			: null
 
 	if (!userRecord) {
+		return {
+			sessionUserId: session.id,
+			setCookie: await destroyAuthCookie(isSecureRequest(request)),
+			user: null,
+		}
+	}
+
+	const passwordChangedAtRaw = userRecord.password_changed_at?.trim() ?? ''
+	const passwordChangedAtMs = parsePasswordChangedAtMs(passwordChangedAtRaw)
+	// Non-empty but unparseable must fail closed — do not treat as "never changed".
+	if (
+		(passwordChangedAtRaw !== '' && passwordChangedAtMs === null) ||
+		isAuthSessionInvalidatedByPasswordChange({
+			issuedAt,
+			passwordChangedAtMs,
+		})
+	) {
 		return {
 			sessionUserId: session.id,
 			setCookie: await destroyAuthCookie(isSecureRequest(request)),
@@ -130,6 +149,25 @@ async function resolveRequestAuth(
 			),
 		},
 	}
+}
+
+/**
+ * Parse a stored password_changed_at / SQLite-style timestamp to epoch ms.
+ * Whole-second timestamps (no fractional seconds) are treated as the end of
+ * that second so cookies issued later in the same second cannot survive a
+ * reset that only recorded second precision.
+ */
+export function parsePasswordChangedAtMs(value: string | null | undefined) {
+	if (!value) return null
+	const trimmed = value.trim()
+	if (!trimmed) return null
+	const normalized = trimmed.includes('T')
+		? trimmed
+		: `${trimmed.replace(' ', 'T')}Z`
+	const ms = Date.parse(normalized)
+	if (!Number.isFinite(ms)) return null
+	const hasFractionalSeconds = /(?:[T ])\d{2}:\d{2}:\d{2}\.\d/.test(normalized)
+	return hasFractionalSeconds ? ms : ms + 999
 }
 
 export function loadResolvedRequestAuth(
