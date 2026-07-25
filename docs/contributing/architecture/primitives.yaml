@@ -73,6 +73,7 @@ primitives:
       - packages/worker/src/repo/repo-session-cleanup.ts
       - packages/worker/src/app/retention.ts
       - packages/worker/src/app/auth-denial-alerts.ts
+      - packages/worker/src/app/email-delivery-alerts.ts
       - packages/worker/src/usage/aggregate-rollups.ts
     docs:
       - docs/contributing/architecture/data-storage.md
@@ -143,10 +144,11 @@ primitives:
     group: auth
     name: Stripe billing
     summary:
-      Authenticated Checkout Session creation, customer linking, and
-      subscription→plan sync.
+      Authenticated Checkout Session creation, Stripe webhooks, customer
+      linking, and subscription→plan sync (cron poll as backup).
     code:
       - packages/worker/src/billing/
+      - packages/worker/src/app/handlers/stripe-webhook.ts
     docs:
       - docs/contributing/architecture/entitlements.md
 
