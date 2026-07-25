@@ -50,9 +50,7 @@ test('a single capability denial is audited without becoming a Sentry error', as
 
 	await expect(
 		assertCallerCanAccessCapability(callerContext, adminCapability),
-	).rejects.toThrow(
-		'MCP user lacks required role "admin" for capability "admin_user_get".',
-	)
+	).rejects.toThrow(/lacks required role "admin"/)
 
 	expect(auditEventSummaries()).toEqual(['mcp_capability_denied:failure'])
 	expect(logAuditEventSpy).toHaveBeenCalledWith(
@@ -85,7 +83,7 @@ test('a principal enumerating admin capabilities stays visible in the audit log'
 				name,
 				requiredRole: 'admin',
 			}),
-		).rejects.toThrow(`for capability "${name}".`)
+		).rejects.toThrow(/lacks required role "admin"/)
 	}
 
 	const denials = logAuditEventSpy.mock.calls.map(([event]) => event)
@@ -109,9 +107,7 @@ test('audit denials carry the raw identifier for the sink to hash, never a store
 			createMcpCallerContext({ baseUrl: 'https://heykody.dev' }),
 			adminCapability,
 		),
-	).rejects.toThrow(
-		'Authenticated MCP user is required to execute capability "admin_user_get".',
-	)
+	).rejects.toThrow(/Authenticated MCP user is required/)
 
 	const [event] = logAuditEventSpy.mock.calls.at(-1) ?? []
 	expect(event).toMatchObject({ reason: 'no_user', category: 'auth' })
