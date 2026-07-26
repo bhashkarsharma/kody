@@ -9,15 +9,13 @@ import { cleanupAllUserArtifactRepos } from '#worker/repo/artifact-repo-cleanup.
 import { repoSessionRpc } from '#worker/repo/repo-session-rpc.ts'
 import { userScopedConnectorSessionKey } from '#worker/remote-connector/connector-session-key.ts'
 import { mcpClientHubDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
-import {
-	buildPackageServiceStorageId,
-	packageServiceRpc,
-} from '#worker/package-runtime/package-service.ts'
+import { packageServiceRpc } from '#worker/package-runtime/package-service.ts'
 import { packageRealtimeSessionRpc } from '#worker/package-runtime/realtime-session.ts'
+import { clearRunRecords } from '#worker/run-records/service.ts'
 import {
-	clearRunRecords,
-	listRunRecordStorageIds,
-} from '#worker/run-records/service.ts'
+	listAccountUserPackageServices,
+	listAccountUserStorageIds,
+} from '#app/account-user-inventory.ts'
 import {
 	accountUserDataTargets,
 	buildUserScopedDeleteOrUpdateSql,
@@ -195,68 +193,19 @@ async function listUserVectorIds(env: Env, userId: string) {
 	return ids
 }
 
-async function listUserStorageIds(env: Env, userId: string) {
-	const [
-		jobRows,
-		archivedRows,
-		runtimeRows,
-		packageRows,
-		serviceRows,
-		runRecordStorageIds,
-	] = await Promise.all([
-		env.APP_DB.prepare(
-			`SELECT storage_id FROM jobs WHERE user_id = ? AND storage_id IS NOT NULL`,
-		)
-			.bind(userId)
-			.all<{ storage_id: string }>(),
-		env.APP_DB.prepare(
-			`SELECT storage_id FROM archived_job_artifacts WHERE user_id = ? AND storage_id IS NOT NULL`,
-		)
-			.bind(userId)
-			.all<{ storage_id: string }>(),
-		// Keep reading package_runtime_runs for storage ids: that table still
-		// holds legacy rows written before RunLog, and is deliberately not
-		// dropped yet. Remove this D1 read once the follow-up drop migration
-		// lands.
-		env.APP_DB.prepare(
-			`SELECT storage_id FROM package_runtime_runs WHERE user_id = ? AND storage_id IS NOT NULL`,
-		)
-			.bind(userId)
-			.all<{ storage_id: string }>(),
-		env.APP_DB.prepare(
-			`SELECT id FROM saved_packages WHERE user_id = ? AND has_app = 1`,
-		)
-			.bind(userId)
-			.all<{ id: string }>(),
-		env.APP_DB.prepare(
-			`SELECT DISTINCT package_id, name FROM (
-				SELECT package_id, service_name AS name
-				FROM package_service_states
-				WHERE user_id = ?
-				UNION
-				-- Legacy arm: remove once the follow-up drop migration for
-				-- package_runtime_runs lands.
-				SELECT package_id, name
-				FROM package_runtime_runs
-				WHERE user_id = ?
-					AND surface = 'service'
-					AND name IS NOT NULL
-			)`,
-		)
-			.bind(userId, userId)
-			.all<{ package_id: string; name: string }>(),
-		listRunRecordStorageIds({ env, userId }),
-	])
-	return uniqueStrings([
-		...(jobRows.results ?? []).map((row) => row.storage_id),
-		...(archivedRows.results ?? []).map((row) => row.storage_id),
-		...(runtimeRows.results ?? []).map((row) => row.storage_id),
-		...(packageRows.results ?? []).map((row) => row.id),
-		...(serviceRows.results ?? []).map((row) =>
-			buildPackageServiceStorageId(row.package_id, row.name),
-		),
-		...runRecordStorageIds,
-	])
+async function listUserStorageIds(
+	env: Env,
+	userId: string,
+	warnings?: Array<string>,
+	packageServices?: ReadonlyArray<UserPackageServiceSnapshot>,
+) {
+	return await listAccountUserStorageIds({
+		env,
+		userId,
+		baseUrl: 'https://account-deletion.invalid',
+		warnings,
+		packageServices,
+	})
 }
 
 async function listUserSourceSnapshots(env: Env, userId: string) {
@@ -327,52 +276,19 @@ async function listUserMcpServers(env: Env, userId: string) {
 	return (rows.results ?? []).map((row) => ({ id: row.id }))
 }
 
-async function listUserPackageServices(env: Env, userId: string) {
-	const rows = await env.APP_DB.prepare(
-		`SELECT DISTINCT
-			package_id,
-			kody_id,
-			source_id,
-			name
-		FROM (
-			SELECT
-				s.package_id AS package_id,
-				p.kody_id AS kody_id,
-				p.source_id AS source_id,
-				s.service_name AS name
-			FROM package_service_states AS s
-			LEFT JOIN saved_packages AS p
-				ON p.id = s.package_id AND p.user_id = s.user_id
-			WHERE s.user_id = ?
-			UNION
-			-- Legacy arm: remove once the follow-up drop migration for
-			-- package_runtime_runs lands.
-			SELECT
-				r.package_id AS package_id,
-				COALESCE(p.kody_id, r.package_kody_id) AS kody_id,
-				COALESCE(p.source_id, r.source_id) AS source_id,
-				r.name AS name
-			FROM package_runtime_runs AS r
-			LEFT JOIN saved_packages AS p
-				ON p.id = r.package_id AND p.user_id = r.user_id
-			WHERE r.user_id = ?
-				AND r.surface = 'service'
-				AND r.name IS NOT NULL
-		)`,
-	)
-		.bind(userId, userId)
-		.all<{
-			package_id: string
-			kody_id: string | null
-			source_id: string | null
-			name: string
-		}>()
-	return (rows.results ?? []).map((row) => ({
-		packageId: row.package_id,
-		kodyId: row.kody_id ?? '',
-		sourceId: row.source_id ?? '',
-		serviceName: row.name,
-	}))
+async function listUserPackageServices(
+	env: Env,
+	userId: string,
+	warnings?: Array<string>,
+) {
+	return await listAccountUserPackageServices({
+		env,
+		userId,
+		baseUrl: 'https://account-deletion.invalid',
+		warnings,
+		// Legacy pre-#955 service arm via includeLegacyRuntimeRuns (issue #956).
+		includeLegacyRuntimeRuns: true,
+	})
 }
 
 async function listUserBundleKvKeys(input: {
@@ -430,6 +346,16 @@ async function collectUserDeletionInventory(input: {
 		input.warnings.push(warning)
 		inventoryErrors.push(warning)
 	}
+	// Enumerate services first so storage-id listing can reuse the result and
+	// avoid a second package-manifest pass in the same request.
+	const packageServices = await listUserPackageServices(
+		input.env,
+		input.userId,
+		input.warnings,
+	).catch((error) => {
+		recordInventoryError('package services', error)
+		return [] as Array<UserPackageServiceSnapshot>
+	})
 	const [
 		vectorIds,
 		storageIds,
@@ -440,13 +366,17 @@ async function collectUserDeletionInventory(input: {
 		remoteConnectors,
 		mcpServers,
 		mcpAgentSessions,
-		packageServices,
 	] = await Promise.all([
 		listUserVectorIds(input.env, input.userId).catch((error) => {
 			recordInventoryError('vector ids', error)
 			return [] as Array<string>
 		}),
-		listUserStorageIds(input.env, input.userId).catch((error) => {
+		listUserStorageIds(
+			input.env,
+			input.userId,
+			input.warnings,
+			packageServices,
+		).catch((error) => {
 			recordInventoryError('storage ids', error)
 			return [] as Array<string>
 		}),
@@ -487,10 +417,6 @@ async function collectUserDeletionInventory(input: {
 				return [] as Array<McpAgentSession>
 			},
 		),
-		listUserPackageServices(input.env, input.userId).catch((error) => {
-			recordInventoryError('package services', error)
-			return [] as Array<UserPackageServiceSnapshot>
-		}),
 	])
 	const bundleKvKeys = await listUserBundleKvKeys({
 		env: input.env,

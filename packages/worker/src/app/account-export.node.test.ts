@@ -1,5 +1,6 @@
 import { quoteSqlIdentifier } from '@kody-internal/shared/sql-literals.ts'
 import { readdirSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
@@ -8,6 +9,7 @@ import {
 	getAccountExportD1UserColumnCoverage,
 	readAccountExportSection,
 } from './account-export.ts'
+import { consoleWarn } from '#worker/test-support/console-spies.ts'
 
 function applyMigrations(db: DatabaseSync) {
 	const migrationsDir = new URL('../../migrations/', import.meta.url)
@@ -858,10 +860,13 @@ test('durable object discovery pages high-cardinality storage ids without nested
 								maxRows = Math.max(maxRows, rows.length)
 								return { results: rows as Array<T> }
 							}
-							if (query.includes('SELECT DISTINCT package_id, name')) {
+							if (query.includes('FROM package_service_states')) {
 								return { results: [] as Array<T> }
 							}
 							throw new Error(`Unexpected query: ${query}`)
+						},
+						async first<T>() {
+							return null as T | null
 						},
 					}
 				},
@@ -889,6 +894,74 @@ test('durable object discovery pages high-cardinality storage ids without nested
 	}
 	expect(seen.size).toBe(1201)
 	expect(maxRows).toBeLessThanOrEqual(101)
+})
+
+test('durable object discovery paging does not load package manifests', async () => {
+	const loadManifest = vi.spyOn(
+		await import('#worker/package-registry/source.ts'),
+		'loadPackageManifestBySourceId',
+	)
+	loadManifest.mockRejectedValue(new Error('manifest should not be loaded'))
+	try {
+		const { sqlite, db } = createMigratedDb()
+		sqlite.exec(`
+			INSERT INTO users (
+				id, username, email, password_hash, created_at, updated_at,
+				email_verified_at, stable_user_id
+			)
+			VALUES (
+				1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+				'2026-07-05', '2026-07-05', 'user-aaa'
+			);
+			INSERT INTO saved_packages (
+				id, user_id, name, kody_id, description, tags_json, source_id,
+				has_app, hidden, is_private, created_at, updated_at
+			) VALUES (
+				'pkg-1', 'user-aaa', 'Pkg', 'pkg', '', '[]',
+				'src-1', 0, 0, 1, '2026-07-05', '2026-07-05'
+			);
+			INSERT INTO user_storage_buckets (
+				user_id, storage_id, kind, created_at, last_seen_at
+			) VALUES (
+				'user-aaa', 'exec:page-1', 'execute', '2026-07-05', '2026-07-05'
+			);
+			INSERT INTO package_service_states (
+				user_id, package_id, service_name, status, started_at, updated_at
+			) VALUES (
+				'user-aaa', 'pkg-1', 'worker', 'idle',
+				null, '2026-07-05T00:00:00.000Z'
+			);
+		`)
+
+		const storagePage = await readAccountExportSection({
+			env: { APP_DB: db } as Env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'durable_object_summaries',
+			kind: 'storage_runner',
+			pageSize: 50,
+		})
+		expect(storagePage.items.length).toBeGreaterThan(0)
+
+		const servicePage = await readAccountExportSection({
+			env: { APP_DB: db } as Env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'durable_object_summaries',
+			kind: 'package_service',
+			pageSize: 50,
+		})
+		expect(servicePage.items).toEqual([
+			{
+				kind: 'package_service',
+				packageId: 'pkg-1',
+				serviceName: 'worker',
+			},
+		])
+		expect(loadManifest).not.toHaveBeenCalled()
+	} finally {
+		loadManifest.mockRestore()
+	}
 })
 
 test('createAccountExport redacts secrets and credential-equivalent hashes', async () => {
@@ -1184,12 +1257,10 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 		insert.run(`message-${String(index).padStart(4, '0')}`, `Mail ${index}`)
 	}
 	sqlite.exec(`
-		INSERT INTO package_runtime_runs (
-			id, user_id, package_id, package_kody_id, surface, name, status,
-			started_at, storage_id, created_at, updated_at
+		INSERT INTO user_storage_buckets (
+			user_id, storage_id, kind, created_at, last_seen_at
 		) VALUES (
-			'service-run', 'user-aaa', 'pkg:1', 'pkg', 'service', 'svc x',
-			'success', '2026-07-05', 'service:pkg%3A1:svc%20x',
+			'user-aaa', 'service:pkg%3A1:svc%20x', 'service',
 			'2026-07-05', '2026-07-05'
 		);
 	`)
@@ -1258,9 +1329,6 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 	expect(Math.max(...rowCounts)).toBeLessThanOrEqual(1)
 	expect(
 		queries.some((query) => query.includes('__account_export_rowid')),
-	).toBe(false)
-	expect(
-		queries.some((query) => query.startsWith('SELECT storage_id FROM jobs')),
 	).toBe(false)
 })
 
@@ -1385,8 +1453,10 @@ test('account export includes run_records section with runs and log lines', asyn
 })
 
 test('account export includes a package service known only via package_service_states', async () => {
-	const { sqlite, db } = createMigratedDb()
-	sqlite.exec(`
+	consoleWarn.mockImplementation(() => {})
+	try {
+		const { sqlite, db } = createMigratedDb()
+		sqlite.exec(`
 		INSERT INTO users (
 			id, username, email, password_hash, created_at, updated_at,
 			email_verified_at, stable_user_id
@@ -1410,49 +1480,369 @@ test('account export includes a package service known only via package_service_s
 		);
 	`)
 
-	const statusMock = vi.fn(async () =>
-		Response.json({
-			package_id: 'pkg-states',
-			kody_id: 'states-pkg',
-			service_name: 'only-in-states',
-			status: 'running',
-			auto_start: false,
-			mode: 'bounded',
-			timeout_ms: 30_000,
-			stop_requested: false,
-			active_run_id: null,
-			next_alarm_at: null,
-			last_error: null,
-			last_started_at: '2026-07-05T00:00:00.000Z',
-			last_stopped_at: null,
-			last_run_finished_at: null,
-			last_result: null,
-		}),
-	)
+		const statusMock = vi.fn(async () =>
+			Response.json({
+				package_id: 'pkg-states',
+				kody_id: 'states-pkg',
+				service_name: 'only-in-states',
+				status: 'running',
+				auto_start: false,
+				mode: 'bounded',
+				timeout_ms: 30_000,
+				stop_requested: false,
+				active_run_id: null,
+				next_alarm_at: null,
+				last_error: null,
+				last_started_at: '2026-07-05T00:00:00.000Z',
+				last_stopped_at: null,
+				last_run_finished_at: null,
+				last_result: null,
+			}),
+		)
 
-	const accountExport = await createAccountExport({
-		env: {
+		const accountExport = await createAccountExport({
+			env: {
+				APP_DB: db,
+				PACKAGE_SERVICE_INSTANCE: {
+					idFromName: (name: string) => name as unknown as DurableObjectId,
+					get: () => ({ fetch: statusMock }),
+				},
+			} as unknown as Env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			generatedAt: '2026-07-05T00:00:00.000Z',
+		})
+
+		expect(accountExport.manifest.sections.package_services?.count).toBe(1)
+		expect(accountExport.durableObjects.packageServices).toEqual([
+			expect.objectContaining({
+				packageId: 'pkg-states',
+				serviceName: 'only-in-states',
+				status: expect.objectContaining({
+					service_name: 'only-in-states',
+					status: 'running',
+				}),
+			}),
+		])
+		expect(statusMock).toHaveBeenCalledTimes(1)
+	} finally {
+		consoleWarn.mockReset()
+	}
+})
+
+test('account export includes a storage runner known only via user_storage_buckets', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		)
+		VALUES (
+			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+			'2026-07-05', '2026-07-05', 'user-aaa'
+		);
+		INSERT INTO user_storage_buckets (
+			user_id, storage_id, kind, created_at, last_seen_at
+		) VALUES (
+			'user-aaa', 'exec:export-only', 'execute',
+			'2026-07-05', '2026-07-05'
+		);
+	`)
+
+	const exportStorage = vi.fn(async () => ({
+		entries: [{ key: 'alpha', value: { n: 1 } }],
+		truncated: false,
+		nextStartAfter: null,
+		pageSize: 100,
+		estimatedBytes: 10,
+	}))
+
+	const env = {
+		APP_DB: db,
+		STORAGE_RUNNER: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({ exportStorage }),
+		},
+	} as unknown as Env
+
+	const manifest = await createAccountExportManifest({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+	})
+	expect(manifest.sections.storage_runners?.count).toBe(1)
+
+	const section = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'storage_runner',
+		storageId: 'exec:export-only',
+	})
+	expect(section.items).toEqual([{ key: 'alpha', value: { n: 1 } }])
+	expect(exportStorage).toHaveBeenCalledTimes(1)
+})
+
+test('storage_runners count matches ids enumerable by discovery paging', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		)
+		VALUES (
+			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+			'2026-07-05', '2026-07-05', 'user-aaa'
+		);
+		INSERT INTO jobs (
+			id, user_id, name, source_id, storage_id, schedule_json, timezone,
+			caller_context_json, created_at, updated_at, next_run_at
+		) VALUES (
+			'job-1', 'user-aaa', 'Job', 'src-job-1', 'job:job-1', '{}', 'UTC',
+			'{}', '2026-07-05', '2026-07-05', '2026-07-05'
+		);
+		INSERT INTO user_storage_buckets (
+			user_id, storage_id, kind, created_at, last_seen_at
+		) VALUES (
+			'user-aaa', 'exec:adhoc', 'execute', '2026-07-05', '2026-07-05'
+		);
+		INSERT INTO saved_packages (
+			id, user_id, name, kody_id, description, tags_json, source_id,
+			has_app, hidden, is_private, created_at, updated_at
+		) VALUES (
+			'pkg-1', 'user-aaa', 'Pkg', 'pkg', '', '[]',
+			'src-1', 1, 0, 1, '2026-07-05', '2026-07-05'
+		);
+		INSERT INTO package_service_states (
+			user_id, package_id, service_name, status, started_at, updated_at
+		) VALUES (
+			'user-aaa', 'pkg-1', 'worker', 'idle',
+			null, '2026-07-05T00:00:00.000Z'
+		);
+	`)
+
+	const env = {
+		APP_DB: db,
+		RUN_LOG: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				listStorageIds: async () => [
+					'exec:adhoc',
+					'exec:runlog-only',
+					'job:job-1',
+				],
+			}),
+		},
+	} as unknown as Env
+	const manifest = await createAccountExportManifest({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+	})
+	const expectedCount = manifest.sections.storage_runners?.count
+	expect(expectedCount).toBeGreaterThan(0)
+
+	const seen = new Set<string>()
+	let startAfter: string | undefined
+	for (;;) {
+		const page = await readAccountExportSection({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'durable_object_summaries',
+			kind: 'storage_runner',
+			pageSize: 2,
+			startAfter,
+		})
+		for (const item of page.items as Array<{ storageId: string }>) {
+			seen.add(item.storageId)
+		}
+		if (!page.truncated) break
+		startAfter = page.nextStartAfter ?? undefined
+	}
+	expect(seen.size).toBe(expectedCount)
+	expect(seen.has('exec:runlog-only')).toBe(true)
+})
+
+test('storage_runner section exports a RunLog-only storage id', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		)
+		VALUES (
+			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+			'2026-07-05', '2026-07-05', 'user-aaa'
+		);
+	`)
+
+	const exportStorage = vi.fn(async () => ({
+		entries: [{ key: 'runlog', value: { ok: true } }],
+		truncated: false,
+		nextStartAfter: null,
+		pageSize: 100,
+		estimatedBytes: 8,
+	}))
+	const env = {
+		APP_DB: db,
+		STORAGE_RUNNER: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({ exportStorage }),
+		},
+		RUN_LOG: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				listStorageIds: async () => ['exec:runlog-export-only'],
+			}),
+		},
+	} as unknown as Env
+
+	const manifest = await createAccountExportManifest({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+	})
+	expect(manifest.sections.storage_runners?.count).toBe(1)
+
+	const section = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'storage_runner',
+		storageId: 'exec:runlog-export-only',
+	})
+	expect(section.items).toEqual([{ key: 'runlog', value: { ok: true } }])
+	expect(exportStorage).toHaveBeenCalledTimes(1)
+})
+
+test('storage_runner and package_service section reads do not load manifests for D1-known rows', async () => {
+	const loadManifest = vi.spyOn(
+		await import('#worker/package-registry/source.ts'),
+		'loadPackageManifestBySourceId',
+	)
+	loadManifest.mockRejectedValue(new Error('manifest should not be loaded'))
+	try {
+		const { sqlite, db } = createMigratedDb()
+		sqlite.exec(`
+			INSERT INTO users (
+				id, username, email, password_hash, created_at, updated_at,
+				email_verified_at, stable_user_id
+			)
+			VALUES (
+				1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+				'2026-07-05', '2026-07-05', 'user-aaa'
+			);
+			INSERT INTO user_storage_buckets (
+				user_id, storage_id, kind, created_at, last_seen_at
+			) VALUES (
+				'user-aaa', 'exec:section-only', 'execute',
+				'2026-07-05', '2026-07-05'
+			);
+			INSERT INTO saved_packages (
+				id, user_id, name, kody_id, description, tags_json, source_id,
+				has_app, hidden, is_private, created_at, updated_at
+			) VALUES (
+				'pkg-1', 'user-aaa', 'Pkg', 'pkg', '', '[]',
+				'src-1', 0, 0, 1, '2026-07-05', '2026-07-05'
+			);
+			INSERT INTO package_service_states (
+				user_id, package_id, service_name, status, started_at, updated_at
+			) VALUES (
+				'user-aaa', 'pkg-1', 'worker', 'idle',
+				null, '2026-07-05T00:00:00.000Z'
+			);
+		`)
+
+		const exportStorage = vi.fn(async () => ({
+			entries: [],
+			truncated: false,
+			nextStartAfter: null,
+			pageSize: 100,
+			estimatedBytes: 0,
+		}))
+		const statusMock = vi.fn(async () =>
+			Response.json({
+				package_id: 'pkg-1',
+				kody_id: 'pkg',
+				service_name: 'worker',
+				status: 'idle',
+			}),
+		)
+		const env = {
 			APP_DB: db,
+			STORAGE_RUNNER: {
+				idFromName: (name: string) => name as unknown as DurableObjectId,
+				get: () => ({ exportStorage }),
+			},
 			PACKAGE_SERVICE_INSTANCE: {
 				idFromName: (name: string) => name as unknown as DurableObjectId,
 				get: () => ({ fetch: statusMock }),
 			},
-		} as unknown as Env,
-		dbUserId: 1,
-		mcpUserId: 'user-aaa',
-		generatedAt: '2026-07-05T00:00:00.000Z',
-	})
+		} as unknown as Env
 
-	expect(accountExport.manifest.sections.package_services?.count).toBe(1)
-	expect(accountExport.durableObjects.packageServices).toEqual([
-		expect.objectContaining({
-			packageId: 'pkg-states',
-			serviceName: 'only-in-states',
-			status: expect.objectContaining({
-				service_name: 'only-in-states',
-				status: 'running',
-			}),
+		await readAccountExportSection({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'storage_runner',
+			storageId: 'exec:section-only',
+		})
+		await readAccountExportSection({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'package_service',
+			packageId: 'pkg-1',
+			serviceName: 'worker',
+		})
+		expect(loadManifest).not.toHaveBeenCalled()
+	} finally {
+		loadManifest.mockRestore()
+	}
+})
+
+test('storage_runner section treats malformed service storage ids as not found', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		)
+		VALUES (
+			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+			'2026-07-05', '2026-07-05', 'user-aaa'
+		);
+		INSERT INTO saved_packages (
+			id, user_id, name, kody_id, description, tags_json, source_id,
+			has_app, hidden, is_private, created_at, updated_at
+		) VALUES (
+			'pkg%', 'user-aaa', 'Malformed', 'malformed', '', '[]',
+			'src-malformed', 0, 0, 1, '2026-07-05', '2026-07-05'
+		);
+		INSERT INTO package_service_states (
+			user_id, package_id, service_name, status, started_at, updated_at
+		) VALUES (
+			'user-aaa', 'pkg%', 'worker%', 'idle',
+			null, '2026-07-05T00:00:00.000Z'
+		);
+	`)
+
+	await expect(
+		readAccountExportSection({
+			env: { APP_DB: db } as Env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'storage_runner',
+			storageId: 'service:pkg%:worker%',
 		}),
-	])
-	expect(statusMock).toHaveBeenCalledTimes(1)
+	).rejects.toThrow('Storage runner was not found for account export.')
+})
+
+test('account export source no longer reads package_runtime_runs', () => {
+	const source = readFileSync(
+		fileURLToPath(new URL('./account-export.ts', import.meta.url)),
+		'utf8',
+	)
+	expect(source.includes('package_runtime_runs')).toBe(false)
 })

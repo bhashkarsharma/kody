@@ -7,6 +7,10 @@ import {
 	estimateEntitlementStorageSqlWriteBytes,
 	readUserD1StorageBytes,
 } from '#worker/entitlements/service.ts'
+import {
+	registerStorageBucket,
+	storageBucketKindFromStorageId,
+} from '#worker/storage-buckets/service.ts'
 import { storageRunnerDurableObjectName } from '#worker/user-scoped-durable-object-name.ts'
 
 const defaultStorageExportPageSize = 250
@@ -466,7 +470,7 @@ export function storageRunnerRpc(input: {
 	userId: string
 	storageId: string
 }) {
-	return input.env.STORAGE_RUNNER.get(
+	const runner = input.env.STORAGE_RUNNER.get(
 		input.env.STORAGE_RUNNER.idFromName(
 			storageRunnerDurableObjectName(input.userId, input.storageId),
 		),
@@ -501,6 +505,62 @@ export function storageRunnerRpc(input: {
 			params?: Array<unknown>
 			writable?: boolean
 		}) => Promise<StorageSqlResult>
+	}
+
+	// Registration must never run on a path that executes after the owning
+	// user's D1 rows are removed. Account deletion clears StorageRunner DOs
+	// via clearStorage, then deletes user_storage_buckets; registering on
+	// clear would fire-and-forget an upsert that can recreate rows for a
+	// deleted user. Clearing also is not evidence of use — prior writes
+	// already registered the bucket.
+	const registerOwnedBucket = () => {
+		registerStorageBucket({
+			env: input.env,
+			userId: input.userId,
+			storageId: input.storageId,
+			kind: storageBucketKindFromStorageId(input.storageId),
+		})
+	}
+
+	return {
+		getValue: (payload: { key: string }) => runner.getValue(payload),
+		setValue: (payload: { key: string; value: unknown }) => {
+			registerOwnedBucket()
+			return runner.setValue(payload)
+		},
+		deleteValue: (payload: { key: string }) => {
+			registerOwnedBucket()
+			return runner.deleteValue(payload)
+		},
+		clearStorage: () => runner.clearStorage(),
+		getEstimatedBytes: () => runner.getEstimatedBytes(),
+		listValues: (payload: {
+			prefix?: string | null
+			pageSize?: number
+			startAfter?: string | null
+		}) => runner.listValues(payload),
+		exportStorage: (payload: {
+			pageSize?: number
+			startAfter?: string | null
+		}) => runner.exportStorage(payload),
+		importStorage: (payload: {
+			mode: 'replace'
+			replacePage: 'first' | 'continue'
+			entries: Array<{ key: string; valueJson: string }>
+		}) => {
+			registerOwnedBucket()
+			return runner.importStorage(payload)
+		},
+		sqlQuery: (payload: {
+			query: string
+			params?: Array<unknown>
+			writable?: boolean
+		}) => {
+			if (payload.writable) {
+				registerOwnedBucket()
+			}
+			return runner.sqlQuery(payload)
+		},
 	}
 }
 
