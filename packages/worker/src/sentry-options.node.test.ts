@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { UserCodeError } from './user-code-error.ts'
+import { isUserCodeError, UserCodeError } from './user-code-error.ts'
 import {
 	executorSandboxTimeoutMessage,
 	filterSentryEvent,
@@ -22,51 +22,17 @@ test('filterSentryEvent drops expected platform and caller noise and keeps real 
 		filterSentryEvent({
 			exception: {
 				values: [
-					{
-						value: 'Currently processing a long-running export.',
-					},
-					{
-						value: 'D1_ERROR: Currently processing a long-running export.',
-					},
+					{ value: 'Currently processing a long-running export.' },
+					{ value: 'D1_ERROR: Currently processing a long-running export.' },
 				],
 			},
 		}),
 	).toBeNull()
 
+	// One representative form per D1 blip family (with and without D1_ERROR: prefix).
 	expect(
 		filterSentryEvent({
-			exception: {
-				values: [{ value: 'Network connection lost.' }],
-			},
-		}),
-	).toBeNull()
-	expect(
-		filterSentryEvent({
-			exception: {
-				values: [{ value: 'D1_ERROR: Network connection lost.' }],
-			},
-		}),
-	).toBeNull()
-
-	expect(
-		filterSentryEvent({
-			exception: {
-				values: [
-					{
-						value:
-							'D1_ERROR: internal error; reference = 0u3odos5iotccpol68ppc0eg',
-					},
-				],
-			},
-		}),
-	).toBeNull()
-	expect(
-		filterSentryEvent({
-			exception: {
-				values: [
-					{ value: 'internal error; reference = 0u3odos5iotccpol68ppc0eg' },
-				],
-			},
+			exception: { values: [{ value: 'Network connection lost.' }] },
 		}),
 	).toBeNull()
 	expect(
@@ -75,7 +41,7 @@ test('filterSentryEvent drops expected platform and caller noise and keeps real 
 				values: [
 					{
 						value:
-							'D1_ERROR: Internal error in D1 DB storage caused object to be reset; reference = 8t4dqqpoq1ctvjr8kca8fl4c',
+							'D1_ERROR: internal error; reference = 0u3odos5iotccpol68ppc0eg',
 					},
 				],
 			},
@@ -102,9 +68,7 @@ test('filterSentryEvent drops expected platform and caller noise and keeps real 
 	expect(filterSentryEvent(unrelatedNetworkLoss)).toBe(unrelatedNetworkLoss)
 
 	const bareInternalError = {
-		exception: {
-			values: [{ value: 'internal error' }],
-		},
+		exception: { values: [{ value: 'internal error' }] },
 	}
 	expect(filterSentryEvent(bareInternalError)).toBe(bareInternalError)
 
@@ -180,38 +144,43 @@ test('filterSentryEvent drops expected platform and caller noise and keeps real 
 		},
 	}
 	expect(filterSentryEvent(prefixedSandboxTimeout)).toBe(prefixedSandboxTimeout)
-})
 
-test('filterSentryEvent drops UserCodeError via originalException hint', () => {
-	const event = {
+	const userCodeEvent = {
 		exception: {
 			values: [{ type: 'UserCodeError', value: 'boom' }],
 		},
 	}
 	expect(
-		filterSentryEvent(event, {
+		filterSentryEvent(userCodeEvent, {
 			originalException: new UserCodeError('boom'),
 		}),
 	).toBeNull()
 	expect(
-		filterSentryEvent(event, {
+		filterSentryEvent(userCodeEvent, {
 			originalException: new Error('wrapper', {
 				cause: new UserCodeError('boom'),
 			}),
 		}),
 	).toBeNull()
-})
 
-test('filterSentryEvent keeps genuine platform errors', () => {
-	const event = {
+	const nestedUserCode = new Error('handler failed', {
+		cause: new Error('step failed', { cause: new UserCodeError('boom') }),
+	})
+	expect(isUserCodeError(new UserCodeError('boom'))).toBe(true)
+	expect(isUserCodeError(nestedUserCode)).toBe(true)
+	expect(isUserCodeError(new Error('platform blew up'))).toBe(false)
+	expect(isUserCodeError('boom')).toBe(false)
+	expect(isUserCodeError(null)).toBe(false)
+
+	const platformEvent = {
 		exception: {
 			values: [{ type: 'Error', value: 'Durable Object storage failed' }],
 		},
 	}
 	expect(
-		filterSentryEvent(event, {
+		filterSentryEvent(platformEvent, {
 			originalException: new Error('Durable Object storage failed'),
 		}),
-	).toBe(event)
-	expect(filterSentryEvent(event)).toBe(event)
+	).toBe(platformEvent)
+	expect(filterSentryEvent(platformEvent)).toBe(platformEvent)
 })

@@ -173,36 +173,7 @@ test('logMcpEvent keeps sandbox and caller failures off Sentry and still reports
 				cause: new Error('storage unavailable'),
 			}),
 		})
-	})
 
-	expect(sentryMock.captureException).toHaveBeenCalledTimes(2)
-	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
-		1,
-		expect.objectContaining({ message: 'platform handler blew up' }),
-	)
-	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
-		2,
-		expect.objectContaining({ message: 'D1 write failed.' }),
-	)
-	expect(sentryMock.scope.setLevel).toHaveBeenCalledWith('error')
-	expect(sentryMock.scope.setUser).toHaveBeenCalledWith({ id: 'user-1' })
-	expect(sentryMock.scope.setContext).toHaveBeenCalledWith(
-		'mcp',
-		expect.objectContaining({
-			baseUrl: 'https://example.com',
-			hasUser: true,
-			errorMessage: 'platform handler blew up',
-			detail: undefined,
-		}),
-	)
-	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
-})
-
-test('logMcpEvent copies conversationId, storageId, and detail into Sentry mcp context', () => {
-	sentryMock.scope.setContext.mockClear()
-	sentryMock.captureException.mockClear()
-
-	captureMcpEvents(() => {
 		logMcpEvent({
 			...callerFailureBase,
 			capabilityName: 'storage_query',
@@ -220,7 +191,32 @@ test('logMcpEvent copies conversationId, storageId, and detail into Sentry mcp c
 		})
 	})
 
-	expect(sentryMock.captureException).toHaveBeenCalledOnce()
+	expect(sentryMock.captureException).toHaveBeenCalledTimes(3)
+	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
+		1,
+		expect.objectContaining({ message: 'platform handler blew up' }),
+	)
+	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
+		2,
+		expect.objectContaining({ message: 'D1 write failed.' }),
+	)
+	expect(sentryMock.captureException).toHaveBeenNthCalledWith(
+		3,
+		expect.objectContaining({
+			message: 'no such table: notes: SQLITE_ERROR',
+		}),
+	)
+	expect(sentryMock.scope.setLevel).toHaveBeenCalledWith('error')
+	expect(sentryMock.scope.setUser).toHaveBeenCalledWith({ id: 'user-1' })
+	expect(sentryMock.scope.setContext).toHaveBeenCalledWith(
+		'mcp',
+		expect.objectContaining({
+			baseUrl: 'https://example.com',
+			hasUser: true,
+			errorMessage: 'platform handler blew up',
+			detail: undefined,
+		}),
+	)
 	expect(sentryMock.scope.setContext).toHaveBeenCalledWith(
 		'mcp',
 		expect.objectContaining({
@@ -231,4 +227,5 @@ test('logMcpEvent copies conversationId, storageId, and detail into Sentry mcp c
 			},
 		}),
 	)
+	expect(sentryMock.captureMessage).not.toHaveBeenCalled()
 })

@@ -39,7 +39,7 @@ async function upsertServiceState(input: {
 		.run()
 }
 
-test('countRunningPackageServices counts fresh running rows and ignores idle/stopped/error/stale', async () => {
+test('package_service_states counts fresh running rows and enforces the plan boundary', async () => {
 	await ensureEntitlementTestSchema(env.APP_DB)
 	const now = new Date('2026-07-26T12:00:00.000Z')
 	const userId = await createStableUserIdFromEmail(
@@ -106,7 +106,6 @@ test('countRunningPackageServices counts fresh running rows and ignores idle/sto
 			now,
 		}),
 	).toBe(1)
-
 	expect(
 		await countRunningPackageServices({
 			db: env.APP_DB,
@@ -132,25 +131,20 @@ test('countRunningPackageServices counts fresh running rows and ignores idle/sto
 			excludeService: { packageId: 'pkg-a', serviceName: 'alpha' },
 		}),
 	).toBe(1)
-})
 
-test('package_services entitlement enforces at the plan boundary from package_service_states', async () => {
-	await ensureEntitlementTestSchema(env.APP_DB)
 	const email = `svc-limit-${crypto.randomUUID()}@example.com`
-	const userId = await createStableUserIdFromEmail(email)
+	const limitUserId = await createStableUserIdFromEmail(email)
 	await seedAccount({
 		db: env.APP_DB,
 		email,
 		username: `svc-limit-${crypto.randomUUID().slice(0, 8)}`,
 		plan: 'pro',
-		stableUserId: userId,
+		stableUserId: limitUserId,
 	})
-	const now = new Date('2026-07-26T12:00:00.000Z')
 	const limit = planLimits.pro.maxPackageServices
-	const fresh = now.toISOString()
 	for (let index = 0; index < limit; index += 1) {
 		await upsertServiceState({
-			userId,
+			userId: limitUserId,
 			packageId: `pkg-${index}`,
 			serviceName: 'worker',
 			status: 'running',
@@ -161,7 +155,7 @@ test('package_services entitlement enforces at the plan boundary from package_se
 
 	const denied = await assertWithinEntitlement({
 		db: env.APP_DB,
-		userId,
+		userId: limitUserId,
 		email,
 		resource: 'package_services',
 		now,
@@ -183,14 +177,14 @@ test('package_services entitlement enforces at the plan boundary from package_se
 
 	await assertWithinEntitlement({
 		db: env.APP_DB,
-		userId,
+		userId: limitUserId,
 		email,
 		resource: 'package_services',
 		now,
 		getCurrent: async () =>
 			await countRunningPackageServices({
 				db: env.APP_DB,
-				userId,
+				userId: limitUserId,
 				now,
 				excludeService: { packageId: 'pkg-0', serviceName: 'worker' },
 			}),

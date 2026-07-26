@@ -9,7 +9,7 @@ import { parsePasswordChangedAtMs } from '#app/request-auth-cache.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
-test('createAuthCookie always stamps issuedAt for password-change checks', async () => {
+test('createAuthCookie stamps issuedAt for password-change invalidation', async () => {
 	setAuthSessionSecret(testCookieSecret)
 	const now = 1_700_000_000_000
 	const cookie = await createAuthCookie(
@@ -25,7 +25,12 @@ test('createAuthCookie always stamps issuedAt for password-change checks', async
 	expect(parsed?.session.rememberMe).toBe(false)
 })
 
-test('isAuthSessionInvalidatedByPasswordChange fails closed for legacy cookies', () => {
+test('password-change invalidation covers legacy cookies, second-precision SQLite, and re-login', () => {
+	expect(parsePasswordChangedAtMs(null)).toBeNull()
+	expect(parsePasswordChangedAtMs('')).toBeNull()
+	expect(parsePasswordChangedAtMs('   ')).toBeNull()
+	expect(parsePasswordChangedAtMs('not-a-timestamp')).toBeNull()
+
 	expect(
 		isAuthSessionInvalidatedByPasswordChange({
 			issuedAt: undefined,
@@ -56,45 +61,40 @@ test('isAuthSessionInvalidatedByPasswordChange fails closed for legacy cookies',
 			passwordChangedAtMs: 100,
 		}),
 	).toBe(false)
-})
 
-test('second-precision password_changed_at invalidates cookies later in the same second', () => {
-	const changedAtMs = parsePasswordChangedAtMs('2026-07-25 12:00:00')
-	expect(changedAtMs).toBe(Date.parse('2026-07-25T12:00:00.000Z') + 999)
+	const secondPrecisionChangedAt = parsePasswordChangedAtMs(
+		'2026-07-25 12:00:00',
+	)
+	expect(secondPrecisionChangedAt).toBe(
+		Date.parse('2026-07-25T12:00:00.000Z') + 999,
+	)
 	expect(
 		isAuthSessionInvalidatedByPasswordChange({
 			issuedAt: Date.parse('2026-07-25T12:00:00.500Z'),
-			passwordChangedAtMs: changedAtMs,
+			passwordChangedAtMs: secondPrecisionChangedAt,
 		}),
 	).toBe(true)
 	expect(
 		isAuthSessionInvalidatedByPasswordChange({
 			issuedAt: Date.parse('2026-07-25T12:00:01.000Z'),
-			passwordChangedAtMs: changedAtMs,
+			passwordChangedAtMs: secondPrecisionChangedAt,
 		}),
 	).toBe(false)
-})
 
-test('millisecond password_changed_at allows same-second re-login after reset', () => {
-	const changedAtMs = parsePasswordChangedAtMs('2026-07-25T12:00:00.400Z')
-	expect(changedAtMs).toBe(Date.parse('2026-07-25T12:00:00.400Z'))
+	const msPrecisionChangedAt = parsePasswordChangedAtMs(
+		'2026-07-25T12:00:00.400Z',
+	)
+	expect(msPrecisionChangedAt).toBe(Date.parse('2026-07-25T12:00:00.400Z'))
 	expect(
 		isAuthSessionInvalidatedByPasswordChange({
 			issuedAt: Date.parse('2026-07-25T12:00:00.300Z'),
-			passwordChangedAtMs: changedAtMs,
+			passwordChangedAtMs: msPrecisionChangedAt,
 		}),
 	).toBe(true)
 	expect(
 		isAuthSessionInvalidatedByPasswordChange({
 			issuedAt: Date.parse('2026-07-25T12:00:00.500Z'),
-			passwordChangedAtMs: changedAtMs,
+			passwordChangedAtMs: msPrecisionChangedAt,
 		}),
 	).toBe(false)
-})
-
-test('parsePasswordChangedAtMs returns null for empty or malformed values', () => {
-	expect(parsePasswordChangedAtMs(null)).toBeNull()
-	expect(parsePasswordChangedAtMs('')).toBeNull()
-	expect(parsePasswordChangedAtMs('   ')).toBeNull()
-	expect(parsePasswordChangedAtMs('not-a-timestamp')).toBeNull()
 })

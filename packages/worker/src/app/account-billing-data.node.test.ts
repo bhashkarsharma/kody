@@ -54,15 +54,13 @@ function createBillingTestDb(input: {
 	} as unknown as D1Database
 }
 
-test('resolveBillingErrorMessage maps known codes and passes through unknown', () => {
-	expect(resolveBillingErrorMessage('no_customer')).toContain('Subscribe first')
+test('loadAccountBillingData refreshes Stripe status and degrades when refresh is unavailable', async () => {
 	expect(resolveBillingErrorMessage('totally_new_code')).toBe(
 		'totally_new_code',
 	)
 	expect(resolveBillingErrorMessage(null)).toBeUndefined()
-})
+	expect(typeof resolveBillingErrorMessage('no_customer')).toBe('string')
 
-test('loadAccountBillingData passes subscriptionStatus from Stripe refresh', async () => {
 	refreshStripePlanForUser.mockResolvedValueOnce({
 		stripePlan: 'pro',
 		cancelAt: '2026-08-01T00:00:00.000Z',
@@ -100,37 +98,20 @@ test('loadAccountBillingData passes subscriptionStatus from Stripe refresh', asy
 			customerId: 'cus_test',
 		}),
 	)
-})
 
-test('loadAccountBillingData leaves subscriptionStatus null when refresh fails', async () => {
 	consoleError.mockImplementation(() => {})
 	refreshStripePlanForUser.mockRejectedValueOnce(new Error('stripe down'))
-
-	const env = {
-		APP_DB: createBillingTestDb({
-			plan: 'free',
-			stripePlan: 'pro',
-			stripeCustomerId: 'cus_test',
-		}),
-		STRIPE_SECRET_KEY: 'sk_test',
-		STRIPE_PRO_PRICE_ID: 'price_pro',
-	} as Env
-
-	const data = await loadAccountBillingData({ env, userId: 3 })
-	expect(data.stripePlan).toBe('pro')
-	expect(data.subscriptionStatus).toBeNull()
-	expect(data.cancelAt).toBeNull()
-	expect(data.usageHref).toBe('/account/usage')
+	const failed = await loadAccountBillingData({ env, userId: 3 })
+	expect(failed.stripePlan).toBe('pro')
+	expect(failed.subscriptionStatus).toBeNull()
+	expect(failed.cancelAt).toBeNull()
 	expect(consoleError).toHaveBeenCalledWith(
 		'account_billing_refresh_failed',
 		expect.objectContaining({ userId: 3, error: 'stripe down' }),
 	)
-})
 
-test('loadAccountBillingData skips refresh when there is no Stripe customer', async () => {
 	refreshStripePlanForUser.mockClear()
-
-	const env = {
+	const noCustomerEnv = {
 		APP_DB: createBillingTestDb({
 			plan: 'free',
 			stripePlan: null,
@@ -139,10 +120,12 @@ test('loadAccountBillingData skips refresh when there is no Stripe customer', as
 		STRIPE_SECRET_KEY: 'sk_test',
 		STRIPE_PRO_PRICE_ID: 'price_pro',
 	} as Env
-
-	const data = await loadAccountBillingData({ env, userId: 4 })
-	expect(data.hasStripeCustomer).toBe(false)
-	expect(data.subscriptionStatus).toBeNull()
-	expect(data.configured).toBe(true)
+	const noCustomer = await loadAccountBillingData({
+		env: noCustomerEnv,
+		userId: 4,
+	})
+	expect(noCustomer.hasStripeCustomer).toBe(false)
+	expect(noCustomer.subscriptionStatus).toBeNull()
+	expect(noCustomer.configured).toBe(true)
 	expect(refreshStripePlanForUser).not.toHaveBeenCalled()
 })

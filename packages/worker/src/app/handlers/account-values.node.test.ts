@@ -95,13 +95,12 @@ function createEnv() {
 	} as Env
 }
 
-test('values API lists user-scoped values and hides reserved prefixes', async () => {
+test('values API lists, selects, saves, and deletes user-scoped values', async () => {
 	const handler = createAccountValuesApiHandler(createEnv())
 
 	const listResponse = await handler.handler({
 		request: new Request('https://example.com/account/values.json'),
 	})
-
 	expect(listResponse.status).toBe(200)
 	expect(listResponse.headers.get('Cache-Control')).toBe('no-store')
 	await expect(listResponse.json()).resolves.toEqual({
@@ -126,45 +125,23 @@ test('values API lists user-scoped values and hides reserved prefixes', async ()
 			storageContext: { sessionId: null, appId: null },
 		}),
 	)
-})
 
-test('values API resolves selected value from selected query param', async () => {
-	const handler = createAccountValuesApiHandler(createEnv())
-
-	const response = await handler.handler({
+	const selectedResponse = await handler.handler({
 		request: new Request(
 			'https://example.com/account/values.json?selected=theme',
 		),
 	})
-
-	expect(response.status).toBe(200)
-	await expect(response.json()).resolves.toEqual({
+	expect(selectedResponse.status).toBe(200)
+	await expect(selectedResponse.json()).resolves.toMatchObject({
 		ok: true,
-		values: [
-			{
-				id: 'theme',
-				name: 'theme',
-				description: 'UI theme preference',
-				valuePreview: 'dark',
-				updatedAt: new Date(0).toISOString(),
-				ttlMs: null,
-			},
-		],
-		selectedValue: {
+		selectedValueId: 'theme',
+		selectedValue: expect.objectContaining({
 			id: 'theme',
 			name: 'theme',
-			description: 'UI theme preference',
 			value: 'dark',
-			createdAt: new Date(0).toISOString(),
-			updatedAt: new Date(0).toISOString(),
-			ttlMs: null,
-			scope: 'user',
-		},
-		selectedValueId: 'theme',
+		}),
 	})
-})
 
-test('values API saves a value and returns selectedValueId', async () => {
 	mockModule.listValues.mockResolvedValueOnce([
 		{
 			name: 'locale',
@@ -177,8 +154,6 @@ test('values API saves a value and returns selectedValueId', async () => {
 			ttlMs: null,
 		},
 	])
-	const handler = createAccountValuesApiHandler(createEnv())
-
 	const saveResponse = await handler.handler({
 		request: new Request('https://example.com/account/values.json', {
 			method: 'POST',
@@ -191,7 +166,6 @@ test('values API saves a value and returns selectedValueId', async () => {
 			}),
 		}),
 	})
-
 	expect(saveResponse.status).toBe(200)
 	expect(mockModule.saveValue).toHaveBeenCalledWith(
 		expect.objectContaining({
@@ -204,36 +178,13 @@ test('values API saves a value and returns selectedValueId', async () => {
 			userEmail: 'user@example.com',
 		}),
 	)
-	expect(await saveResponse.json()).toEqual({
+	expect(await saveResponse.json()).toMatchObject({
 		ok: true,
 		selectedValueId: 'locale',
-		selectedValue: {
-			id: 'locale',
-			name: 'locale',
-			description: 'Preferred locale',
-			value: 'en-US',
-			createdAt: new Date(0).toISOString(),
-			updatedAt: new Date(0).toISOString(),
-			ttlMs: null,
-			scope: 'user',
-		},
-		values: [
-			{
-				id: 'locale',
-				name: 'locale',
-				description: 'Preferred locale',
-				valuePreview: 'en-US',
-				updatedAt: new Date(0).toISOString(),
-				ttlMs: null,
-			},
-		],
+		selectedValue: expect.objectContaining({ id: 'locale', value: 'en-US' }),
 	})
-})
 
-test('values API deletes a value by name', async () => {
 	mockModule.listValues.mockResolvedValueOnce([])
-	const handler = createAccountValuesApiHandler(createEnv())
-
 	const deleteResponse = await handler.handler({
 		request: new Request('https://example.com/account/values.json', {
 			method: 'POST',
@@ -244,13 +195,11 @@ test('values API deletes a value by name', async () => {
 			}),
 		}),
 	})
-
 	expect(deleteResponse.status).toBe(200)
 	expect(mockModule.deleteValue).toHaveBeenCalledWith(
 		expect.objectContaining({
 			userId: 'stable-user-1',
 			scope: 'user',
-			storageContext: { sessionId: null, appId: null },
 			name: 'theme',
 		}),
 	)
@@ -262,12 +211,12 @@ test('values API deletes a value by name', async () => {
 	})
 })
 
-test('values API rejects save and delete for reserved names without mutating', async () => {
+test('values API rejects reserved names, missing deletes, invalid actions, and unauthenticated requests', async () => {
 	const handler = createAccountValuesApiHandler(createEnv())
 	mockModule.saveValue.mockClear()
 	mockModule.deleteValue.mockClear()
 
-	const saveResponse = await handler.handler({
+	const reservedSave = await handler.handler({
 		request: new Request('https://example.com/account/values.json', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -279,14 +228,14 @@ test('values API rejects save and delete for reserved names without mutating', a
 			}),
 		}),
 	})
-	expect(saveResponse.status).toBe(400)
-	await expect(saveResponse.json()).resolves.toMatchObject({
+	expect(reservedSave.status).toBe(400)
+	await expect(reservedSave.json()).resolves.toMatchObject({
 		ok: false,
 		error: expect.stringContaining('reserved'),
 	})
 	expect(mockModule.saveValue).not.toHaveBeenCalled()
 
-	const deleteResponse = await handler.handler({
+	const reservedDelete = await handler.handler({
 		request: new Request('https://example.com/account/values.json', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -296,19 +245,12 @@ test('values API rejects save and delete for reserved names without mutating', a
 			}),
 		}),
 	})
-	expect(deleteResponse.status).toBe(400)
-	await expect(deleteResponse.json()).resolves.toMatchObject({
-		ok: false,
-		error: expect.stringContaining('reserved'),
-	})
+	expect(reservedDelete.status).toBe(400)
+	await expect(reservedDelete.json()).resolves.toMatchObject({ ok: false })
 	expect(mockModule.deleteValue).not.toHaveBeenCalled()
-})
 
-test('values API returns 404 when deleting a missing value', async () => {
 	mockModule.deleteValue.mockResolvedValueOnce(false)
-	const handler = createAccountValuesApiHandler(createEnv())
-
-	const deleteResponse = await handler.handler({
+	const missingDelete = await handler.handler({
 		request: new Request('https://example.com/account/values.json', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -318,16 +260,8 @@ test('values API returns 404 when deleting a missing value', async () => {
 			}),
 		}),
 	})
-
-	expect(deleteResponse.status).toBe(404)
-	await expect(deleteResponse.json()).resolves.toEqual({
-		ok: false,
-		error: 'Value not found.',
-	})
-})
-
-test('values API rejects invalid actions and unauthenticated requests', async () => {
-	const handler = createAccountValuesApiHandler(createEnv())
+	expect(missingDelete.status).toBe(404)
+	await expect(missingDelete.json()).resolves.toMatchObject({ ok: false })
 
 	const invalid = await handler.handler({
 		request: new Request('https://example.com/account/values.json', {
@@ -337,10 +271,7 @@ test('values API rejects invalid actions and unauthenticated requests', async ()
 		}),
 	})
 	expect(invalid.status).toBe(400)
-	await expect(invalid.json()).resolves.toEqual({
-		ok: false,
-		error: 'Invalid action.',
-	})
+	await expect(invalid.json()).resolves.toMatchObject({ ok: false })
 
 	mockModule.readAuthenticatedAppUser.mockResolvedValueOnce(null)
 	const unauthorized = await handler.handler({

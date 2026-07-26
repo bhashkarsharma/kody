@@ -17,11 +17,7 @@ vi.mock('@sentry/cloudflare', () => ({
 const { applyDynamicWorkflowSentryScope } =
 	await import('./package-workflows-sentry.ts')
 
-test('applyDynamicWorkflowSentryScope tags package workflows with user and coordinates', () => {
-	sentryMock.setUser.mockClear()
-	sentryMock.setTag.mockClear()
-	sentryMock.setContext.mockClear()
-
+test('applyDynamicWorkflowSentryScope tags package and inline workflows', () => {
 	applyDynamicWorkflowSentryScope({
 		instanceId: 'wf-instance-1',
 		payload: {
@@ -58,9 +54,7 @@ test('applyDynamicWorkflowSentryScope tags package workflows with user and coord
 			idempotencyKey: 'idem-1',
 		}),
 	)
-})
 
-test('applyDynamicWorkflowSentryScope records inline code size without package tags', () => {
 	sentryMock.setUser.mockClear()
 	sentryMock.setTag.mockClear()
 	sentryMock.setContext.mockClear()

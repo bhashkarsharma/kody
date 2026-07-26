@@ -41,18 +41,16 @@ function createDb(count: number) {
 	} as unknown as D1Database
 }
 
-test('shouldRunAuthDenialAlertCron runs on the hour', () => {
+test('auth denial burst alerts stay quiet below threshold, then notify and cool down', async () => {
 	expect(
 		shouldRunAuthDenialAlertCron(new Date('2026-07-25T12:00:00.000Z')),
 	).toBe(true)
 	expect(
 		shouldRunAuthDenialAlertCron(new Date('2026-07-25T12:05:00.000Z')),
 	).toBe(false)
-})
 
-test('checkAuthDenialBurstAndNotify stays quiet below threshold', async () => {
 	sendCloudflareEmail.mockClear()
-	const result = await checkAuthDenialBurstAndNotify({
+	const quiet = await checkAuthDenialBurstAndNotify({
 		env: {
 			APP_DB: createDb(10),
 			APP_BASE_URL: 'https://heykody.dev',
@@ -61,12 +59,9 @@ test('checkAuthDenialBurstAndNotify stays quiet below threshold', async () => {
 		},
 		threshold: 50,
 	})
-	expect(result).toEqual({ status: 'below_threshold', count: 10 })
+	expect(quiet).toEqual({ status: 'below_threshold', count: 10 })
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-})
 
-test('checkAuthDenialBurstAndNotify emails admins and respects cooldown', async () => {
-	sendCloudflareEmail.mockClear()
 	consoleWarn.mockImplementation(() => {})
 	const kvStore = new Map<string, string>()
 	const kv = {

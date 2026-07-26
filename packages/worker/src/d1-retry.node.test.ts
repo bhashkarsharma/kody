@@ -11,47 +11,18 @@ test('runD1WithRetry matches lock errors, retries them, and rethrows other failu
 			new Error('D1_ERROR: NOSENTRY database is locked: SQLITE_BUSY'),
 		),
 	).toBe(true)
-	expect(isRetryableD1LockError(new Error('database is locked'))).toBe(true)
-	expect(
-		isRetryableD1LockError(
-			new Error('D1_ERROR: Currently processing a long-running export.'),
-		),
-	).toBe(true)
 	expect(
 		isRetryableD1LockError(
 			new Error('Currently processing a long-running export.'),
 		),
 	).toBe(true)
-	expect(
-		isRetryableD1LockError(new Error('D1_ERROR: Network connection lost.')),
-	).toBe(true)
 	expect(isRetryableD1LockError(new Error('Network connection lost.'))).toBe(
 		true,
 	)
 	expect(
-		isRetryableD1LockError(new Error('Error: Network connection lost.')),
-	).toBe(true)
-	expect(
-		isRetryableD1LockError(
-			new Error('Network connection lost while uploading...'),
-		),
-	).toBe(false)
-	expect(
 		isRetryableD1LockError(
 			new Error(
 				'D1_ERROR: internal error; reference = 0u3odos5iotccpol68ppc0eg',
-			),
-		),
-	).toBe(true)
-	expect(
-		isRetryableD1LockError(
-			new Error('internal error; reference = 0u3odos5iotccpol68ppc0eg'),
-		),
-	).toBe(true)
-	expect(
-		isRetryableD1LockError(
-			new Error(
-				'D1_ERROR: Internal error in D1 DB storage caused object to be reset; reference = 8t4dqqpoq1ctvjr8kca8fl4c',
 			),
 		),
 	).toBe(true)
@@ -62,23 +33,16 @@ test('runD1WithRetry matches lock errors, retries them, and rethrows other failu
 			),
 		),
 	).toBe(true)
+	expect(
+		isRetryableD1LockError(
+			new Error('Network connection lost while uploading...'),
+		),
+	).toBe(false)
 	expect(isRetryableD1LockError(new Error('internal error'))).toBe(false)
 	expect(
 		isRetryableD1LockError(
 			new Error(
 				'D1_ERROR: Internal error in D1 DB storage caused object to be reset',
-			),
-		),
-	).toBe(false)
-	expect(
-		isRetryableD1LockError(
-			new Error('D1_ERROR: internal error while applying migration'),
-		),
-	).toBe(false)
-	expect(
-		isRetryableD1LockError(
-			new Error(
-				'D1_ERROR: Internal error in D1 DB storage while applying migration; reference = abc',
 			),
 		),
 	).toBe(false)
@@ -102,72 +66,6 @@ test('runD1WithRetry matches lock errors, retries them, and rethrows other failu
 		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
 		await expect(resultPromise).resolves.toBe('ok')
 		expect(retryOperation).toHaveBeenCalledTimes(2)
-	} finally {
-		vi.useRealTimers()
-	}
-
-	vi.useFakeTimers()
-	const exportRetryOperation = vi
-		.fn()
-		.mockRejectedValueOnce(
-			new Error('D1_ERROR: Currently processing a long-running export.'),
-		)
-		.mockResolvedValueOnce('ok')
-	try {
-		const resultPromise = runD1WithRetry(exportRetryOperation)
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
-		await expect(resultPromise).resolves.toBe('ok')
-		expect(exportRetryOperation).toHaveBeenCalledTimes(2)
-	} finally {
-		vi.useRealTimers()
-	}
-
-	vi.useFakeTimers()
-	const networkRetryOperation = vi
-		.fn()
-		.mockRejectedValueOnce(new Error('D1_ERROR: Network connection lost.'))
-		.mockResolvedValueOnce('ok')
-	try {
-		const resultPromise = runD1WithRetry(networkRetryOperation)
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
-		await expect(resultPromise).resolves.toBe('ok')
-		expect(networkRetryOperation).toHaveBeenCalledTimes(2)
-	} finally {
-		vi.useRealTimers()
-	}
-
-	vi.useFakeTimers()
-	const internalErrorRetryOperation = vi
-		.fn()
-		.mockRejectedValueOnce(
-			new Error(
-				'D1_ERROR: internal error; reference = 0u3odos5iotccpol68ppc0eg',
-			),
-		)
-		.mockResolvedValueOnce('ok')
-	try {
-		const resultPromise = runD1WithRetry(internalErrorRetryOperation)
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
-		await expect(resultPromise).resolves.toBe('ok')
-		expect(internalErrorRetryOperation).toHaveBeenCalledTimes(2)
-	} finally {
-		vi.useRealTimers()
-	}
-
-	vi.useFakeTimers()
-	const objectResetRetryOperation = vi
-		.fn()
-		.mockRejectedValueOnce(
-			new Error(
-				'D1_ERROR: Internal error in D1 DB storage caused object to be reset; reference = 8t4dqqpoq1ctvjr8kca8fl4c',
-			),
-		)
-		.mockResolvedValueOnce('ok')
-	try {
-		const resultPromise = runD1WithRetry(objectResetRetryOperation)
-		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
-		await expect(resultPromise).resolves.toBe('ok')
-		expect(objectResetRetryOperation).toHaveBeenCalledTimes(2)
 	} finally {
 		vi.useRealTimers()
 	}

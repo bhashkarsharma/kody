@@ -65,7 +65,7 @@ function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
 	}
 }
 
-test('readAccountActivityFilters defaults to errors across all surfaces', () => {
+test('activity helpers parse filters and prefer path selected run ids', () => {
 	expect(
 		readAccountActivityFilters('https://example.com/account/activity'),
 	).toEqual({
@@ -86,9 +86,7 @@ test('readAccountActivityFilters defaults to errors across all surfaces', () => 
 	expect(statusFilterToRunStatus('all')).toBeNull()
 	expect(surfaceFilterToRunSurface('all')).toBeNull()
 	expect(surfaceFilterToRunSurface('webhook')).toBe('webhook')
-})
 
-test('readAccountActivitySelectedRunId prefers path params over query', () => {
 	expect(
 		readAccountActivitySelectedRunId(
 			'https://example.com/account/activity/run-path?selected=run-query',
@@ -107,7 +105,7 @@ test('readAccountActivitySelectedRunId prefers path params over query', () => {
 	).toBe('run-query')
 })
 
-test('loadAccountActivityData maps filters, summary, pagination, and detail', async () => {
+test('loadAccountActivityData maps filters, summary, pagination, detail, and cursors', async () => {
 	const run = makeRun()
 	mockModule.summarizeRunRecords.mockResolvedValue({
 		since: '2026-07-19T12:00:00.000Z',
@@ -199,16 +197,7 @@ test('loadAccountActivityData maps filters, summary, pagination, and detail', as
 			],
 		}),
 	})
-})
 
-test('loadAccountActivityData forwards cursor for pagination pages', async () => {
-	mockModule.summarizeRunRecords.mockResolvedValue({
-		since: '2026-07-19T12:00:00.000Z',
-		total: 0,
-		errors: 0,
-		running: 0,
-		bySurface: [],
-	})
 	mockModule.listRunRecords.mockResolvedValue({
 		runs: [],
 		nextCursor: null,

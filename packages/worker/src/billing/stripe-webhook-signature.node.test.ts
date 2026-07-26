@@ -13,18 +13,15 @@ const fixtureTimestamp = 1_700_000_000
 const fixtureSignature =
 	'850a8305dd40d37b2ad74f83d4a32d429fe9a017a6db9ac082e7ea2c3b430140'
 
-test('computeStripeWebhookSignature matches known HMAC fixture', async () => {
+test('Stripe webhook signatures match the HMAC fixture and reject bad headers', async () => {
 	const signature = await computeStripeWebhookSignature({
 		secret: fixtureSecret,
 		timestamp: fixtureTimestamp,
 		rawBody: fixtureBody,
 	})
 	expect(signature).toBe(fixtureSignature)
-})
 
-test('verifyStripeWebhookSignature accepts valid headers and rejects bad ones', async () => {
 	const header = `t=${fixtureTimestamp},v1=${fixtureSignature}`
-
 	await expect(
 		verifyStripeWebhookSignature({
 			secret: fixtureSecret,

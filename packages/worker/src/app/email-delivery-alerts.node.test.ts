@@ -41,18 +41,16 @@ function createDb(count: number) {
 	} as unknown as D1Database
 }
 
-test('shouldRunEmailDeliveryAlertCron runs on the hour', () => {
+test('email delivery burst alerts notify, cool down, and skip cooldown on notify failure', async () => {
 	expect(
 		shouldRunEmailDeliveryAlertCron(new Date('2026-07-25T12:00:00.000Z')),
 	).toBe(true)
 	expect(
 		shouldRunEmailDeliveryAlertCron(new Date('2026-07-25T12:05:00.000Z')),
 	).toBe(false)
-})
 
-test('checkEmailDeliveryBurstAndNotify stays quiet below threshold', async () => {
 	sendCloudflareEmail.mockClear()
-	const result = await checkEmailDeliveryBurstAndNotify({
+	const quiet = await checkEmailDeliveryBurstAndNotify({
 		env: {
 			APP_DB: createDb(10),
 			APP_BASE_URL: 'https://heykody.dev',
@@ -61,12 +59,9 @@ test('checkEmailDeliveryBurstAndNotify stays quiet below threshold', async () =>
 		},
 		threshold: 20,
 	})
-	expect(result).toEqual({ status: 'below_threshold', count: 10 })
+	expect(quiet).toEqual({ status: 'below_threshold', count: 10 })
 	expect(sendCloudflareEmail).not.toHaveBeenCalled()
-})
 
-test('checkEmailDeliveryBurstAndNotify emails admins and respects cooldown', async () => {
-	sendCloudflareEmail.mockClear()
 	consoleWarn.mockImplementation(() => {})
 	const kvStore = new Map<string, string>()
 	const kv = {
@@ -107,37 +102,13 @@ test('checkEmailDeliveryBurstAndNotify emails admins and respects cooldown', asy
 		})
 		expect(second).toEqual({ status: 'cooldown', count: 35 })
 		expect(sendCloudflareEmail).toHaveBeenCalledTimes(1)
-	} finally {
-		consoleWarn.mockReset()
-	}
-})
 
-test('checkEmailDeliveryBurstAndNotify does not write cooldown when notify fails', async () => {
-	sendCloudflareEmail.mockClear()
-	sendCloudflareEmail.mockRejectedValueOnce(new Error('cf email down'))
-	consoleWarn.mockImplementation(() => {})
-	const kvStore = new Map<string, string>()
-	const kv = {
-		async get(key: string) {
-			return kvStore.get(key) ?? null
-		},
-		async put(key: string, value: string) {
-			kvStore.set(key, value)
-		},
-	} as unknown as KVNamespace
-
-	const env = {
-		APP_DB: createDb(35),
-		APP_BASE_URL: 'https://heykody.dev',
-		CLOUDFLARE_ACCOUNT_ID: 'acct',
-		CLOUDFLARE_API_TOKEN: 'token',
-		BUNDLE_ARTIFACTS_KV: kv,
-	}
-	try {
+		kvStore.clear()
+		sendCloudflareEmail.mockRejectedValueOnce(new Error('cf email down'))
 		await expect(
 			checkEmailDeliveryBurstAndNotify({
 				env,
-				now: new Date('2026-07-25T12:00:00.000Z'),
+				now: new Date('2026-07-25T13:00:00.000Z'),
 				threshold: 20,
 			}),
 		).rejects.toThrow('cf email down')

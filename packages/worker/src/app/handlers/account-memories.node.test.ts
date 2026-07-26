@@ -99,7 +99,7 @@ function createEnv() {
 	} as Env
 }
 
-test('memories API lists user-scoped memories', async () => {
+test('memories API lists, filters, and selects user-scoped memories', async () => {
 	const handler = createAccountMemoriesApiHandler(createEnv())
 
 	const listResponse = await handler.handler({
@@ -136,19 +136,15 @@ test('memories API lists user-scoped memories', async () => {
 		query: '',
 		includeDeleted: false,
 	})
-})
 
-test('memories API supports q and includeDeleted filters', async () => {
-	const handler = createAccountMemoriesApiHandler(createEnv())
-
-	const response = await handler.handler({
+	const filtered = await handler.handler({
 		request: new Request(
 			'https://example.com/account/memories.json?q=editor&includeDeleted=true&selected=11111111-1111-4111-8111-111111111111',
 		),
 		params: {},
 	} as never)
 
-	expect(response.status).toBe(200)
+	expect(filtered.status).toBe(200)
 	expect(mockModule.listMemoriesByUserId).toHaveBeenCalledWith(
 		expect.anything(),
 		'stable-user-1',
@@ -162,7 +158,7 @@ test('memories API supports q and includeDeleted filters', async () => {
 			memoryId: memoryRow.id,
 		}),
 	)
-	const payload = (await response.json()) as {
+	const payload = (await filtered.json()) as {
 		ok: boolean
 		query: string
 		includeDeleted: boolean
@@ -181,7 +177,7 @@ test('memories API supports q and includeDeleted filters', async () => {
 	)
 })
 
-test('memories API delete action soft-deletes by default and supports force', async () => {
+test('memories API soft/force deletes and rejects invalid delete requests', async () => {
 	const handler = createAccountMemoriesApiHandler(createEnv())
 
 	const softResponse = await handler.handler({
@@ -225,10 +221,6 @@ test('memories API delete action soft-deletes by default and supports force', as
 			force: true,
 		}),
 	)
-})
-
-test('memories API reject missing memoryId and unknown actions', async () => {
-	const handler = createAccountMemoriesApiHandler(createEnv())
 
 	const missingId = await handler.handler({
 		request: new Request('https://example.com/account/memories.json', {

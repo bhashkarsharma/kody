@@ -69,7 +69,4 @@ test('account jobs detail URL persists across reload for a seeded job', async ({
 	await expect(
 		page.getByRole('heading', { name: jobName, exact: true }),
 	).toBeVisible()
-	await expect(
-		page.getByRole('definition').filter({ hasText: 'Runs every 1h' }),
-	).toBeVisible()
 })

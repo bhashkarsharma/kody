@@ -5,16 +5,13 @@ import {
 	resolveInvocationRuntimeSurface,
 } from './common.ts'
 
-test('resolveInvocationRuntimeSurface omits package-workflow so the outer workflow owns the run record', () => {
+test('invocation runtime surface and name map selectors without double-counting package workflows', () => {
 	expect(
 		resolveInvocationRuntimeSurface({
 			selector: { kind: 'export', exportName: './run' },
 			source: packageWorkflowInvocationSource,
 		}),
 	).toBeNull()
-})
-
-test('resolveInvocationRuntimeSurface maps export and subscription selectors', () => {
 	expect(
 		resolveInvocationRuntimeSurface({
 			selector: { kind: 'export', exportName: './run' },
@@ -27,9 +24,7 @@ test('resolveInvocationRuntimeSurface maps export and subscription selectors', (
 			source: 'email',
 		}),
 	).toBe('subscription')
-})
 
-test('resolveInvocationRuntimeName prefers topic for subscription surfaces', () => {
 	expect(
 		resolveInvocationRuntimeName({
 			surface: 'subscription',

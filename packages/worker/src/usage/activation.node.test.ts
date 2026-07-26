@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, test, vi } from 'vitest'
+import { expect, test } from 'vitest'
 import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.ts'
+import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import {
 	countsTowardPackageActivation,
 	recordActivationMilestone,
@@ -58,9 +59,14 @@ function listSuccessCounts(sqlite: DatabaseSync, userId: string) {
 		.all(userId) as Array<{ package_id: string; success_count: number }>
 }
 
-test('activation requires the same package to succeed twice on the durable counter', async () => {
+test('activation requires the same package to succeed twice and ignores HTTP surfaces', async () => {
 	const { sqlite, db } = createActivationDb()
 	const env = { APP_DB: db }
+
+	expect(countsTowardPackageActivation('webhook')).toBe(false)
+	expect(countsTowardPackageActivation('app_fetch')).toBe(false)
+	expect(countsTowardPackageActivation('job')).toBe(true)
+	expect(countsTowardPackageActivation(undefined)).toBe(true)
 
 	await recordSuccessfulPackageRun(env, {
 		userId: 'user-1',
@@ -74,8 +80,6 @@ test('activation requires the same package to succeed twice on the durable count
 		{ package_id: 'pkg-a', success_count: 1 },
 	])
 
-	// A different package succeeding once is still a user in setup, not a user
-	// with something working unattended.
 	await recordSuccessfulPackageRun(env, {
 		userId: 'user-1',
 		packageId: 'pkg-b',
@@ -90,6 +94,19 @@ test('activation requires the same package to succeed twice on the durable count
 	])
 
 	await recordSuccessfulPackageRun(env, {
+		userId: 'user-http',
+		packageId: 'pkg-a',
+		surface: 'webhook',
+	})
+	await recordSuccessfulPackageRun(env, {
+		userId: 'user-http',
+		packageId: 'pkg-a',
+		surface: 'app_fetch',
+	})
+	expect(listMilestones(sqlite, 'user-http')).toEqual([])
+	expect(listSuccessCounts(sqlite, 'user-http')).toEqual([])
+
+	await recordSuccessfulPackageRun(env, {
 		userId: 'user-1',
 		packageId: 'pkg-a',
 		surface: 'job',
@@ -102,79 +119,6 @@ test('activation requires the same package to succeed twice on the durable count
 		{ package_id: 'pkg-a', success_count: 2 },
 		{ package_id: 'pkg-b', success_count: 1 },
 	])
-})
-
-test('terminal package_activated fast path does not re-query or rewrite counters', async () => {
-	const { sqlite, db } = createActivationDb()
-	const env = { APP_DB: db }
-
-	await recordActivationMilestone(env, {
-		userId: 'user-fast',
-		milestone: 'package_activated',
-		packageId: 'pkg-a',
-		reachedAt: '2026-07-01T00:00:00.000Z',
-	})
-
-	const prepareCalls: Array<string> = []
-	const originalPrepare = db.prepare.bind(db)
-	db.prepare = ((query: string) => {
-		prepareCalls.push(query.replace(/\s+/g, ' ').trim())
-		return originalPrepare(query)
-	}) as typeof db.prepare
-
-	await recordSuccessfulPackageRun(env, {
-		userId: 'user-fast',
-		packageId: 'pkg-a',
-		surface: 'job',
-	})
-	await recordSuccessfulPackageRun(env, {
-		userId: 'user-fast',
-		packageId: 'pkg-b',
-		surface: 'workflow',
-	})
-
-	expect(prepareCalls).toEqual([
-		'SELECT 1 AS n FROM user_activation_milestones WHERE user_id = ?1 AND milestone = ?2',
-		'SELECT 1 AS n FROM user_activation_milestones WHERE user_id = ?1 AND milestone = ?2',
-	])
-	expect(listSuccessCounts(sqlite, 'user-fast')).toEqual([])
-	expect(listMilestones(sqlite, 'user-fast')).toEqual([
-		{ milestone: 'package_activated', package_id: 'pkg-a' },
-	])
-})
-
-test('webhook and app_fetch successes do not count toward activation', async () => {
-	const { sqlite, db } = createActivationDb()
-	const env = { APP_DB: db }
-
-	expect(countsTowardPackageActivation('webhook')).toBe(false)
-	expect(countsTowardPackageActivation('app_fetch')).toBe(false)
-	expect(countsTowardPackageActivation('job')).toBe(true)
-	expect(countsTowardPackageActivation(undefined)).toBe(true)
-
-	await recordSuccessfulPackageRun(env, {
-		userId: 'user-http',
-		packageId: 'pkg-a',
-		surface: 'webhook',
-	})
-	await recordSuccessfulPackageRun(env, {
-		userId: 'user-http',
-		packageId: 'pkg-a',
-		surface: 'app_fetch',
-	})
-	await recordSuccessfulPackageRun(env, {
-		userId: 'user-http',
-		packageId: 'pkg-a',
-		surface: 'webhook',
-	})
-
-	expect(listMilestones(sqlite, 'user-http')).toEqual([])
-	expect(listSuccessCounts(sqlite, 'user-http')).toEqual([])
-})
-
-test('milestones keep their first timestamp', async () => {
-	const { sqlite, db } = createActivationDb()
-	const env = { APP_DB: db }
 
 	await recordActivationMilestone(env, {
 		userId: 'user-2',
@@ -188,19 +132,47 @@ test('milestones keep their first timestamp', async () => {
 		packageId: 'pkg-z',
 		reachedAt: '2026-07-09T00:00:00.000Z',
 	})
-	const row = sqlite
+	const sticky = sqlite
 		.prepare(
 			`SELECT reached_at, package_id FROM user_activation_milestones
 			 WHERE user_id = 'user-2' AND milestone = 'package_run_succeeded'`,
 		)
 		.get() as { reached_at: string; package_id: string }
-	expect(row).toEqual({
+	expect(sticky).toEqual({
 		reached_at: '2026-07-01T00:00:00.000Z',
 		package_id: 'pkg-a',
 	})
+
+	await recordActivationMilestone(env, {
+		userId: 'user-fast',
+		milestone: 'package_activated',
+		packageId: 'pkg-a',
+		reachedAt: '2026-07-01T00:00:00.000Z',
+	})
+	const prepareCalls: Array<string> = []
+	const originalPrepare = db.prepare.bind(db)
+	db.prepare = ((query: string) => {
+		prepareCalls.push(query.replace(/\s+/g, ' ').trim())
+		return originalPrepare(query)
+	}) as typeof db.prepare
+	await recordSuccessfulPackageRun(env, {
+		userId: 'user-fast',
+		packageId: 'pkg-a',
+		surface: 'job',
+	})
+	await recordSuccessfulPackageRun(env, {
+		userId: 'user-fast',
+		packageId: 'pkg-b',
+		surface: 'workflow',
+	})
+	expect(prepareCalls).toEqual([
+		'SELECT 1 AS n FROM user_activation_milestones WHERE user_id = ?1 AND milestone = ?2',
+		'SELECT 1 AS n FROM user_activation_milestones WHERE user_id = ?1 AND milestone = ?2',
+	])
+	expect(listSuccessCounts(sqlite, 'user-fast')).toEqual([])
 })
 
-test('activation instrumentation never throws without a database', async () => {
+test('activation instrumentation never throws without a database or on write failure', async () => {
 	await expect(
 		recordSuccessfulPackageRun({}, { userId: 'user-1', packageId: 'pkg-a' }),
 	).resolves.toBeUndefined()
@@ -210,10 +182,8 @@ test('activation instrumentation never throws without a database', async () => {
 			{ userId: 'user-1', milestone: 'package_activated' },
 		),
 	).resolves.toBeUndefined()
-})
 
-test('activation write failures never throw to the caller', async () => {
-	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+	consoleWarn.mockImplementation(() => {})
 	const env = {
 		APP_DB: {
 			prepare() {
@@ -228,9 +198,8 @@ test('activation write failures never throw to the caller', async () => {
 			surface: 'job',
 		}),
 	).resolves.toBeUndefined()
-	expect(warnSpy).toHaveBeenCalledWith(
+	expect(consoleWarn).toHaveBeenCalledWith(
 		'activation-run-record-failed',
 		expect.any(Error),
 	)
-	warnSpy.mockRestore()
 })
