@@ -1,10 +1,4 @@
-import {
-	type WebhookDeliveryOutcome,
-	type WebhookDeliveryRecord,
-	type WebhookEndpointRecord,
-	webhookDeliveriesRetainedPerEndpoint,
-	webhookDeliveryErrorMaxLength,
-} from './types.ts'
+import { type WebhookEndpointRecord } from './types.ts'
 
 type WebhookEndpointRow = {
 	id: string
@@ -15,19 +9,6 @@ type WebhookEndpointRow = {
 	enabled: number
 	created_at: string
 	rotated_at: string
-}
-
-type WebhookDeliveryRow = {
-	id: string
-	endpoint_id: string
-	user_id: string
-	package_id: string
-	webhook_name: string
-	received_at: string
-	outcome: WebhookDeliveryOutcome
-	http_status: number
-	error: string | null
-	payload_bytes: number
 }
 
 function mapEndpointRow(row: WebhookEndpointRow): WebhookEndpointRecord {
@@ -41,29 +22,6 @@ function mapEndpointRow(row: WebhookEndpointRow): WebhookEndpointRecord {
 		createdAt: row.created_at,
 		rotatedAt: row.rotated_at,
 	}
-}
-
-function mapDeliveryRow(row: WebhookDeliveryRow): WebhookDeliveryRecord {
-	return {
-		id: row.id,
-		endpointId: row.endpoint_id,
-		userId: row.user_id,
-		packageId: row.package_id,
-		webhookName: row.webhook_name,
-		receivedAt: row.received_at,
-		outcome: row.outcome,
-		httpStatus: row.http_status,
-		error: row.error,
-		payloadBytes: row.payload_bytes,
-	}
-}
-
-function truncateDeliveryError(error: string | null | undefined) {
-	if (!error) return null
-	const trimmed = error.trim()
-	if (!trimmed) return null
-	if (trimmed.length <= webhookDeliveryErrorMaxLength) return trimmed
-	return `${trimmed.slice(0, webhookDeliveryErrorMaxLength - 1)}…`
 }
 
 /**
@@ -206,102 +164,4 @@ export async function setWebhookEndpointEnabled(input: {
 		packageId: input.packageId,
 		webhookName: input.webhookName,
 	})
-}
-
-export async function insertWebhookDelivery(input: {
-	db: D1Database
-	id: string
-	endpointId: string
-	userId: string
-	packageId: string
-	webhookName: string
-	receivedAt: string
-	outcome: WebhookDeliveryOutcome
-	httpStatus: number
-	error?: string | null
-	payloadBytes: number
-}): Promise<WebhookDeliveryRecord> {
-	const error = truncateDeliveryError(input.error)
-	await input.db
-		.prepare(
-			`INSERT INTO webhook_deliveries (
-				id, endpoint_id, user_id, package_id, webhook_name,
-				received_at, outcome, http_status, error, payload_bytes
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		)
-		.bind(
-			input.id,
-			input.endpointId,
-			input.userId,
-			input.packageId,
-			input.webhookName,
-			input.receivedAt,
-			input.outcome,
-			input.httpStatus,
-			error,
-			input.payloadBytes,
-		)
-		.run()
-
-	await input.db
-		.prepare(
-			`DELETE FROM webhook_deliveries
-			WHERE user_id = ?
-				AND endpoint_id = ?
-				AND id NOT IN (
-					SELECT id FROM (
-						SELECT id
-						FROM webhook_deliveries
-						WHERE user_id = ?
-							AND endpoint_id = ?
-						ORDER BY received_at DESC, id DESC
-						LIMIT ?
-					)
-				)`,
-		)
-		.bind(
-			input.userId,
-			input.endpointId,
-			input.userId,
-			input.endpointId,
-			webhookDeliveriesRetainedPerEndpoint,
-		)
-		.run()
-
-	return {
-		id: input.id,
-		endpointId: input.endpointId,
-		userId: input.userId,
-		packageId: input.packageId,
-		webhookName: input.webhookName,
-		receivedAt: input.receivedAt,
-		outcome: input.outcome,
-		httpStatus: input.httpStatus,
-		error,
-		payloadBytes: input.payloadBytes,
-	}
-}
-
-export async function listWebhookDeliveriesForEndpoint(input: {
-	db: D1Database
-	userId: string
-	packageId: string
-	webhookName: string
-	limit?: number
-}): Promise<Array<WebhookDeliveryRecord>> {
-	const limit = Math.min(
-		Math.max(input.limit ?? webhookDeliveriesRetainedPerEndpoint, 1),
-		webhookDeliveriesRetainedPerEndpoint,
-	)
-	const result = await input.db
-		.prepare(
-			`SELECT *
-			FROM webhook_deliveries
-			WHERE user_id = ? AND package_id = ? AND webhook_name = ?
-			ORDER BY received_at DESC, id DESC
-			LIMIT ?`,
-		)
-		.bind(input.userId, input.packageId, input.webhookName, limit)
-		.all<WebhookDeliveryRow>()
-	return (result.results ?? []).map(mapDeliveryRow)
 }

@@ -3,7 +3,7 @@ import { persistableExecutionArtifacts } from '#mcp/downstream-mcp-result.ts'
 import { createMcpCallerContext } from '#mcp/context.ts'
 import { runBundledModuleWithRegistry } from '#mcp/run-kody-registry.ts'
 import { withAccountWriteLease } from '#app/account-deletion-state.ts'
-import { type PackageRuntimeDebugContext } from '#worker/package-runtime/package-runtime-debug.ts'
+import { type RunRecordContext } from '#worker/run-records/types.ts'
 import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
 import { getEntitySourceById } from '#worker/repo/entity-sources.ts'
 import {
@@ -62,6 +62,7 @@ export async function invokeSavedPackageModule(input: {
 	notFoundCode: 'export_not_found' | 'subscription_not_found'
 	runtimeInvokeDepth?: number
 	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
 }) {
 	return await withAccountWriteLease({
 		db: input.env.APP_DB,
@@ -316,25 +317,28 @@ export async function invokeSavedPackageModule(input: {
 					kodyId: input.savedPackage.kodyId,
 					sourceId: input.savedPackage.sourceId,
 				}
-				const runtimeDebug: PackageRuntimeDebugContext = {
-					packageId: input.savedPackage.id,
-					kodyId: input.savedPackage.kodyId,
-					sourceId: input.savedPackage.sourceId,
-					publishedCommit: repoSource?.published_commit ?? null,
-					surface: runtimeSurface,
-					name: resolveInvocationRuntimeName({
-						surface: runtimeSurface,
-						invocationName: input.invocationName,
-						topic: input.topic,
-					}),
-					invocationId,
-					idempotencyKey: input.idempotencyKey,
-					metadata: {
-						exportName: input.invocationName,
-						source: input.source,
-						topic: input.topic,
-					},
-				}
+				const runRecord: RunRecordContext | null =
+					runtimeSurface == null
+						? null
+						: {
+								packageId: input.savedPackage.id,
+								kodyId: input.savedPackage.kodyId,
+								sourceId: input.savedPackage.sourceId,
+								publishedCommit: repoSource?.published_commit ?? null,
+								surface: runtimeSurface,
+								name: resolveInvocationRuntimeName({
+									surface: runtimeSurface,
+									invocationName: input.invocationName,
+									topic: input.topic,
+								}),
+								invocationId,
+								idempotencyKey: input.idempotencyKey,
+								metadata: {
+									exportName: input.invocationName,
+									source: input.source,
+									topic: input.topic,
+								},
+							}
 				executionStarted = true
 				const executionResult = await runBundledModuleWithRegistry(
 					input.env,
@@ -349,7 +353,7 @@ export async function invokeSavedPackageModule(input: {
 						// No ambient `storage` binding: package code reaches its bucket via
 						// `packageStorage()` (granted through packageContext below). Legacy
 						// ambient use gets the structured runtime_helper_unbound hint.
-						runtimeDebug,
+						runRecord,
 						emailTools: {
 							getMessage: async (messageId) => {
 								const loaded = await getEmailMessageWithAttachmentsById({
@@ -450,17 +454,20 @@ export async function invokeSavedPackageModule(input: {
 								baseUrl: input.baseUrl,
 								callerContext,
 								packageContext,
-								parentRuntimeDebug: runtimeDebug,
+								parentRunRecord: runRecord,
 								packageInvokeDepth: input.runtimeInvokeDepth ?? 0,
+								waitUntil: input.waitUntil,
 							}),
 						packageEventTools: input.toolFactories.createPackageEventTools({
 							env: input.env,
 							baseUrl: input.baseUrl,
 							callerContext,
 							packageContext,
-							parentRuntimeDebug: runtimeDebug,
+							parentRunRecord: runRecord,
 							packageInvokeDepth: input.runtimeInvokeDepth ?? 0,
+							waitUntil: input.waitUntil,
 						}),
+						waitUntil: input.waitUntil,
 					},
 				)
 				let response: PackageInvocationStoredResponse

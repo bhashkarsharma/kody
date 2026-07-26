@@ -4,7 +4,7 @@ import {
 	type PackageInvokeInput,
 	type PackageInvokeTools,
 } from '#mcp/run-kody-registry.ts'
-import { type PackageRuntimeDebugContext } from '#worker/package-runtime/package-runtime-debug.ts'
+import { type RunRecordContext } from '#worker/run-records/types.ts'
 import {
 	maxPackageRuntimeInvokeDepth,
 	type PackageInvocationResponse,
@@ -24,9 +24,10 @@ export function createPackageRuntimeInvokeToolsWithToolFactories(input: {
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
 	packageContext: PackageRuntimeContext | null
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
 	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageInvokeTools {
 	return createPackageInvokeTools({
 		...input,
@@ -38,11 +39,12 @@ export function createExecutePackageInvokeToolsWithToolFactories(input: {
 	env: Env
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
 	/** MCP execute conversation id for agent-facing popularity recording. */
 	conversationId?: string | null
 	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageInvokeTools {
 	return createPackageInvokeTools({
 		...input,
@@ -57,11 +59,12 @@ function createPackageInvokeTools(input: {
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
 	packageContext: PackageRuntimeContext | null
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
 	callerKind: 'package' | 'execute'
 	conversationId?: string | null
 	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageInvokeTools {
 	let autoIdempotencySequence = 0
 	const requireRuntimeCaller = (operationName: string) => {
@@ -88,7 +91,7 @@ function createPackageInvokeTools(input: {
 			request.idempotencyKey ??
 			(await createAutoPackageInvokeIdempotencyKey({
 				callerPackageContext: packageContext,
-				parentRuntimeDebug: input.parentRuntimeDebug ?? null,
+				parentRunRecord: input.parentRunRecord ?? null,
 				sequence: autoIdempotencySequence,
 				request,
 			}))
@@ -113,6 +116,7 @@ function createPackageInvokeTools(input: {
 					},
 					runtimeInvokeDepth: packageInvokeDepth + 1,
 					toolFactories: input.toolFactories,
+					waitUntil: input.waitUntil,
 				})
 			: await invokePackageExportForExecuteRuntime({
 					env: input.env,
@@ -133,6 +137,7 @@ function createPackageInvokeTools(input: {
 					runtimeInvokeDepth: packageInvokeDepth + 1,
 					conversationId: input.conversationId ?? null,
 					toolFactories: input.toolFactories,
+					waitUntil: input.waitUntil,
 				})
 		if (response.status >= 200 && response.status < 400) {
 			return response.body['result']

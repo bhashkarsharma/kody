@@ -6,13 +6,11 @@ import { createD1FromSqlite } from '#worker/test-support/create-d1-from-sqlite.t
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { hashWebhookUrlSecret } from './crypto.ts'
 import {
-	listWebhookDeliveriesForUser,
 	listWebhooksForUser,
 	mintWebhookUrlForUser,
 	rotateWebhookUrlForUser,
 	setWebhookEnabledForUser,
 } from './service.ts'
-import { insertWebhookDelivery } from './repo.ts'
 
 vi.mock('#worker/package-invocations/module-artifacts.ts', () => ({
 	resolveSavedPackage: vi.fn(async (input: { packageIdOrKodyId: string }) => {
@@ -209,28 +207,4 @@ test('mint/list/rotate/enable/disable webhooks are package-centered and user-sco
 	})
 	expect(reminted.enabled).toBe(true)
 	expect(reminted.urlSecret).not.toBe(rotatedWhileDisabled.urlSecret)
-
-	const endpoint = await db
-		.prepare(`SELECT id FROM webhook_endpoints WHERE user_id = ?`)
-		.bind(userId)
-		.first<{ id: string }>()
-	await insertWebhookDelivery({
-		db,
-		id: 'del-1',
-		endpointId: endpoint!.id,
-		userId,
-		packageId: 'pkg-1',
-		webhookName: 'sentry',
-		receivedAt: '2026-07-24T01:00:00.000Z',
-		outcome: 'delivered',
-		httpStatus: 202,
-		payloadBytes: 10,
-	})
-	const deliveries = await listWebhookDeliveriesForUser({
-		env,
-		userId,
-		kodyId: 'sentry-bridge',
-		webhookName: 'sentry',
-	})
-	expect(deliveries).toHaveLength(1)
 })

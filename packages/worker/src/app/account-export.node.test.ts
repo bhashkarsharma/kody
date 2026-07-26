@@ -1263,3 +1263,196 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 		queries.some((query) => query.startsWith('SELECT storage_id FROM jobs')),
 	).toBe(false)
 })
+
+test('account export includes run_records section with runs and log lines', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		)
+		VALUES (
+			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+			'2026-07-05', '2026-07-05', 'user-aaa'
+		);
+	`)
+	const run = {
+		id: 'run-export-1',
+		surface: 'job' as const,
+		status: 'success' as const,
+		name: 'nightly',
+		packageId: null,
+		kodyId: null,
+		sourceId: null,
+		publishedCommit: null,
+		storageId: 'job:nightly',
+		jobId: 'job-1',
+		workflowId: null,
+		invocationId: null,
+		sessionId: null,
+		idempotencyKey: null,
+		parentRunId: null,
+		startedAt: '2026-07-26T00:00:00.000Z',
+		finishedAt: '2026-07-26T00:00:01.000Z',
+		durationMs: 1000,
+		errorName: null,
+		errorMessage: null,
+		metadata: {},
+		logCount: 2,
+	}
+	const logs = [
+		{
+			runId: 'run-export-1',
+			sequence: 0,
+			level: 'log' as const,
+			message: 'starting',
+			fields: null,
+		},
+		{
+			runId: 'run-export-1',
+			sequence: 1,
+			level: 'info' as const,
+			message: 'done',
+			fields: { ok: true },
+		},
+	]
+	const env = {
+		APP_DB: db,
+		STORAGE_RUNNER: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				exportStorage: async () => ({
+					entries: [],
+					truncated: false,
+					nextStartAfter: null,
+					pageSize: 100,
+				}),
+			}),
+		},
+		RUN_LOG: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				exportRuns: async () => ({
+					runs: [run],
+					logs,
+					nextStartAfter: null,
+					truncated: false,
+				}),
+				listStorageIds: async () => ['job:nightly'],
+				summarize: async () => ({
+					since: '1970-01-01T00:00:00.000Z',
+					total: 1,
+					errors: 0,
+					running: 0,
+					bySurface: [],
+				}),
+			}),
+		},
+		JOB_MANAGER: {
+			idFromName: (name: string) => name as unknown as DurableObjectId,
+			get: () => ({
+				exportUser: async () => ({ userId: 'user-aaa' }),
+			}),
+		},
+	} as unknown as Env
+
+	const accountExport = await createAccountExport({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+	})
+	expect(accountExport.manifest.sections.run_records?.count).toBe(1)
+	expect(accountExport.durableObjects.runRecords).toEqual({
+		runs: [run],
+		logs,
+		nextStartAfter: null,
+		truncated: false,
+	})
+
+	const section = await readAccountExportSection({
+		env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		section: 'run_records',
+	})
+	expect(section.truncated).toBe(false)
+	expect(section.items).toEqual([
+		{
+			run,
+			logs,
+		},
+	])
+})
+
+test('account export includes a package service known only via package_service_states', async () => {
+	const { sqlite, db } = createMigratedDb()
+	sqlite.exec(`
+		INSERT INTO users (
+			id, username, email, password_hash, created_at, updated_at,
+			email_verified_at, stable_user_id
+		)
+		VALUES (
+			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
+			'2026-07-05', '2026-07-05', 'user-aaa'
+		);
+		INSERT INTO saved_packages (
+			id, user_id, name, kody_id, description, tags_json, source_id,
+			has_app, hidden, is_private, created_at, updated_at
+		) VALUES (
+			'pkg-states', 'user-aaa', 'States Package', 'states-pkg', '', '[]',
+			'src-states', 0, 0, 1, '2026-07-05', '2026-07-05'
+		);
+		INSERT INTO package_service_states (
+			user_id, package_id, service_name, status, started_at, updated_at
+		) VALUES (
+			'user-aaa', 'pkg-states', 'only-in-states', 'running',
+			'2026-07-05T00:00:00.000Z', '2026-07-05T00:00:00.000Z'
+		);
+	`)
+
+	const statusMock = vi.fn(async () =>
+		Response.json({
+			package_id: 'pkg-states',
+			kody_id: 'states-pkg',
+			service_name: 'only-in-states',
+			status: 'running',
+			auto_start: false,
+			mode: 'bounded',
+			timeout_ms: 30_000,
+			stop_requested: false,
+			active_run_id: null,
+			next_alarm_at: null,
+			last_error: null,
+			last_started_at: '2026-07-05T00:00:00.000Z',
+			last_stopped_at: null,
+			last_run_finished_at: null,
+			last_result: null,
+		}),
+	)
+
+	const accountExport = await createAccountExport({
+		env: {
+			APP_DB: db,
+			PACKAGE_SERVICE_INSTANCE: {
+				idFromName: (name: string) => name as unknown as DurableObjectId,
+				get: () => ({ fetch: statusMock }),
+			},
+		} as unknown as Env,
+		dbUserId: 1,
+		mcpUserId: 'user-aaa',
+		generatedAt: '2026-07-05T00:00:00.000Z',
+	})
+
+	expect(accountExport.manifest.sections.package_services?.count).toBe(1)
+	expect(accountExport.durableObjects.packageServices).toEqual([
+		expect.objectContaining({
+			packageId: 'pkg-states',
+			serviceName: 'only-in-states',
+			status: expect.objectContaining({
+				service_name: 'only-in-states',
+				status: 'running',
+			}),
+		}),
+	])
+	expect(statusMock).toHaveBeenCalledTimes(1)
+})

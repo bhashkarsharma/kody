@@ -67,11 +67,8 @@ import {
 	createUnboundRuntimeHelperMessage,
 	findUnboundRuntimeHelperAccess,
 } from '#worker/package-runtime/unbound-runtime-helpers.ts'
-import {
-	beginPackageRuntimeRun,
-	finishPackageRuntimeRun,
-	type PackageRuntimeDebugContext,
-} from '#worker/package-runtime/package-runtime-debug.ts'
+import { beginRunRecord, finishRunRecord } from '#worker/run-records/service.ts'
+import { type RunRecordContext } from '#worker/run-records/types.ts'
 import { createDynamicCallableWorkflow } from '#worker/package-runtime/package-workflows.ts'
 import { type BundleArtifactDependency } from '#worker/package-runtime/published-runtime-artifacts.ts'
 import { recordUsage } from '#worker/usage/record-usage.ts'
@@ -623,6 +620,14 @@ export async function runModuleWithRegistry(
 		 * package deps are credited toward agent-facing package popularity.
 		 */
 		conversationId?: string | null
+		runRecord?: RunRecordContext | null
+		/**
+		 * When set, terminal run-record writes are scheduled on this callback
+		 * (typically `ctx.waitUntil`) instead of being awaited. Observability
+		 * must not serialize the path it observes — same never-block contract
+		 * as `recordUsage`.
+		 */
+		waitUntil?: (promise: Promise<unknown>) => void
 	},
 ): Promise<ExecuteResult> {
 	const userId = callerContext.user?.userId ?? ''
@@ -673,16 +678,6 @@ export async function runModuleWithRegistry(
 			conversationId: options?.conversationId ?? null,
 		},
 	)
-}
-
-async function finishPackageRuntimeRunBestEffort(
-	input: Parameters<typeof finishPackageRuntimeRun>[0],
-) {
-	try {
-		await finishPackageRuntimeRun(input)
-	} catch (error) {
-		console.warn('package-runtime-debug-finish-unhandled', error)
-	}
 }
 
 /**
@@ -743,32 +738,41 @@ export async function runBundledModuleWithRegistry(
 		packageEventTools?: PackageEventTools
 		skipCapabilityRegistry?: boolean
 		executorTimeoutMs?: number | null
-		runtimeDebug?: PackageRuntimeDebugContext | null
+		runRecord?: RunRecordContext | null
 		capabilityRegistry?: BuiltCapabilityRegistry
 		rawFetchHostSink?: RawFetchHostSink
 		conversationId?: string | null
+		/**
+		 * When set, terminal run-record writes are scheduled on this callback
+		 * (typically `ctx.waitUntil`) instead of being awaited. Observability
+		 * must not serialize the path it observes — same never-block contract
+		 * as `recordUsage`.
+		 */
+		waitUntil?: (promise: Promise<unknown>) => void
 	},
 ): Promise<ExecuteResult> {
 	const secretRedactor = createExecutionSecretRedactor()
 	const normalizedStorageContext = normalizeStorageContext(
 		callerContext.storageContext ?? null,
 	)
-	const runtimeDebugContext = options?.runtimeDebug
+	const runRecordContext = options?.runRecord
 		? {
-				...options.runtimeDebug,
+				...options.runRecord,
 				storageId:
-					options.runtimeDebug.storageId ??
+					options.runRecord.storageId ??
 					options.storageTools?.storageId ??
 					normalizedStorageContext?.storageId ??
 					null,
 			}
 		: null
-	const runtimeDebugRun = await beginPackageRuntimeRun({
+	const waitUntil = options?.waitUntil
+	const runRecordHandle = beginRunRecord({
 		env,
 		userId: callerContext.user?.userId ?? null,
-		context: runtimeDebugContext,
+		context: runRecordContext,
+		waitUntil,
 	})
-	let runtimeDebugFinished = false
+	let runRecordFinished = false
 	// The metering span covers the whole bundled run (module hydration,
 	// provider assembly, and sandbox execution) so pre-executor failures are
 	// still counted as failed package runs.
@@ -786,6 +790,21 @@ export async function runBundledModuleWithRegistry(
 			durationMs: Date.now() - usageStartedAtMs,
 			outcome,
 		})
+	}
+	async function finishObservedRun(input: {
+		status: 'success' | 'error'
+		logs?: Array<string>
+		error?: unknown
+	}) {
+		await finishRunRecord({
+			env,
+			handle: runRecordHandle,
+			status: input.status,
+			logs: input.logs,
+			error: input.error,
+			waitUntil,
+		})
+		runRecordFinished = true
 	}
 	try {
 		// Hydration can install additional published-package sources (literal
@@ -928,13 +947,10 @@ ${runtimeHelperRuntimePropertySource}
 			const result = await executor.execute(wrapped, providers)
 			const sanitizedResult = secretRedactor.sanitizeExecuteResult(result)
 			if (!result.error) {
-				await finishPackageRuntimeRunBestEffort({
-					env,
-					handle: runtimeDebugRun,
+				await finishObservedRun({
 					status: 'success',
 					logs: sanitizedResult.logs ?? [],
 				})
-				runtimeDebugFinished = true
 				await recordPackageExportUsage('success')
 				return sanitizedResult
 			}
@@ -955,33 +971,25 @@ ${runtimeHelperRuntimePropertySource}
 						error: secretRedactor.redactErrorMessage(rewrittenMessage),
 					}
 				: sanitizedResult
-			await finishPackageRuntimeRunBestEffort({
-				env,
-				handle: runtimeDebugRun,
+			await finishObservedRun({
 				status: 'error',
 				logs: finalResult.logs ?? [],
 				error: finalResult.error,
 			})
-			runtimeDebugFinished = true
 			await recordPackageExportUsage('error')
 			return finalResult
 		} catch (error) {
-			if (!runtimeDebugFinished) {
-				await finishPackageRuntimeRunBestEffort({
-					env,
-					handle: runtimeDebugRun,
+			if (!runRecordFinished) {
+				await finishObservedRun({
 					status: 'error',
 					error,
 				})
-				runtimeDebugFinished = true
 			}
 			throw error
 		}
 	} catch (error) {
-		if (!runtimeDebugFinished) {
-			await finishPackageRuntimeRunBestEffort({
-				env,
-				handle: runtimeDebugRun,
+		if (!runRecordFinished) {
+			await finishObservedRun({
 				status: 'error',
 				error,
 			})

@@ -3,7 +3,7 @@ import {
 	type PackageEventTools,
 	type PackageInvokeTools,
 } from '#mcp/run-kody-registry.ts'
-import { type PackageRuntimeDebugContext } from '#worker/package-runtime/package-runtime-debug.ts'
+import { type RunRecordContext } from '#worker/run-records/types.ts'
 import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
 import {
 	normalizeExportName,
@@ -52,8 +52,9 @@ export function createPackageRuntimeInvokeTools(input: {
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
 	packageContext: PackageRuntimeContext | null
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageInvokeTools {
 	return createPackageRuntimeInvokeToolsWithToolFactories({
 		...input,
@@ -66,8 +67,9 @@ export function createPackageEventTools(input: {
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
 	packageContext: PackageRuntimeContext | null
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageEventTools {
 	return createPackageEventToolsWithToolFactories({
 		...input,
@@ -79,10 +81,11 @@ export function createExecutePackageInvokeTools(input: {
 	env: Env
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
 	/** MCP execute conversation id for agent-facing popularity recording. */
 	conversationId?: string | null
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageInvokeTools {
 	return createExecutePackageInvokeToolsWithToolFactories({
 		...input,
@@ -96,6 +99,7 @@ export async function invokePackageExport(input: {
 	token: PackageInvocationTokenScope
 	request: PackageInvocationRequest
 	runtimeInvokeDepth?: number
+	waitUntil?: (promise: Promise<unknown>) => void
 }): Promise<PackageInvocationResponse> {
 	return await invokePackageExportWithToolFactories({
 		...input,
@@ -114,6 +118,7 @@ export async function invokePackageSubscription(input: {
 	actorTokenId?: string
 	actorDisplayName?: string
 	runtimeInvokeDepth?: number
+	waitUntil?: (promise: Promise<unknown>) => void
 }) {
 	return await invokePackageSubscriptionWithToolFactories({
 		...input,

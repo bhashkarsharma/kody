@@ -40,6 +40,7 @@ import {
 import { createKodyProviderProxySource } from '#mcp/kody-provider-proxy-source.ts'
 import { parseUnboundRuntimeHelperMessage } from '#worker/package-runtime/unbound-runtime-helpers.ts'
 import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
+import { executorSandboxTimeoutMessage } from '#worker/sentry-options.ts'
 
 export { createKodyProviderProxySource } from '#mcp/kody-provider-proxy-source.ts'
 
@@ -407,8 +408,12 @@ function createExecutorModule(input: {
 		'      }',
 		'      return __kodyNativeFetch(input, init);',
 		'    };',
-		'    const console = {',
+		'    const __kodyNativeConsole = globalThis.console;',
+		'    globalThis.console = {',
+		'      ...__kodyNativeConsole,',
 		'      log: (...a) => { __logs.push(a.map(String).join(" ")); },',
+		'      info: (...a) => { __logs.push("[info] " + a.map(String).join(" ")); },',
+		'      debug: (...a) => { __logs.push("[debug] " + a.map(String).join(" ")); },',
 		'      warn: (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); },',
 		'      error: (...a) => { __logs.push("[error] " + a.map(String).join(" ")); },',
 		'    };',
@@ -421,7 +426,7 @@ function createExecutorModule(input: {
 		'    let __timeoutId;',
 		'    try {',
 		'      const __timeoutPromise = new Promise((_, reject) => {',
-		`        __timeoutId = setTimeout(() => reject(new Error("Execution timed out")), ${input.timeoutMs});`,
+		`        __timeoutId = setTimeout(() => reject(new Error(${JSON.stringify(executorSandboxTimeoutMessage)})), ${input.timeoutMs});`,
 		'      });',
 		'      const result = await Promise.race([',
 		...userCodeInvocation,
@@ -432,6 +437,7 @@ function createExecutorModule(input: {
 		'      return { result: undefined, error: err.message, logs: __logs, rawFetchHosts: __kodyRawFetchHosts };',
 		'    } finally {',
 		'      clearTimeout(__timeoutId);',
+		'      globalThis.console = __kodyNativeConsole;',
 		'    }',
 		'  }',
 		'}',

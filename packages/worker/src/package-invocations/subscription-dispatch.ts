@@ -5,7 +5,7 @@ import {
 	type PackageEventDispatchInput,
 	type PackageEventTools,
 } from '#mcp/run-kody-registry.ts'
-import { type PackageRuntimeDebugContext } from '#worker/package-runtime/package-runtime-debug.ts'
+import { type RunRecordContext } from '#worker/run-records/types.ts'
 import { listSavedPackagesByUserId } from '#worker/package-registry/repo.ts'
 import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
 import { loadPackageManifestBySourceId } from '#worker/package-registry/source.ts'
@@ -133,9 +133,10 @@ export function createPackageEventToolsWithToolFactories(input: {
 	baseUrl: string
 	callerContext: ReturnType<typeof createMcpCallerContext>
 	packageContext: PackageRuntimeContext | null
-	parentRuntimeDebug?: PackageRuntimeDebugContext | null
+	parentRunRecord?: RunRecordContext | null
 	packageInvokeDepth?: number
 	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
 }): PackageEventTools {
 	return {
 		dispatch: async (rawInput) => {
@@ -207,6 +208,7 @@ export function createPackageEventToolsWithToolFactories(input: {
 					actorDisplayName: `package:${packageContext.kodyId}`,
 					runtimeInvokeDepth: packageInvokeDepth + 1,
 					toolFactories: input.toolFactories,
+					waitUntil: input.waitUntil,
 				})
 				const replayed =
 					(response.body['idempotency'] as { replayed?: unknown } | undefined)
@@ -258,6 +260,7 @@ export async function invokePackageSubscriptionWithToolFactories(input: {
 	actorDisplayName?: string
 	runtimeInvokeDepth?: number
 	toolFactories: PackageRuntimeToolFactories
+	waitUntil?: (promise: Promise<unknown>) => void
 }) {
 	const topic = normalizePackageSubscriptionTopic(input.topic)
 	const idempotencyKey = input.idempotencyKey.trim()
@@ -292,5 +295,6 @@ export async function invokePackageSubscriptionWithToolFactories(input: {
 		notFoundCode: 'subscription_not_found',
 		runtimeInvokeDepth: input.runtimeInvokeDepth ?? 0,
 		toolFactories: input.toolFactories,
+		waitUntil: input.waitUntil,
 	})
 }
