@@ -439,6 +439,10 @@
 		{
 			"filename": "0103-integration-data-hygiene.sql",
 			"sha256": "c7d98f4ece238a162ec5b83722e0c8522599ba7ebcbc6c692819bcdc7b15df1a"
+		},
+		{
+			"filename": "0104-email-sender-rules-and-classification.sql",
+			"sha256": "3e3d120bbf2bdee3dfcbb939bd7b5f9bca9380d5c6e84b0a94818d34eaaee3bd"
 		}
 	]
 }
