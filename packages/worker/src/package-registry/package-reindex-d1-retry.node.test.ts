@@ -112,7 +112,7 @@ function stubSuccessfulManifestLoad(sourceId: string) {
 	return { source, manifest }
 }
 
-test('saved package reindex recovers when source D1 read hits a transient export error', async () => {
+test('saved package reindex retries transient D1 export errors then reports exhaustion', async () => {
 	resetMocks()
 	const upsert = vi.fn()
 	const env = {
@@ -130,40 +130,34 @@ test('saved package reindex recovers when source D1 read hits a transient export
 
 	vi.useFakeTimers()
 	try {
-		const resultPromise = reindexSavedPackageVectors(env, {
+		const recoverPromise = reindexSavedPackageVectors(env, {
 			baseUrl: 'https://kody.example.com',
 		})
 		await vi.advanceTimersByTimeAsync(d1LockRetryBaseDelayMs)
-		await expect(resultPromise).resolves.toEqual({ upserted: 1 })
+		await expect(recoverPromise).resolves.toEqual({ upserted: 1 })
 	} finally {
 		vi.useRealTimers()
 	}
-
 	expect(mockModule.getEntitySourceById).toHaveBeenCalledTimes(2)
 	expect(upsert).toHaveBeenCalledTimes(1)
-})
 
-test('saved package reindex keeps load failure reporting when source D1 retries are exhausted', async () => {
 	resetMocks()
 	consoleError.mockImplementation(() => {})
-	const upsert = vi.fn()
-	const env = {
-		APP_DB: {},
-		BUNDLE_ARTIFACTS_KV: {},
-	} as Env
-	const pkg = createSavedPackage('pkg-1')
+	const exhaustedUpsert = vi.fn()
 	stubSuccessfulManifestLoad(pkg.sourceId)
-	mockModule.getCapabilityVectorIndex.mockReturnValue({ upsert })
+	mockModule.getCapabilityVectorIndex.mockReturnValue({
+		upsert: exhaustedUpsert,
+	})
 	mockModule.isCapabilitySearchOffline.mockReturnValue(false)
 	mockModule.listSavedPackagesPage.mockResolvedValue([pkg])
 	mockModule.getEntitySourceById.mockRejectedValue(exportError())
 
 	vi.useFakeTimers()
 	try {
-		const resultPromise = reindexSavedPackageVectors(env, {
+		const exhaustedPromise = reindexSavedPackageVectors(env, {
 			baseUrl: 'https://kody.example.com',
 		})
-		const expectation = expect(resultPromise).resolves.toEqual({
+		const expectation = expect(exhaustedPromise).resolves.toEqual({
 			upserted: 0,
 			failed: 1,
 			failures: [
@@ -189,5 +183,5 @@ test('saved package reindex keeps load failure reporting when source D1 retries 
 		d1LockRetryMaxAttempts,
 	)
 	expect(mockModule.loadPublishedEntityManifest).not.toHaveBeenCalled()
-	expect(upsert).not.toHaveBeenCalled()
+	expect(exhaustedUpsert).not.toHaveBeenCalled()
 })
