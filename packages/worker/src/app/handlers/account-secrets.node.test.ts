@@ -41,6 +41,44 @@ const mockModule = vi.hoisted(() => ({
 	setSecretAllowedCapabilities: vi.fn(async () => undefined),
 	setSecretAllowedPackages: vi.fn(async () => undefined),
 	getValue: vi.fn(async () => null),
+	upsertIntegration: vi.fn(async (input: { config: { name: string } }) => ({
+		...input.config,
+		name: String(input.config.name).toLowerCase(),
+	})),
+	upsertOauthAppWithoutConnection: vi.fn(
+		async (input: {
+			config: {
+				name: string
+				clientId: string
+				tokenUrl: string
+				flow: 'pkce' | 'confidential'
+				clientSecretSecretName?: string | null
+				apiBaseUrl?: string | null
+				usePkce?: boolean | null
+				tokenExchangeStyle?: string | null
+			}
+		}) => ({
+			userId: 'stable-user-1',
+			slug: String(input.config.name).toLowerCase().replace(/\s+/g, '-'),
+			provider: String(input.config.name)
+				.toLowerCase()
+				.replace(/\s+/g, '-')
+				.split('-')[0],
+			label: null,
+			clientId: input.config.clientId,
+			clientSecretSecretName: input.config.clientSecretSecretName ?? null,
+			tokenUrl: input.config.tokenUrl,
+			authorizeUrl: null,
+			apiBaseUrl: input.config.apiBaseUrl ?? null,
+			flow: input.config.flow,
+			usePkce: input.config.usePkce ?? null,
+			tokenExchangeStyle: input.config.tokenExchangeStyle ?? null,
+			scopeSeparator: null,
+			extraAuthorizeParams: {},
+			createdAt: new Date(0).toISOString(),
+			updatedAt: new Date(0).toISOString(),
+		}),
+	),
 	searchCommunityListings: vi.fn(async () => []),
 }))
 
@@ -111,6 +149,13 @@ vi.mock('#mcp/values/service.ts', () => ({
 	saveValue: (...args: Array<unknown>) => mockModule.saveValue(...args),
 }))
 
+vi.mock('#worker/integrations/service.ts', () => ({
+	upsertIntegration: (...args: Array<unknown>) =>
+		mockModule.upsertIntegration(...args),
+	upsertOauthAppWithoutConnection: (...args: Array<unknown>) =>
+		mockModule.upsertOauthAppWithoutConnection(...args),
+}))
+
 vi.mock('#worker/package-registry/repo.ts', () => ({
 	listSavedPackagesByUserId: (...args: Array<unknown>) =>
 		mockModule.listSavedPackagesByUserId(...args),
@@ -125,8 +170,137 @@ function createEnv() {
 	} as Env
 }
 
-test('connect oauth saves tokens, integration metadata, and host approval links', async () => {
-	mockModule.saveValue.mockClear()
+test('save_oauth_app persists the app (client id + endpoints) before authorize redirect', async () => {
+	mockModule.upsertOauthAppWithoutConnection.mockClear()
+	const handler = createAccountSecretsApiHandler(createEnv())
+
+	const response = await handler.handler({
+		request: new Request('https://example.com/account/secrets.json', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				action: 'save_oauth_app',
+				provider: 'GitHub',
+				authorizeUrl: 'https://github.com/login/oauth/authorize',
+				tokenUrl: 'https://github.com/login/oauth/access_token',
+				apiBaseUrl: 'https://api.github.com',
+				flow: 'pkce',
+				usePkce: true,
+				clientId: 'github-client-id-value',
+				scopeSeparator: ' ',
+				extraAuthorizeParams: { prompt: 'consent' },
+			}),
+		}),
+		params: {},
+	} as never)
+
+	expect(response.status).toBe(200)
+	await expect(response.json()).resolves.toMatchObject({
+		ok: true,
+		app: {
+			slug: 'github',
+			clientId: 'github-client-id-value',
+			tokenUrl: 'https://github.com/login/oauth/access_token',
+			flow: 'pkce',
+		},
+	})
+	expect(mockModule.upsertOauthAppWithoutConnection).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 'stable-user-1',
+			config: expect.objectContaining({
+				name: 'GitHub',
+				clientId: 'github-client-id-value',
+				tokenUrl: 'https://github.com/login/oauth/access_token',
+				apiBaseUrl: 'https://api.github.com',
+				flow: 'pkce',
+				usePkce: true,
+				authorization: {
+					authorizeUrl: 'https://github.com/login/oauth/authorize',
+					scopes: [],
+					scopeSeparator: ' ',
+					extraAuthorizeParams: { prompt: 'consent' },
+				},
+			}),
+		}),
+	)
+	expect(mockModule.upsertIntegration).not.toHaveBeenCalled()
+	expect(mockModule.saveSecret).not.toHaveBeenCalled()
+})
+
+test('save_oauth_app reuses an existing app when setting up a second account with the same client credentials', async () => {
+	mockModule.upsertOauthAppWithoutConnection.mockClear()
+	mockModule.upsertOauthAppWithoutConnection.mockImplementation(
+		async (input: { config: { name: string; clientId: string } }) => ({
+			userId: 'stable-user-1',
+			slug: 'google',
+			provider: 'google',
+			label: null,
+			clientId: input.config.clientId,
+			clientSecretSecretName: null,
+			tokenUrl: 'https://oauth2.googleapis.com/token',
+			authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+			apiBaseUrl: 'https://www.googleapis.com',
+			flow: 'pkce' as const,
+			usePkce: null,
+			tokenExchangeStyle: null,
+			scopeSeparator: null,
+			extraAuthorizeParams: {},
+			createdAt: new Date(0).toISOString(),
+			updatedAt: new Date(0).toISOString(),
+		}),
+	)
+	const handler = createAccountSecretsApiHandler(createEnv())
+
+	const first = await handler.handler({
+		request: new Request('https://example.com/account/secrets.json', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				action: 'save_oauth_app',
+				provider: 'google',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				flow: 'pkce',
+				clientId: 'shared-google-client',
+			}),
+		}),
+		params: {},
+	} as never)
+	expect(first.status).toBe(200)
+	await expect(first.json()).resolves.toMatchObject({
+		ok: true,
+		app: { slug: 'google', clientId: 'shared-google-client' },
+	})
+
+	const second = await handler.handler({
+		request: new Request('https://example.com/account/secrets.json', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				action: 'save_oauth_app',
+				provider: 'google-calendar',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				flow: 'pkce',
+				clientId: 'shared-google-client',
+			}),
+		}),
+		params: {},
+	} as never)
+	expect(second.status).toBe(200)
+	await expect(second.json()).resolves.toMatchObject({
+		ok: true,
+		app: { slug: 'google', clientId: 'shared-google-client' },
+	})
+	expect(mockModule.upsertOauthAppWithoutConnection).toHaveBeenCalledTimes(2)
+	expect(mockModule.upsertIntegration).not.toHaveBeenCalled()
+})
+
+test('connect oauth saves tokens via the secret store and persists app+connection through the integrations service', async () => {
+	mockModule.upsertIntegration.mockClear()
+	mockModule.saveSecret.mockClear()
 	mockModule.buildSecretHostApprovalUrl.mockClear()
 	mockModule.setSecretAllowedHosts.mockClear()
 	const handler = createAccountSecretsApiHandler(createEnv())
@@ -145,7 +319,7 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 				scopeSeparator: ' ',
 				extraAuthorizeParams: { prompt: 'consent' },
 				flow: 'pkce',
-				clientIdValueName: 'github-client-id',
+				clientId: 'github-client-id-value',
 				accessTokenSecretName: 'githubAccessToken',
 				refreshTokenSecretName: 'githubRefreshToken',
 				allowedHosts: ['api.github.com'],
@@ -203,15 +377,31 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 	})
 	expect(mockModule.buildSecretHostApprovalUrl).toHaveBeenCalledTimes(4)
 	expect(mockModule.setSecretAllowedHosts).not.toHaveBeenCalled()
-	expect(mockModule.saveValue).toHaveBeenCalledWith(
+	expect(mockModule.saveSecret).toHaveBeenCalledWith(
 		expect.objectContaining({
-			name: '_integration:github',
-			value: JSON.stringify({
+			userId: 'stable-user-1',
+			name: 'githubAccessToken',
+			value: 'access-token',
+			scope: 'user',
+		}),
+	)
+	expect(mockModule.saveSecret).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 'stable-user-1',
+			name: 'githubRefreshToken',
+			value: 'refresh-token',
+			scope: 'user',
+		}),
+	)
+	expect(mockModule.upsertIntegration).toHaveBeenCalledWith(
+		expect.objectContaining({
+			userId: 'stable-user-1',
+			config: expect.objectContaining({
 				name: 'github',
 				tokenUrl: 'https://github.com/login/oauth/access_token',
 				apiBaseUrl: 'https://api.github.com',
 				flow: 'pkce',
-				clientIdValueName: 'github-client-id',
+				clientId: 'github-client-id-value',
 				clientSecretSecretName: null,
 				accessTokenSecretName: 'githubAccessToken',
 				refreshTokenSecretName: 'githubRefreshToken',
@@ -225,8 +415,9 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 			}),
 		}),
 	)
+	expect(mockModule.saveValue).not.toHaveBeenCalled()
 
-	mockModule.saveValue.mockClear()
+	mockModule.upsertIntegration.mockClear()
 	const spotifyResponse = await handler.handler({
 		request: new Request('https://example.com/account/secrets.json', {
 			method: 'POST',
@@ -241,7 +432,7 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 				scopeSeparator: ' ',
 				extraAuthorizeParams: { show_dialog: 'true' },
 				flow: 'pkce',
-				clientIdValueName: 'spotify-client-id',
+				clientId: 'spotify-client-id-value',
 				accessTokenSecretName: 'spotifyAccessToken',
 				refreshTokenSecretName: 'spotifyRefreshToken',
 				allowedHosts: ['api.spotify.com'],
@@ -261,12 +452,13 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 		refreshTokenSaved: false,
 		integrationName: 'spotify',
 	})
-	expect(mockModule.saveValue).toHaveBeenCalledWith(
+	expect(mockModule.upsertIntegration).toHaveBeenCalledWith(
 		expect.objectContaining({
-			name: '_integration:spotify',
-			value: expect.stringContaining(
-				'"refreshTokenSecretName":"spotifyRefreshToken"',
-			),
+			config: expect.objectContaining({
+				name: 'spotify',
+				clientId: 'spotify-client-id-value',
+				refreshTokenSecretName: 'spotifyRefreshToken',
+			}),
 		}),
 	)
 
@@ -313,7 +505,7 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 				tokenUrl: 'https://auth.tesla.com/oauth2/v3/token',
 				apiBaseUrl: 'https://fleet-api.prd.na.vn.cloud.tesla.com',
 				flow: 'pkce',
-				clientIdValueName: 'tesla-client-id',
+				clientId: 'tesla-client-id-value',
 				accessTokenSecretName: 'teslaAccessToken',
 				refreshTokenSecretName: 'teslaRefreshToken',
 				allowedHosts: [
@@ -348,7 +540,7 @@ test('connect oauth saves tokens, integration metadata, and host approval links'
 })
 
 test('connect oauth rejects invalid authorization metadata', async () => {
-	mockModule.saveValue.mockClear()
+	mockModule.upsertIntegration.mockClear()
 
 	const handler = createAccountSecretsApiHandler(createEnv())
 	await expect(
@@ -364,7 +556,7 @@ test('connect oauth rejects invalid authorization metadata', async () => {
 					apiBaseUrl: 'https://api.github.com',
 					scopes: ['repo'],
 					flow: 'pkce',
-					clientIdValueName: 'github-client-id',
+					clientId: 'github-client-id-value',
 					accessTokenSecretName: 'githubAccessToken',
 					refreshTokenSecretName: 'githubRefreshToken',
 					allowedHosts: ['api.github.com'],
@@ -377,7 +569,78 @@ test('connect oauth rejects invalid authorization metadata', async () => {
 			params: {},
 		} as never),
 	).rejects.toThrow('OAuth integration configuration is invalid.')
-	expect(mockModule.saveValue).not.toHaveBeenCalled()
+	expect(mockModule.upsertIntegration).not.toHaveBeenCalled()
+})
+
+test('connect oauth reuses an existing OAuth app when connecting a second account with the same client id', async () => {
+	mockModule.upsertIntegration.mockClear()
+	const handler = createAccountSecretsApiHandler(createEnv())
+
+	const first = await handler.handler({
+		request: new Request('https://example.com/account/secrets.json', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				action: 'connect_oauth',
+				provider: 'google',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				scopes: ['openid', 'email'],
+				flow: 'pkce',
+				clientId: 'shared-google-client',
+				accessTokenSecretName: 'googleAccessToken',
+				refreshTokenSecretName: 'googleRefreshToken',
+				allowedHosts: ['www.googleapis.com'],
+				tokenPayload: {
+					access_token: 'google-access-1',
+					refresh_token: 'google-refresh-1',
+				},
+			}),
+		}),
+		params: {},
+	} as never)
+	expect(first.status).toBe(200)
+
+	const second = await handler.handler({
+		request: new Request('https://example.com/account/secrets.json', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				action: 'connect_oauth',
+				provider: 'google-calendar',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				scopes: ['calendar.readonly'],
+				flow: 'pkce',
+				clientId: 'shared-google-client',
+				accessTokenSecretName: 'googleCalendarAccessToken',
+				refreshTokenSecretName: 'googleCalendarRefreshToken',
+				allowedHosts: ['www.googleapis.com'],
+				tokenPayload: {
+					access_token: 'google-access-2',
+					refresh_token: 'google-refresh-2',
+				},
+			}),
+		}),
+		params: {},
+	} as never)
+	expect(second.status).toBe(200)
+
+	expect(mockModule.upsertIntegration).toHaveBeenCalledTimes(2)
+	expect(mockModule.upsertIntegration.mock.calls[0]?.[0]).toMatchObject({
+		config: {
+			name: 'google',
+			clientId: 'shared-google-client',
+		},
+	})
+	expect(mockModule.upsertIntegration.mock.calls[1]?.[0]).toMatchObject({
+		config: {
+			name: 'google-calendar',
+			clientId: 'shared-google-client',
+		},
+	})
 })
 
 test('host approval view and approve persist normalized hosts for the selected secret', async () => {
@@ -1428,7 +1691,7 @@ test('connect oauth persists usePkce for confidential + PKCE providers like Canv
 				flow: 'confidential',
 				usePkce: true,
 				tokenExchangeStyle: 'basic-form',
-				clientIdValueName: 'canva-client-id',
+				clientId: 'canva-client-id-value',
 				clientSecretSecretName: 'canvaClientSecret',
 				accessTokenSecretName: 'canvaAccessToken',
 				refreshTokenSecretName: 'canvaRefreshToken',
@@ -1477,16 +1740,15 @@ test('connect oauth persists usePkce for confidential + PKCE providers like Canv
 		limit: 12,
 		trustedFirst: true,
 	})
-	expect(mockModule.saveValue).toHaveBeenCalledWith(
+	expect(mockModule.upsertIntegration).toHaveBeenCalledWith(
 		expect.objectContaining({
-			name: '_integration:canva',
-			value: JSON.stringify({
+			config: expect.objectContaining({
 				name: 'canva',
 				tokenUrl: 'https://api.canva.com/rest/v1/oauth/token',
 				apiBaseUrl: 'https://api.canva.com/rest/v1',
 				flow: 'confidential',
 				usePkce: true,
-				clientIdValueName: 'canva-client-id',
+				clientId: 'canva-client-id-value',
 				clientSecretSecretName: 'canvaClientSecret',
 				accessTokenSecretName: 'canvaAccessToken',
 				refreshTokenSecretName: 'canvaRefreshToken',

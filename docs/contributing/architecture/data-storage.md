@@ -283,6 +283,16 @@ The schema is defined by migrations in `packages/worker/migrations/`:
   `allowed_packages` grant on every package read path. Updating or deleting a
   user secret from package code always requires that grant, regardless of fork
   or adoption state.
+- `user_oauth_apps` (`0101-user-oauth-apps-and-integrations.sql`): per-user
+  OAuth app rows keyed by `(user_id, slug)`. Holds shared client id, client-
+  secret secret name, provider endpoints, and flow options. See
+  [OAuth integrations](./integrations.md).
+- `user_integrations` (`0101-user-oauth-apps-and-integrations.sql`): per-user
+  OAuth connections keyed by `(user_id, name)`, with composite FK
+  `(user_id, app_slug) → user_oauth_apps(user_id, slug)` (`ON DELETE RESTRICT`).
+  Holds `scopes_json`, `required_hosts_json`, and access/refresh token secret
+  names. Secret credential values stay in `secret_entries`; the non-secret
+  `client_id` is stored inline on `user_oauth_apps`.
 
 App access pattern:
 
@@ -694,6 +704,13 @@ on write unless a migration backfills existing rows.
   Mutations from package code (`secret_set` / `secret_delete` / OpenAPI
   token-refresh writes) always require the grant. Package-scoped secrets are
   owned exclusively by the package id in their bucket binding.
+- `user_oauth_apps.extra_authorize_params_json`,
+  `user_integrations.scopes_json`, and `user_integrations.required_hosts_json`
+  (`0101-user-oauth-apps-and-integrations.sql`,
+  `packages/worker/src/integrations/`) store a string→string object, a scope
+  string list, and a host string list respectively. Parsers in the integrations
+  data-access layer own the shapes; credential values are never stored in these
+  columns (only secret names and the inline non-secret `client_id`).
 
 ### Durable Object id contracts
 

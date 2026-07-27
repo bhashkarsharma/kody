@@ -1,8 +1,5 @@
 import { jsonResponse } from '#worker/json-response.ts'
-import {
-	normalizeProviderKey,
-	safeParseHost,
-} from '@kody-internal/shared/url-hosts.ts'
+import { safeParseHost } from '@kody-internal/shared/url-hosts.ts'
 import { type Action } from 'remix/router'
 import {
 	buildAccountSecretId,
@@ -37,11 +34,15 @@ import { type routes } from '#app/routes.ts'
 import { normalizeAllowedCapabilities } from '#mcp/secrets/allowed-capabilities.ts'
 import { normalizeAllowedPackages } from '#mcp/secrets/allowed-packages.ts'
 import { normalizeAllowedHosts } from '#mcp/secrets/allowed-hosts.ts'
-import { getValue, saveValue } from '#mcp/values/service.ts'
 import {
-	buildIntegrationValueName,
-	parseIntegrationConfig,
+	canonicalIntegrationName,
+	normalizeIntegrationConfig,
+	integrationConfigSchema,
 } from '#mcp/capabilities/integrations/integration-shared.ts'
+import {
+	upsertIntegration,
+	upsertOauthAppWithoutConnection,
+} from '#worker/integrations/service.ts'
 import { requireAuthenticatedPageUser } from '#app/page-auth.ts'
 import {
 	buildOAuthTokenExchangeFailurePayload,
@@ -146,15 +147,16 @@ export function createAccountSecretsApiHandler(env: Env) {
 					body,
 				})
 			}
-			if (action === 'value_get') {
-				return handleValueGetAction({ env, user, body })
-			}
-			if (action === 'value_set') {
-				return handleValueSetAction({ env, user, body })
-			}
 			if (action === 'delete') {
 				return handleDeleteAction({
 					request,
+					env,
+					user,
+					body,
+				})
+			}
+			if (action === 'save_oauth_app') {
+				return handleSaveOauthAppAction({
 					env,
 					user,
 					body,
@@ -181,53 +183,106 @@ export function createAccountSecretsApiHandler(env: Env) {
 	} satisfies Action<typeof routes.accountSecretsApi>
 }
 
-async function handleValueGetAction(input: {
+async function handleSaveOauthAppAction(input: {
 	env: Env
 	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
 	body: object
 }) {
-	const name = readString(input.body, 'name')
-	if (!name) {
-		return jsonResponse({ ok: false, error: 'Value name is required.' }, 400)
-	}
-	const value = await getValue({
-		env: input.env,
-		userId: input.user.mcpUser.userId,
-		name,
-		scope: 'user',
-		storageContext: { sessionId: null, appId: null, packageId: null },
-	})
-	return jsonResponse({
-		ok: true,
-		value: value ? { value: value.value } : null,
-	})
-}
+	const provider = readString(input.body, 'provider')
+	const tokenUrl = readOptionalString(input.body, 'tokenUrl')
+	const apiBaseUrl = readOptionalString(input.body, 'apiBaseUrl')
+	const authorizeUrl = readOptionalString(input.body, 'authorizeUrl')
+	const flow = readOptionalString(input.body, 'flow')
+	const usePkce = readOptionalBoolean(input.body, 'usePkce')
+	const clientId = readOptionalString(input.body, 'clientId')
+	const clientSecretSecretName = readOptionalString(
+		input.body,
+		'clientSecretSecretName',
+	)
+	const scopeSeparator = readRawOptionalString(input.body, 'scopeSeparator')
+	const extraAuthorizeParams = readStringRecord(
+		input.body,
+		'extraAuthorizeParams',
+	)
 
-async function handleValueSetAction(input: {
-	env: Env
-	user: NonNullable<Awaited<ReturnType<typeof readAuthenticatedAppUser>>>
-	body: object
-}) {
-	const name = readString(input.body, 'name')
-	const value = readString(input.body, 'value')
-	if (!name || !value) {
+	if (!provider) {
+		return jsonResponse({ ok: false, error: 'Provider is required.' }, 400)
+	}
+	if (!tokenUrl) {
+		return jsonResponse({ ok: false, error: 'Token URL is required.' }, 400)
+	}
+	if (!clientId) {
+		return jsonResponse({ ok: false, error: 'Client ID is required.' }, 400)
+	}
+	if (flow && flow !== 'pkce' && flow !== 'confidential') {
+		return jsonResponse({ ok: false, error: 'Invalid OAuth flow.' }, 400)
+	}
+	if (authorizeUrl) {
+		const authorizeHost = safeParseHost(authorizeUrl)
+		if (!authorizeHost) {
+			return jsonResponse(
+				{ ok: false, error: 'Authorize URL is invalid.' },
+				400,
+			)
+		}
+	}
+
+	try {
+		const app = await upsertOauthAppWithoutConnection({
+			env: input.env,
+			userId: input.user.mcpUser.userId,
+			config: {
+				name: provider,
+				tokenUrl,
+				apiBaseUrl,
+				flow: flow === 'confidential' ? 'confidential' : 'pkce',
+				...(usePkce == null ? {} : { usePkce }),
+				clientId,
+				clientSecretSecretName,
+				tokenExchangeStyle: resolveTokenExchangeStyle({
+					tokenUrl,
+					tokenExchangeStyle: readOptionalString(
+						input.body,
+						'tokenExchangeStyle',
+					),
+				}),
+				authorization: authorizeUrl
+					? {
+							authorizeUrl,
+							scopes: [],
+							scopeSeparator,
+							extraAuthorizeParams,
+						}
+					: null,
+			},
+		})
+		return jsonResponse({
+			ok: true,
+			app: {
+				slug: app.slug,
+				provider: app.provider,
+				clientId: app.clientId,
+				clientSecretSecretName: app.clientSecretSecretName,
+				tokenUrl: app.tokenUrl,
+				authorizeUrl: app.authorizeUrl,
+				apiBaseUrl: app.apiBaseUrl,
+				flow: app.flow,
+				usePkce: app.usePkce,
+				tokenExchangeStyle: app.tokenExchangeStyle,
+			},
+		})
+	} catch (error) {
 		return jsonResponse(
-			{ ok: false, error: 'Value name and value are required.' },
+			{
+				ok: false,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Unable to save OAuth app configuration.',
+			},
 			400,
 		)
 	}
-	const description = readOptionalString(input.body, 'description') ?? ''
-	const saved = await saveValue({
-		env: input.env,
-		userId: input.user.mcpUser.userId,
-		userEmail: input.user.mcpUser.email,
-		name,
-		value,
-		scope: 'user',
-		description,
-		storageContext: { sessionId: null, appId: null, packageId: null },
-	})
-	return jsonResponse({ ok: true, value: { value: saved.value } })
 }
 
 async function handleConnectOauthAction(input: {
@@ -242,7 +297,7 @@ async function handleConnectOauthAction(input: {
 	const authorizeUrl = readOptionalString(input.body, 'authorizeUrl')
 	const flow = readOptionalString(input.body, 'flow')
 	const usePkce = readOptionalBoolean(input.body, 'usePkce')
-	const clientIdValueName = readOptionalString(input.body, 'clientIdValueName')
+	const clientId = readOptionalString(input.body, 'clientId')
 	const clientSecretSecretName = readOptionalString(
 		input.body,
 		'clientSecretSecretName',
@@ -285,11 +340,8 @@ async function handleConnectOauthAction(input: {
 	if (flow && flow !== 'pkce' && flow !== 'confidential') {
 		return jsonResponse({ ok: false, error: 'Invalid OAuth flow.' }, 400)
 	}
-	if (!clientIdValueName) {
-		return jsonResponse(
-			{ ok: false, error: 'Client ID value name is required.' },
-			400,
-		)
+	if (!clientId) {
+		return jsonResponse({ ok: false, error: 'Client ID is required.' }, 400)
 	}
 	if (!accessTokenSecretName) {
 		return jsonResponse(
@@ -349,13 +401,12 @@ async function handleConnectOauthAction(input: {
 	const integrationName = await saveIntegrationConfig({
 		env: input.env,
 		userId: input.user.mcpUser.userId,
-		userEmail: input.user.mcpUser.email,
 		provider,
 		tokenUrl,
 		apiBaseUrl,
 		flow: flow === 'confidential' ? 'confidential' : 'pkce',
 		usePkce,
-		clientIdValueName,
+		clientId,
 		clientSecretSecretName,
 		accessTokenSecretName,
 		refreshTokenSecretName,
@@ -363,7 +414,6 @@ async function handleConnectOauthAction(input: {
 			tokenUrl,
 			tokenExchangeStyle: readOptionalString(input.body, 'tokenExchangeStyle'),
 		}),
-		tokenPayload: tokenRecord,
 		allowedHosts,
 		authorization: authorizeUrl
 			? {
@@ -603,18 +653,16 @@ async function handleOAuthExchangeAction(input: {
 async function saveIntegrationConfig(input: {
 	env: Env
 	userId: string
-	userEmail: string
 	provider: string
 	tokenUrl: string
 	apiBaseUrl: string | null
 	flow: 'pkce' | 'confidential'
 	usePkce: boolean | null
-	clientIdValueName: string
+	clientId: string
 	clientSecretSecretName: string | null
 	accessTokenSecretName: string
 	refreshTokenSecretName: string | null
 	tokenExchangeStyle: TokenExchangeStyle | null
-	tokenPayload: Record<string, unknown>
 	allowedHosts: Array<string>
 	authorization: {
 		authorizeUrl: string
@@ -623,44 +671,36 @@ async function saveIntegrationConfig(input: {
 		extraAuthorizeParams: Record<string, string>
 	} | null
 }) {
-	const providerKey = normalizeProviderKey(input.provider)
+	const providerKey = canonicalIntegrationName(input.provider)
 	if (!providerKey) {
 		throw new Error('Provider must contain letters or numbers.')
 	}
-	const integration = parseIntegrationConfig(
-		{
-			name: input.provider,
-			tokenUrl: input.tokenUrl,
-			apiBaseUrl: input.apiBaseUrl,
-			flow: input.flow,
-			...(input.usePkce == null ? {} : { usePkce: input.usePkce }),
-			clientIdValueName: input.clientIdValueName,
-			clientSecretSecretName:
-				input.flow === 'confidential'
-					? (input.clientSecretSecretName ?? `${providerKey}ClientSecret`)
-					: null,
-			accessTokenSecretName: input.accessTokenSecretName,
-			refreshTokenSecretName: input.refreshTokenSecretName,
-			requiredHosts: input.allowedHosts,
-			...(input.tokenExchangeStyle && input.tokenExchangeStyle !== 'form'
-				? { tokenExchangeStyle: input.tokenExchangeStyle }
-				: {}),
-			...(input.authorization ? { authorization: input.authorization } : {}),
-		},
-		input.provider,
-	)
-	if (!integration) {
+	const parsed = integrationConfigSchema.safeParse({
+		name: input.provider,
+		tokenUrl: input.tokenUrl,
+		apiBaseUrl: input.apiBaseUrl,
+		flow: input.flow,
+		...(input.usePkce == null ? {} : { usePkce: input.usePkce }),
+		clientId: input.clientId,
+		clientSecretSecretName:
+			input.flow === 'confidential'
+				? (input.clientSecretSecretName ?? `${providerKey}ClientSecret`)
+				: null,
+		accessTokenSecretName: input.accessTokenSecretName,
+		refreshTokenSecretName: input.refreshTokenSecretName,
+		requiredHosts: input.allowedHosts,
+		...(input.tokenExchangeStyle && input.tokenExchangeStyle !== 'form'
+			? { tokenExchangeStyle: input.tokenExchangeStyle }
+			: {}),
+		...(input.authorization ? { authorization: input.authorization } : {}),
+	})
+	if (!parsed.success) {
 		throw new Error('OAuth integration configuration is invalid.')
 	}
-	await saveValue({
+	const integration = await upsertIntegration({
 		env: input.env,
 		userId: input.userId,
-		userEmail: input.userEmail,
-		name: buildIntegrationValueName(integration.name),
-		value: JSON.stringify(integration),
-		scope: 'user',
-		description: `OAuth integration config for ${integration.name}`,
-		storageContext: { sessionId: null, appId: null, packageId: null },
+		config: normalizeIntegrationConfig(parsed.data),
 	})
 	return integration.name
 }

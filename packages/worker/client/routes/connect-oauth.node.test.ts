@@ -1,6 +1,5 @@
 import { expect, test } from 'vitest'
 import {
-	buildIntegrationValueName,
 	formatOAuthExchangeFailure,
 	isOAuthExchangeSessionExpired,
 	mergeConnectOauthConfig,
@@ -17,7 +16,7 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 			tokenUrl: 'https://github.com/login/oauth/access_token',
 			apiBaseUrl: 'https://api.github.com/',
 			flow: 'confidential',
-			clientIdValueName: 'github-client-id',
+			clientId: 'github-client-id-value',
 			clientSecretSecretName: 'githubClientSecret',
 			accessTokenSecretName: 'githubAccessToken',
 			refreshTokenSecretName: 'githubRefreshToken',
@@ -38,19 +37,13 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 		apiBaseUrl: 'https://api.github.com/',
 		flow: 'confidential',
 		usePkce: null,
-		clientIdValueName: 'github-client-id',
+		clientId: 'github-client-id-value',
 		clientSecretSecretName: 'githubClientSecret',
 		accessTokenSecretName: 'githubAccessToken',
 		refreshTokenSecretName: 'githubRefreshToken',
 		requiredHosts: ['api.github.com', 'github.com'],
 		authorization: null,
 	})
-	// One canonical value key regardless of how the caller cases the provider.
-	expect(buildIntegrationValueName('GitHub')).toBe('_integration:github')
-	expect(buildIntegrationValueName('github')).toBe('_integration:github')
-	expect(buildIntegrationValueName('Spotify Family')).toBe(
-		'_integration:spotify-family',
-	)
 
 	const githubConfig = mergeConnectOauthConfig({
 		queryConfig: {
@@ -75,7 +68,7 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 			tokenUrl: 'https://github.com/login/oauth/access_token',
 			apiBaseUrl: 'https://api.github.com',
 			flow: 'confidential',
-			clientIdValueName: 'github-client-id',
+			clientId: 'github-client-id-value',
 			clientSecretSecretName: 'githubClientSecret',
 			accessTokenSecretName: 'githubAccessToken',
 			refreshTokenSecretName: 'githubRefreshToken',
@@ -98,7 +91,7 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 		scopeSeparator: ' ',
 		extraAuthorizeParams: { prompt: 'consent' },
 		dashboardUrl: 'https://github.com/settings/developers',
-		clientIdValueName: 'github-client-id',
+		clientId: 'github-client-id-value',
 		clientSecretSecretName: 'githubClientSecret',
 		accessTokenSecretName: 'githubAccessToken',
 		refreshTokenSecretName: 'githubRefreshToken',
@@ -128,7 +121,7 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 			tokenUrl: 'https://oauth2.googleapis.com/token',
 			apiBaseUrl: 'https://www.googleapis.com/youtube/v3',
 			flow: 'confidential',
-			clientIdValueName: 'google-youtube-brand-client-id',
+			clientId: 'google-youtube-brand-client-id-value',
 			clientSecretSecretName: 'googleYoutubeBrandClientSecret',
 			accessTokenSecretName: 'googleYoutubeBrandAccessToken',
 			refreshTokenSecretName: 'googleYoutubeBrandRefreshToken',
@@ -188,7 +181,7 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 			tokenUrl: 'https://oauth2.googleapis.com/token',
 			apiBaseUrl: 'https://www.googleapis.com/youtube/v3',
 			flow: 'confidential',
-			clientIdValueName: 'google-youtube-brand-client-id',
+			clientId: 'google-youtube-brand-client-id-value',
 			clientSecretSecretName: 'googleYoutubeBrandClientSecret',
 			accessTokenSecretName: 'googleYoutubeBrandAccessToken',
 			refreshTokenSecretName: 'googleYoutubeBrandRefreshToken',
@@ -242,7 +235,7 @@ test('connect OAuth helpers parse stored integrations, merge reconnect configs, 
 		flow: 'pkce',
 		usePkce: true,
 		tokenExchangeStyle: 'form',
-		clientIdValueName: 'spotify-client-id',
+		clientId: '',
 		clientSecretSecretName: null,
 		accessTokenSecretName: 'spotifyAccessToken',
 		refreshTokenSecretName: 'spotifyRefreshToken',
@@ -303,7 +296,7 @@ test('connect OAuth derives Notion basic-json exchange and surfaces provider fai
 			tokenUrl: 'https://api.notion.com/v1/oauth/token',
 			apiBaseUrl: 'https://api.notion.com/v1',
 			flow: 'confidential',
-			clientIdValueName: 'notion-client-id',
+			clientId: 'notion-client-id-value',
 			clientSecretSecretName: 'notionClientSecret',
 			accessTokenSecretName: 'notionAccessToken',
 			refreshTokenSecretName: 'notionRefreshToken',
@@ -442,7 +435,7 @@ test('connect OAuth derives Canva confidential + PKCE basic-form defaults and ho
 			apiBaseUrl: 'https://api.canva.com/rest/v1',
 			flow: 'confidential',
 			usePkce: true,
-			clientIdValueName: 'canva-client-id',
+			clientId: 'canva-client-id-value',
 			clientSecretSecretName: 'canvaClientSecret',
 			accessTokenSecretName: 'canvaAccessToken',
 			refreshTokenSecretName: 'canvaRefreshToken',
@@ -479,10 +472,183 @@ test('connect OAuth derives Canva confidential + PKCE basic-form defaults and ho
 		flow: 'confidential',
 		usePkce: true,
 		tokenExchangeStyle: 'basic-form',
+		clientId: 'canva-client-id-value',
 	})
 })
 
-test('session config parsing is strict: usePkce is required and stale shapes are rejected', () => {
+test('shared-app family lookup prefills google-calendar from the google app payload', () => {
+	// integrations.json?name=google-calendar resolves the shared `google` app
+	// (slug ≠ name) and returns this shape; the client must still merge the
+	// client id for a fresh multi-account setup session.
+	const storedFromFamilyLookup = parseStoredIntegrationConfig(
+		{
+			name: 'google-calendar',
+			appSlug: 'google',
+			provider: 'google',
+			tokenUrl: 'https://oauth2.googleapis.com/token',
+			apiBaseUrl: 'https://www.googleapis.com',
+			flow: 'pkce',
+			clientId: 'shared-google-client',
+			clientSecretSecretName: null,
+			accessTokenSecretName: 'google-calendarAccessToken',
+			refreshTokenSecretName: 'google-calendarRefreshToken',
+			requiredHosts: [],
+			authorization: {
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				scopes: [],
+				scopeSeparator: null,
+				extraAuthorizeParams: { access_type: 'offline' },
+			},
+		},
+		null,
+	)
+	expect(storedFromFamilyLookup?.clientId).toBe('shared-google-client')
+
+	const config = mergeConnectOauthConfig({
+		queryConfig: {
+			provider: 'google-calendar',
+			providerKey: 'google-calendar',
+			authorizeHost: 'accounts.google.com',
+			authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+			tokenUrl: 'https://oauth2.googleapis.com/token',
+			apiBaseUrl: 'https://www.googleapis.com',
+			scopes: ['calendar.readonly'],
+			flow: 'pkce',
+			usePkce: null,
+			tokenExchangeStyle: null,
+			scopeSeparator: ' ',
+			extraAuthorizeParams: {},
+			providerSetupInstructions: null,
+			dashboardUrl: null,
+			allowedHosts: ['www.googleapis.com'],
+		},
+		storedIntegration: storedFromFamilyLookup,
+	})
+	expect(config).toMatchObject({
+		provider: 'google-calendar',
+		clientId: 'shared-google-client',
+		tokenUrl: 'https://oauth2.googleapis.com/token',
+		accessTokenSecretName: 'google-calendarAccessToken',
+	})
+})
+
+test('abandoned setup still prefills client id from a connectionless app on a fresh session', () => {
+	// This is the regression: after setup we persist the app (not only session
+	// storage). A later visit with no session snapshot must still see the
+	// client id via the integrations.json?name= lookup payload.
+	const storedFromAppOnlyLookup = parseStoredIntegrationConfig(
+		{
+			name: 'spotify',
+			tokenUrl: 'https://accounts.spotify.com/api/token',
+			apiBaseUrl: null,
+			flow: 'pkce',
+			clientId: 'spotify-client-from-setup',
+			clientSecretSecretName: null,
+			accessTokenSecretName: 'spotifyAccessToken',
+			refreshTokenSecretName: 'spotifyRefreshToken',
+			requiredHosts: [],
+			authorization: {
+				authorizeUrl: 'https://accounts.spotify.com/authorize',
+				scopes: [],
+				scopeSeparator: null,
+				extraAuthorizeParams: {},
+			},
+		},
+		null,
+	)
+	expect(storedFromAppOnlyLookup?.clientId).toBe('spotify-client-from-setup')
+
+	const withPersistedApp = mergeConnectOauthConfig({
+		queryConfig: {
+			provider: 'spotify',
+			providerKey: 'spotify',
+			authorizeHost: 'accounts.spotify.com',
+			authorizeUrl: 'https://accounts.spotify.com/authorize',
+			tokenUrl: 'https://accounts.spotify.com/api/token',
+			apiBaseUrl: null,
+			scopes: ['user-read-playback-state'],
+			flow: 'pkce',
+			usePkce: null,
+			tokenExchangeStyle: null,
+			scopeSeparator: ' ',
+			extraAuthorizeParams: {},
+			providerSetupInstructions: null,
+			dashboardUrl: null,
+			allowedHosts: ['accounts.spotify.com'],
+		},
+		storedIntegration: storedFromAppOnlyLookup,
+	})
+	expect(withPersistedApp?.clientId).toBe('spotify-client-from-setup')
+	expect(
+		summarizeStoredSetupState({
+			flow: 'pkce',
+			clientId: withPersistedApp?.clientId ?? '',
+			hasStoredClientSecret: false,
+		}).isReady,
+	).toBe(true)
+
+	// Without the setup-time app persist, a fresh session has no stored
+	// integration and the client id field is empty — the bug this test guards.
+	const withoutPersistedApp = mergeConnectOauthConfig({
+		queryConfig: {
+			provider: 'spotify',
+			providerKey: 'spotify',
+			authorizeHost: 'accounts.spotify.com',
+			authorizeUrl: 'https://accounts.spotify.com/authorize',
+			tokenUrl: 'https://accounts.spotify.com/api/token',
+			apiBaseUrl: null,
+			scopes: ['user-read-playback-state'],
+			flow: 'pkce',
+			usePkce: null,
+			tokenExchangeStyle: null,
+			scopeSeparator: ' ',
+			extraAuthorizeParams: {},
+			providerSetupInstructions: null,
+			dashboardUrl: null,
+			allowedHosts: ['accounts.spotify.com'],
+		},
+		storedIntegration: null,
+	})
+	expect(withoutPersistedApp?.clientId).toBe('')
+	expect(
+		summarizeStoredSetupState({
+			flow: 'pkce',
+			clientId: withoutPersistedApp?.clientId ?? '',
+			hasStoredClientSecret: false,
+		}).isReady,
+	).toBe(false)
+})
+
+test('connect OAuth keeps slack comma scope separators and extra authorize params', () => {
+	const slackConfig = mergeConnectOauthConfig({
+		queryConfig: {
+			provider: 'slack',
+			providerKey: 'slack',
+			authorizeHost: 'slack.com',
+			authorizeUrl: 'https://slack.com/oauth/v2/authorize',
+			tokenUrl: 'https://slack.com/api/oauth.v2.access',
+			apiBaseUrl: 'https://slack.com/api',
+			scopes: ['channels:read', 'chat:write'],
+			flow: 'confidential',
+			usePkce: null,
+			tokenExchangeStyle: null,
+			scopeSeparator: ',',
+			extraAuthorizeParams: { user_scope: 'identify' },
+			providerSetupInstructions: null,
+			dashboardUrl: null,
+			allowedHosts: ['slack.com'],
+		},
+		storedIntegration: null,
+	})
+	expect(slackConfig).toMatchObject({
+		scopeSeparator: ',',
+		extraAuthorizeParams: { user_scope: 'identify' },
+		usePkce: false,
+		clientSecretSecretName: 'slackClientSecret',
+	})
+})
+
+test('session config parsing is strict: usePkce and clientId are required and stale shapes are rejected', () => {
 	const sessionConfig = {
 		provider: 'spotify',
 		providerKey: 'spotify',
@@ -499,7 +665,7 @@ test('session config parsing is strict: usePkce is required and stale shapes are
 		extraAuthorizeParams: {},
 		providerSetupInstructions: null,
 		dashboardUrl: null,
-		clientIdValueName: 'spotify-client-id',
+		clientId: 'spotify-client-id-value',
 		clientSecretSecretName: null,
 		accessTokenSecretName: 'spotifyAccessToken',
 		refreshTokenSecretName: 'spotifyRefreshToken',
@@ -524,6 +690,17 @@ test('session config parsing is strict: usePkce is required and stale shapes are
 	const { usePkce: _omitted, ...withoutUsePkce } = sessionConfig
 	expect(
 		parseSessionConnectOauthConfig(JSON.stringify(withoutUsePkce)),
+	).toBeNull()
+
+	// Legacy clientIdValueName snapshots are also rejected.
+	expect(
+		parseSessionConnectOauthConfig(
+			JSON.stringify({
+				...sessionConfig,
+				clientId: undefined,
+				clientIdValueName: 'spotify-client-id',
+			}),
+		),
 	).toBeNull()
 
 	expect(parseSessionConnectOauthConfig('not json')).toBeNull()

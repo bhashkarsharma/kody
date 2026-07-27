@@ -1,4 +1,8 @@
 import { expect, test, vi } from 'vitest'
+import type * as IntegrationsService from '#worker/integrations/service.ts'
+
+const createdAt = '1970-01-01T00:00:00.000Z'
+const updatedAt = '1970-01-01T00:00:00.001Z'
 
 const mockModule = vi.hoisted(() => ({
 	readAuthenticatedAppUser: vi.fn(async () => ({
@@ -16,55 +20,150 @@ const mockModule = vi.hoisted(() => ({
 		},
 	})),
 	readAuthSessionResult: async () => ({ session: null, setCookie: null }),
-	listValues: vi.fn(async () => [
+	listJoinedIntegrations: vi.fn(async () => [
 		{
-			name: '_integration:github',
-			scope: 'user',
-			value: JSON.stringify({
-				tokenUrl: 'https://github.com/login/oauth/access_token',
-				apiBaseUrl: 'https://api.github.com',
-				flow: 'confidential',
-				clientIdValueName: 'github-client-id',
+			app: {
+				userId: 'stable-user-1',
+				slug: 'google',
+				provider: 'google',
+				label: null,
+				clientId: 'shared-google-client',
+				clientSecretSecretName: 'googleClientSecret',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				apiBaseUrl: 'https://www.googleapis.com',
+				flow: 'pkce' as const,
+				usePkce: null,
+				tokenExchangeStyle: null,
+				scopeSeparator: null,
+				extraAuthorizeParams: { access_type: 'offline' },
+				createdAt: '1970-01-01T00:00:00.000Z',
+				updatedAt: '1970-01-01T00:00:00.001Z',
+			},
+			connection: {
+				userId: 'stable-user-1',
+				name: 'google',
+				appSlug: 'google',
+				accountLabel: 'Personal',
+				description: '',
+				scopes: ['openid', 'email'],
+				requiredHosts: ['www.googleapis.com'],
+				accessTokenSecretName: 'googleAccessToken',
+				refreshTokenSecretName: 'googleRefreshToken',
+				connectedAt: null,
+				tokenRefreshedAt: null,
+				createdAt: '1970-01-01T00:00:00.000Z',
+				updatedAt: '1970-01-01T00:00:00.001Z',
+			},
+		},
+		{
+			app: {
+				userId: 'stable-user-1',
+				slug: 'google',
+				provider: 'google',
+				label: null,
+				clientId: 'shared-google-client',
+				clientSecretSecretName: 'googleClientSecret',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				apiBaseUrl: 'https://www.googleapis.com',
+				flow: 'pkce' as const,
+				usePkce: null,
+				tokenExchangeStyle: null,
+				scopeSeparator: null,
+				extraAuthorizeParams: { access_type: 'offline' },
+				createdAt: '1970-01-01T00:00:00.000Z',
+				updatedAt: '1970-01-01T00:00:00.001Z',
+			},
+			connection: {
+				userId: 'stable-user-1',
+				name: 'google-calendar',
+				appSlug: 'google',
+				accountLabel: 'Work calendar',
+				description: '',
+				scopes: ['calendar.readonly'],
+				requiredHosts: ['www.googleapis.com'],
+				accessTokenSecretName: 'googleCalendarAccessToken',
+				refreshTokenSecretName: 'googleCalendarRefreshToken',
+				connectedAt: null,
+				tokenRefreshedAt: null,
+				createdAt: '1970-01-01T00:00:00.000Z',
+				updatedAt: '1970-01-01T00:00:00.001Z',
+			},
+		},
+		{
+			app: {
+				userId: 'stable-user-1',
+				slug: 'github',
+				provider: 'github',
+				label: null,
+				clientId: 'github-client-id-value',
 				clientSecretSecretName: 'githubClientSecret',
+				tokenUrl: 'https://github.com/login/oauth/access_token',
+				authorizeUrl: 'https://github.com/login/oauth/authorize',
+				apiBaseUrl: 'https://api.github.com',
+				flow: 'confidential' as const,
+				usePkce: null,
+				tokenExchangeStyle: null,
+				scopeSeparator: null,
+				extraAuthorizeParams: {},
+				createdAt: '1970-01-01T00:00:00.000Z',
+				updatedAt: '1970-01-01T00:00:00.001Z',
+			},
+			connection: {
+				userId: 'stable-user-1',
+				name: 'github',
+				appSlug: 'github',
+				accountLabel: null,
+				description: '',
+				scopes: ['repo', 'read:user'],
+				requiredHosts: ['api.github.com'],
 				accessTokenSecretName: 'githubAccessToken',
 				refreshTokenSecretName: null,
-				requiredHosts: ['api.github.com'],
-				authorization: {
-					authorizeUrl: 'https://github.com/login/oauth/authorize',
-					scopes: ['repo', 'read:user'],
-				},
-			}),
-			description: '',
-			appId: null,
-			createdAt: '1970-01-01T00:00:00.000Z',
-			updatedAt: '1970-01-01T00:00:00.001Z',
-			ttlMs: null,
-		},
-		{
-			name: '_integration:broken',
-			scope: 'user',
-			value: '{',
-			description: '',
-			appId: null,
-			createdAt: '1970-01-01T00:00:00.000Z',
-			updatedAt: '1970-01-01T00:00:00.001Z',
-			ttlMs: null,
-		},
-		{
-			name: 'plain-value',
-			scope: 'user',
-			value: 'ignored',
-			description: '',
-			appId: null,
-			createdAt: '1970-01-01T00:00:00.000Z',
-			updatedAt: '1970-01-01T00:00:00.001Z',
-			ttlMs: null,
+				connectedAt: null,
+				tokenRefreshedAt: null,
+				createdAt: '1970-01-01T00:00:00.000Z',
+				updatedAt: '1970-01-01T00:00:00.001Z',
+			},
 		},
 	]),
+	getJoinedIntegration: vi.fn(async () => ({
+		app: {
+			userId: 'stable-user-1',
+			slug: 'github',
+			provider: 'github',
+			label: null,
+			clientId: 'github-client-id-value',
+			clientSecretSecretName: 'githubClientSecret',
+			tokenUrl: 'https://github.com/login/oauth/access_token',
+			authorizeUrl: 'https://github.com/login/oauth/authorize',
+			apiBaseUrl: 'https://api.github.com',
+			flow: 'confidential' as const,
+			usePkce: null,
+			tokenExchangeStyle: null,
+			scopeSeparator: null,
+			extraAuthorizeParams: {},
+			createdAt: '1970-01-01T00:00:00.000Z',
+			updatedAt: '1970-01-01T00:00:00.001Z',
+		},
+		connection: {
+			userId: 'stable-user-1',
+			name: 'github',
+			appSlug: 'github',
+			accountLabel: null,
+			description: '',
+			scopes: ['repo', 'read:user'],
+			requiredHosts: ['api.github.com'],
+			accessTokenSecretName: 'githubAccessToken',
+			refreshTokenSecretName: null,
+			connectedAt: null,
+			tokenRefreshedAt: null,
+			createdAt: '1970-01-01T00:00:00.000Z',
+			updatedAt: '1970-01-01T00:00:00.001Z',
+		},
+	})),
+	findOauthAppForProviderSetup: vi.fn(async () => null),
 }))
-
-const createdAt = '1970-01-01T00:00:00.000Z'
-const updatedAt = '1970-01-01T00:00:00.001Z'
 
 vi.mock('#app/authenticated-user.ts', () => ({
 	readAuthenticatedAppUser: (...args: Array<unknown>) =>
@@ -84,9 +183,18 @@ vi.mock('#app/ssr-render.tsx', () => ({
 	renderAppPage: async () => new Response('ok'),
 }))
 
-vi.mock('#mcp/values/service.ts', () => ({
-	listValues: (...args: Array<unknown>) => mockModule.listValues(...args),
-}))
+vi.mock('#worker/integrations/service.ts', async (importOriginal) => {
+	const actual = await importOriginal<typeof IntegrationsService>()
+	return {
+		...actual,
+		listJoinedIntegrations: (...args: Array<unknown>) =>
+			mockModule.listJoinedIntegrations(...args),
+		getJoinedIntegration: (...args: Array<unknown>) =>
+			mockModule.getJoinedIntegration(...args),
+		findOauthAppForProviderSetup: (...args: Array<unknown>) =>
+			mockModule.findOauthAppForProviderSetup(...args),
+	}
+})
 
 const { createAccountIntegrationsApiHandler } =
 	await import('./account-integrations.ts')
@@ -98,7 +206,7 @@ function createEnv() {
 	} as Env
 }
 
-test('integrations API lists valid user-scoped OAuth integrations and skips malformed values', async () => {
+test('integrations API lists connections with app grouping metadata and never exposes token values', async () => {
 	const handler = createAccountIntegrationsApiHandler(createEnv())
 	const response = await handler.handler({
 		request: new Request('https://example.com/account/integrations.json'),
@@ -107,24 +215,26 @@ test('integrations API lists valid user-scoped OAuth integrations and skips malf
 
 	expect(response.status).toBe(200)
 	expect(response.headers.get('Cache-Control')).toBe('no-store')
-	expect(mockModule.listValues).toHaveBeenCalledWith({
+	expect(mockModule.listJoinedIntegrations).toHaveBeenCalledWith({
 		env: expect.any(Object),
 		userId: 'stable-user-1',
-		scope: 'user',
-		storageContext: { sessionId: null, appId: null },
 	})
-	await expect(response.json()).resolves.toEqual({
+	const payload = await response.json()
+	expect(payload).toEqual({
 		ok: true,
 		email: 'user@example.com',
 		username: 'test-user',
 		integrations: [
 			{
 				name: 'github',
-				valueName: '_integration:github',
+				appSlug: 'github',
+				provider: 'github',
+				appLabel: null,
+				accountLabel: null,
 				tokenUrl: 'https://github.com/login/oauth/access_token',
 				apiBaseUrl: 'https://api.github.com',
 				flow: 'confidential',
-				clientIdValueName: 'github-client-id',
+				clientId: 'github-client-id-value',
 				clientSecretSecretName: 'githubClientSecret',
 				accessTokenSecretName: 'githubAccessToken',
 				refreshTokenSecretName: null,
@@ -138,6 +248,223 @@ test('integrations API lists valid user-scoped OAuth integrations and skips malf
 				createdAt,
 				updatedAt,
 			},
+			{
+				name: 'google',
+				appSlug: 'google',
+				provider: 'google',
+				appLabel: null,
+				accountLabel: 'Personal',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				flow: 'pkce',
+				clientId: 'shared-google-client',
+				clientSecretSecretName: 'googleClientSecret',
+				accessTokenSecretName: 'googleAccessToken',
+				refreshTokenSecretName: 'googleRefreshToken',
+				requiredHosts: ['www.googleapis.com'],
+				authorization: {
+					authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+					scopes: ['openid', 'email'],
+					scopeSeparator: null,
+					extraAuthorizeParams: { access_type: 'offline' },
+				},
+				createdAt,
+				updatedAt,
+			},
+			{
+				name: 'google-calendar',
+				appSlug: 'google',
+				provider: 'google',
+				appLabel: null,
+				accountLabel: 'Work calendar',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				flow: 'pkce',
+				clientId: 'shared-google-client',
+				clientSecretSecretName: 'googleClientSecret',
+				accessTokenSecretName: 'googleCalendarAccessToken',
+				refreshTokenSecretName: 'googleCalendarRefreshToken',
+				requiredHosts: ['www.googleapis.com'],
+				authorization: {
+					authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+					scopes: ['calendar.readonly'],
+					scopeSeparator: null,
+					extraAuthorizeParams: { access_type: 'offline' },
+				},
+				createdAt,
+				updatedAt,
+			},
 		],
+	})
+	// Secret *names* are fine in the payload; raw token values must never appear.
+	expect(JSON.stringify(payload)).not.toMatch(
+		/"access_token"\s*:|"refresh_token"\s*:/,
+	)
+	const googleConnections = payload.integrations.filter(
+		(entry: { appSlug: string }) => entry.appSlug === 'google',
+	)
+	expect(googleConnections).toHaveLength(2)
+	expect(
+		new Set(
+			googleConnections.map((entry: { clientId: string }) => entry.clientId),
+		),
+	).toEqual(new Set(['shared-google-client']))
+})
+
+test('integrations API returns one connection by name for the connect OAuth flow', async () => {
+	const handler = createAccountIntegrationsApiHandler(createEnv())
+	const response = await handler.handler({
+		request: new Request(
+			'https://example.com/account/integrations.json?name=GitHub',
+		),
+		params: {},
+	} as never)
+
+	expect(response.status).toBe(200)
+	expect(mockModule.getJoinedIntegration).toHaveBeenCalledWith({
+		env: expect.any(Object),
+		userId: 'stable-user-1',
+		name: 'GitHub',
+	})
+	await expect(response.json()).resolves.toEqual({
+		ok: true,
+		integration: {
+			name: 'github',
+			appSlug: 'github',
+			provider: 'github',
+			appLabel: null,
+			accountLabel: null,
+			tokenUrl: 'https://github.com/login/oauth/access_token',
+			apiBaseUrl: 'https://api.github.com',
+			flow: 'confidential',
+			clientId: 'github-client-id-value',
+			clientSecretSecretName: 'githubClientSecret',
+			accessTokenSecretName: 'githubAccessToken',
+			refreshTokenSecretName: null,
+			requiredHosts: ['api.github.com'],
+			authorization: {
+				authorizeUrl: 'https://github.com/login/oauth/authorize',
+				scopes: ['repo', 'read:user'],
+				scopeSeparator: null,
+				extraAuthorizeParams: {},
+			},
+			createdAt,
+			updatedAt,
+		},
+	})
+})
+
+test('integrations API returns null when a named connection is missing', async () => {
+	mockModule.getJoinedIntegration.mockResolvedValueOnce(null)
+	mockModule.findOauthAppForProviderSetup.mockResolvedValueOnce(null)
+	const handler = createAccountIntegrationsApiHandler(createEnv())
+	const response = await handler.handler({
+		request: new Request(
+			'https://example.com/account/integrations.json?name=missing',
+		),
+		params: {},
+	} as never)
+	expect(response.status).toBe(200)
+	await expect(response.json()).resolves.toEqual({
+		ok: true,
+		integration: null,
+	})
+})
+
+test('integrations API falls back to provider-setup app resolution so abandoned setup still returns the client id', async () => {
+	mockModule.getJoinedIntegration.mockResolvedValueOnce(null)
+	mockModule.findOauthAppForProviderSetup.mockResolvedValueOnce({
+		userId: 'stable-user-1',
+		slug: 'spotify',
+		provider: 'spotify',
+		label: null,
+		clientId: 'spotify-client-from-setup',
+		clientSecretSecretName: null,
+		tokenUrl: 'https://accounts.spotify.com/api/token',
+		authorizeUrl: 'https://accounts.spotify.com/authorize',
+		apiBaseUrl: null,
+		flow: 'pkce' as const,
+		usePkce: null,
+		tokenExchangeStyle: null,
+		scopeSeparator: null,
+		extraAuthorizeParams: {},
+		createdAt,
+		updatedAt,
+	})
+	const handler = createAccountIntegrationsApiHandler(createEnv())
+	const response = await handler.handler({
+		request: new Request(
+			'https://example.com/account/integrations.json?name=spotify',
+		),
+		params: {},
+	} as never)
+	expect(response.status).toBe(200)
+	await expect(response.json()).resolves.toMatchObject({
+		ok: true,
+		integration: {
+			name: 'spotify',
+			appSlug: 'spotify',
+			clientId: 'spotify-client-from-setup',
+			tokenUrl: 'https://accounts.spotify.com/api/token',
+			flow: 'pkce',
+			authorization: {
+				authorizeUrl: 'https://accounts.spotify.com/authorize',
+				scopes: [],
+			},
+		},
+	})
+	expect(mockModule.findOauthAppForProviderSetup).toHaveBeenCalledWith({
+		env: expect.any(Object),
+		userId: 'stable-user-1',
+		name: 'spotify',
+	})
+})
+
+test('integrations API prefills a shared family app when setting up google-calendar', async () => {
+	mockModule.getJoinedIntegration.mockResolvedValueOnce(null)
+	mockModule.findOauthAppForProviderSetup.mockResolvedValueOnce({
+		userId: 'stable-user-1',
+		slug: 'google',
+		provider: 'google',
+		label: null,
+		clientId: 'shared-google-client',
+		clientSecretSecretName: null,
+		tokenUrl: 'https://oauth2.googleapis.com/token',
+		authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+		apiBaseUrl: 'https://www.googleapis.com',
+		flow: 'pkce' as const,
+		usePkce: null,
+		tokenExchangeStyle: null,
+		scopeSeparator: null,
+		extraAuthorizeParams: { access_type: 'offline' },
+		createdAt,
+		updatedAt,
+	})
+	const handler = createAccountIntegrationsApiHandler(createEnv())
+	const response = await handler.handler({
+		request: new Request(
+			'https://example.com/account/integrations.json?name=google-calendar',
+		),
+		params: {},
+	} as never)
+	expect(response.status).toBe(200)
+	const payload = await response.json()
+	expect(payload).toMatchObject({
+		ok: true,
+		integration: {
+			name: 'google-calendar',
+			appSlug: 'google',
+			clientId: 'shared-google-client',
+			tokenUrl: 'https://oauth2.googleapis.com/token',
+			accessTokenSecretName: 'google-calendarAccessToken',
+		},
+	})
+	expect(JSON.stringify(payload)).not.toMatch(
+		/"access_token"\s*:|"refresh_token"\s*:|sk_|secret_value/,
+	)
+	expect(mockModule.findOauthAppForProviderSetup).toHaveBeenCalledWith({
+		env: expect.any(Object),
+		userId: 'stable-user-1',
+		name: 'google-calendar',
 	})
 })

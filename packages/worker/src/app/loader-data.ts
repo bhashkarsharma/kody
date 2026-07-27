@@ -579,15 +579,26 @@ export type EmailVerificationLoaderData =
 
 export type AccountIntegrationListItem = {
 	name: string
-	valueName: string
+	appSlug: string
+	provider: string
+	appLabel: string | null
+	accountLabel: string | null
+	/** Empty when a provider-family prefill could not agree on token URL. */
 	tokenUrl: string
 	apiBaseUrl?: string | null
-	flow: 'pkce' | 'confidential'
-	clientIdValueName: string
+	/**
+	 * Omitted when a provider-family prefill could not agree on flow so the
+	 * connect UI keeps the query/default flow instead of inventing one.
+	 */
+	flow?: 'pkce' | 'confidential'
+	usePkce?: boolean | null
+	/** Empty when a provider-family prefill could not agree on client id. */
+	clientId: string
 	clientSecretSecretName?: string | null
 	accessTokenSecretName: string
 	refreshTokenSecretName?: string | null
 	requiredHosts?: Array<string>
+	tokenExchangeStyle?: 'form' | 'basic-json' | 'basic-form' | null
 	authorization?: {
 		authorizeUrl: string
 		scopes: Array<string>
@@ -603,6 +614,11 @@ export type AccountIntegrationsLoaderData = {
 	email: string
 	username: string
 	integrations: Array<AccountIntegrationListItem>
+}
+
+export type AccountIntegrationDetailLoaderData = {
+	ok: true
+	integration: AccountIntegrationListItem | null
 }
 
 export type AccountMcpServerListItem = {

@@ -58,7 +58,7 @@ export const integrationConfigSchema = z.object({
 	 * `usePkce: true` with `confidential` flow.
 	 */
 	usePkce: z.boolean().optional().nullable(),
-	clientIdValueName: z.string().min(1),
+	clientId: z.string().min(1),
 	clientSecretSecretName: z.string().min(1).optional().nullable(),
 	accessTokenSecretName: z.string().min(1),
 	refreshTokenSecretName: z.string().min(1).optional().nullable(),
@@ -77,7 +77,7 @@ export const integrationSaveSchema = z
 		apiBaseUrl: z.string().url().nullable().optional(),
 		flow: z.enum(integrationFlowValues).optional(),
 		usePkce: z.boolean().nullable().optional(),
-		clientIdValueName: z.string().min(1).optional(),
+		clientId: z.string().min(1).optional(),
 		clientSecretSecretName: z.string().min(1).nullable().optional(),
 		accessTokenSecretName: z.string().min(1).optional(),
 		refreshTokenSecretName: z.string().min(1).nullable().optional(),
@@ -92,6 +92,29 @@ export type IntegrationSaveInput = z.infer<typeof integrationSaveSchema>
 export function normalizeIntegrationConfig(
 	value: IntegrationConfig,
 ): IntegrationConfig {
+	const normalized = normalizeIntegrationConfigFields(value)
+	return {
+		...normalized,
+		clientId: value.clientId.trim(),
+	}
+}
+
+function normalizeIntegrationConfigFields(
+	value: Pick<
+		IntegrationConfig,
+		| 'name'
+		| 'tokenUrl'
+		| 'apiBaseUrl'
+		| 'flow'
+		| 'usePkce'
+		| 'clientSecretSecretName'
+		| 'accessTokenSecretName'
+		| 'refreshTokenSecretName'
+		| 'requiredHosts'
+		| 'tokenExchangeStyle'
+		| 'authorization'
+	>,
+) {
 	const authorization = value.authorization
 		? normalizeIntegrationAuthorization(value.authorization)
 		: null
@@ -109,7 +132,6 @@ export function normalizeIntegrationConfig(
 		apiBaseUrl: value.apiBaseUrl?.trim() || null,
 		flow: value.flow,
 		...(usePkce == null ? {} : { usePkce }),
-		clientIdValueName: value.clientIdValueName.trim(),
 		clientSecretSecretName: value.clientSecretSecretName?.trim() || null,
 		accessTokenSecretName: value.accessTokenSecretName.trim(),
 		refreshTokenSecretName: value.refreshTokenSecretName?.trim() || null,
@@ -119,7 +141,7 @@ export function normalizeIntegrationConfig(
 	}
 }
 
-function normalizeIntegrationAuthorization(
+export function normalizeIntegrationAuthorization(
 	value: IntegrationAuthorization,
 ): IntegrationAuthorization {
 	const scopeSeparator =
@@ -155,51 +177,6 @@ export function mergeIntegrationConfig(
 		...update,
 		name: update.name,
 	})
-}
-
-const integrationValuePrefix = '_integration:'
-
-export function buildIntegrationValueName(name: string) {
-	return `${integrationValuePrefix}${canonicalIntegrationName(name)}`
-}
-
-export function parseIntegrationValueName(name: string) {
-	if (!name.startsWith(integrationValuePrefix)) return null
-	const integrationName = name.slice(integrationValuePrefix.length)
-	// Only canonical keys count as integrations; a non-canonical suffix cannot
-	// have been written by any current write path.
-	if (
-		integrationName.length === 0 ||
-		integrationName !== canonicalIntegrationName(integrationName)
-	) {
-		return null
-	}
-	return integrationName
-}
-
-export function parseIntegrationConfig(
-	value: unknown,
-	fallbackName: string | null,
-) {
-	const record =
-		value && typeof value === 'object' && !Array.isArray(value) ? value : null
-	const configCandidate =
-		record && typeof (record as Record<string, unknown>).name === 'string'
-			? record
-			: record && fallbackName
-				? { ...record, name: fallbackName }
-				: record
-	const parsed = integrationConfigSchema.safeParse(configCandidate)
-	if (parsed.success) return normalizeIntegrationConfig(parsed.data)
-	return null
-}
-
-export function parseIntegrationJson(raw: string) {
-	try {
-		return JSON.parse(raw)
-	} catch {
-		return null
-	}
 }
 
 function isHttpUrl(raw: string) {

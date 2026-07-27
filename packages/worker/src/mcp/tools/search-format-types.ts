@@ -222,7 +222,7 @@ export type SlimSearchMatch =
 			tokenUrl: string
 			apiBaseUrl: string | null
 			requiredHosts: Array<string>
-			clientIdValueName: string
+			clientId: string
 			clientSecretSecretName: string | null
 			accessTokenSecretName: string
 			refreshTokenSecretName: string | null
@@ -372,7 +372,7 @@ export type SearchEntityDetailStructured =
 			flow: IntegrationConfig['flow']
 			tokenUrl: string
 			apiBaseUrl: string | null
-			clientIdValueName: string
+			clientId: string
 			clientSecretSecretName: string | null
 			accessTokenSecretName: string
 			refreshTokenSecretName: string | null
@@ -421,7 +421,6 @@ export type SearchEntityDetail =
 			id: string
 			title: string
 			description: string
-			row: ValueMetadata
 			config: IntegrationConfig
 			relatedPackageSuggestions?: Array<RelatedIntegrationPackageSuggestion>
 	  }
@@ -481,7 +480,7 @@ export type SearchMatch =
 			tokenUrl: string
 			apiBaseUrl: string | null
 			requiredHosts: Array<string>
-			clientIdValueName: string
+			clientId: string
 			clientSecretSecretName: string | null
 			accessTokenSecretName: string
 			refreshTokenSecretName: string | null
