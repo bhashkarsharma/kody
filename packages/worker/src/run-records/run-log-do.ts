@@ -32,7 +32,7 @@ const metaRunCountKey = 'run_count'
 const metaFinishesSinceRetentionKey = 'finishes_since_retention'
 const metaSchemaVersionKey = 'schema_version'
 /** Bump when initializeSchema's DDL set changes; warm objects skip DDL. */
-const runLogSchemaVersion = 2
+const runLogSchemaVersion = 4
 
 const staleRunningErrorName = 'Interrupted'
 const staleRunningErrorMessage =
@@ -319,6 +319,15 @@ class RunLogBase extends DurableObject<Env> {
 		this.ctx.storage.sql.exec(
 			`CREATE INDEX IF NOT EXISTS idx_runs_name_started_id ON runs(name, started_at DESC, id DESC)`,
 		)
+		// Non-unique: package invocations / workflows may reuse the same
+		// idempotency key across history. Keyed execute claim/replay stays
+		// race-free because claimRun select-then-insert runs in one DO RPC.
+		// Drop any unique index from schema v3 so warm objects can migrate.
+		this.ctx.storage.sql.exec(`DROP INDEX IF EXISTS idx_runs_idempotency_key`)
+		this.ctx.storage.sql.exec(
+			`CREATE INDEX IF NOT EXISTS idx_runs_idempotency_key
+			ON runs(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		)
 		this.ctx.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS run_logs (
 				run_id TEXT NOT NULL,
@@ -386,6 +395,50 @@ class RunLogBase extends DurableObject<Env> {
 			)
 			.toArray()[0]
 		return row != null
+	}
+
+	private findRunByIdempotencyKey(input: {
+		idempotencyKey: string
+		surface?: RunSurface | null
+	}): RunRecord | null {
+		// Prefer an in-flight row, then the newest terminal row, so execute
+		// replay sees the attempt that still owns the key. Scope by surface
+		// when provided so execute keys cannot collide with package/workflow
+		// history that reused the same string.
+		const clauses = ['r.idempotency_key = ?']
+		const params: Array<SqlStorageValue> = [input.idempotencyKey]
+		if (input.surface) {
+			clauses.push('r.surface = ?')
+			params.push(input.surface)
+		}
+		const row = this.ctx.storage.sql
+			.exec<Record<string, SqlStorageValue>>(
+				`SELECT r.*,
+					(SELECT COUNT(*) FROM run_logs l WHERE l.run_id = r.id) AS log_count
+				FROM runs r
+				WHERE ${clauses.join(' AND ')}
+				ORDER BY (r.status = 'running') DESC, r.started_at DESC, r.id DESC
+				LIMIT 1`,
+				...params,
+			)
+			.toArray()[0]
+		if (!row) return null
+		return mapRunRow(row, Number(row['log_count'] ?? 0) || 0)
+	}
+
+	private insertRunningRun(run: RunLogRowInput) {
+		const existed = this.runExists(run.id)
+		if (!existed) {
+			this.upsertRun(run, 'ignore')
+			// INSERT OR IGNORE: count only when the row is new.
+			if (this.runExists(run.id)) {
+				this.adjustRunCount(1)
+				// New row ⇒ future age/stale work exists; idle conclusion is stale.
+				// Clear armed too: a new `running` row may need an earlier wake.
+				this.retentionIdleConfirmed = false
+				this.retentionAlarmArmed = false
+			}
+		}
 	}
 
 	private upsertRun(run: RunLogRowInput, mode: 'ignore' | 'replace') {
@@ -675,20 +728,96 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	async startRun(input: { run: RunLogRowInput }): Promise<{ ok: true }> {
-		const existed = this.runExists(input.run.id)
-		if (!existed) {
-			this.upsertRun(input.run, 'ignore')
-			// INSERT OR IGNORE: count only when the row is new.
-			if (this.runExists(input.run.id)) {
-				this.adjustRunCount(1)
-				// New row ⇒ future age/stale work exists; idle conclusion is stale.
-				// Clear armed too: a new `running` row may need an earlier wake.
-				this.retentionIdleConfirmed = false
-				this.retentionAlarmArmed = false
-			}
-		}
+		this.insertRunningRun(input.run)
 		await this.ensureRetentionAlarm()
 		return { ok: true }
+	}
+
+	/**
+	 * Atomically claim an idempotency key (or return the existing owner). DO
+	 * RPCs are serialized, so select-then-insert here is race-free without a
+	 * separate lock. Callers that need keyed execute replay use this instead of
+	 * fire-and-forget `startRun`.
+	 */
+	async claimRun(input: { run: RunLogRowInput }): Promise<{
+		claimed: boolean
+		run: RunRecord
+	}> {
+		const key = input.run.idempotencyKey?.trim() || null
+		if (key) {
+			const existing = this.findRunByIdempotencyKey({
+				idempotencyKey: key,
+				surface: input.run.surface,
+			})
+			if (existing) {
+				return { claimed: false, run: existing }
+			}
+		}
+		this.insertRunningRun(input.run)
+		await this.ensureRetentionAlarm()
+		const inserted =
+			(await this.getRun({ runId: input.run.id }))?.run ??
+			mapRunRow(
+				{
+					id: input.run.id,
+					surface: input.run.surface,
+					status: input.run.status,
+					name: input.run.name,
+					package_id: input.run.packageId,
+					package_kody_id: input.run.kodyId,
+					source_id: input.run.sourceId,
+					published_commit: input.run.publishedCommit,
+					storage_id: input.run.storageId,
+					job_id: input.run.jobId,
+					workflow_id: input.run.workflowId,
+					invocation_id: input.run.invocationId,
+					session_id: input.run.sessionId,
+					idempotency_key: input.run.idempotencyKey,
+					parent_run_id: input.run.parentRunId,
+					started_at: input.run.startedAt,
+					finished_at: input.run.finishedAt,
+					duration_ms: input.run.durationMs,
+					error_name: input.run.errorName,
+					error_message: input.run.errorMessage,
+					metadata_json: input.run.metadataJson,
+				},
+				0,
+			)
+		return { claimed: true, run: inserted }
+	}
+
+	async getRunByIdempotencyKey(input: {
+		idempotencyKey: string
+		surface?: RunSurface | null
+	}): Promise<RunRecord | null> {
+		const key = input.idempotencyKey.trim()
+		if (!key) return null
+		return this.findRunByIdempotencyKey({
+			idempotencyKey: key,
+			surface: input.surface ?? null,
+		})
+	}
+
+	/**
+	 * Delete a still-`running` row (and its logs) so a failed setup path can
+	 * release an idempotency key without poisoning later retries.
+	 */
+	async deleteRunIfRunning(input: {
+		runId: string
+	}): Promise<{ deleted: boolean }> {
+		const row = this.ctx.storage.sql
+			.exec<{ status: string }>(
+				`SELECT status FROM runs WHERE id = ? LIMIT 1`,
+				input.runId,
+			)
+			.toArray()[0]
+		if (!row || row.status !== 'running') {
+			return { deleted: false }
+		}
+		this.deleteRunsByIds([input.runId])
+		this.retentionIdleConfirmed = false
+		await this.ensureRetentionAlarm()
+		return { deleted: true }
 	}
 
 	async finishRun(input: {
@@ -929,6 +1058,10 @@ export const RunLog = Sentry.instrumentDurableObjectWithSentry(
 
 export type RunLogRpc = {
 	startRun: (input: { run: RunLogRowInput }) => Promise<{ ok: true }>
+	claimRun: (input: { run: RunLogRowInput }) => Promise<{
+		claimed: boolean
+		run: RunRecord
+	}>
 	finishRun: (input: {
 		run: RunLogRowInput
 		logs: Array<RunLogEntryInput>
@@ -937,6 +1070,13 @@ export type RunLogRpc = {
 	getRun: (input: {
 		runId: string
 	}) => Promise<{ run: RunRecord; logs: Array<RunRecordLog> } | null>
+	getRunByIdempotencyKey: (input: {
+		idempotencyKey: string
+		surface?: RunSurface | null
+	}) => Promise<RunRecord | null>
+	deleteRunIfRunning: (input: {
+		runId: string
+	}) => Promise<{ deleted: boolean }>
 	summarize: (input: { since: string }) => Promise<RunRecordSummary>
 	listStorageIds: () => Promise<Array<string>>
 	exportRuns: (input: ExportRunsInput) => Promise<{
