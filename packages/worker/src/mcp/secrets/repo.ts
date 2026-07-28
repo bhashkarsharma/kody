@@ -85,15 +85,15 @@ export async function getSecretEntry(input: {
 	return row ? mapSecretEntryRow(row) : null
 }
 
-export async function upsertSecretEntry(input: {
+function prepareUpsertSecretEntryStatement(input: {
 	db: D1Database
 	row: Omit<SecretEntryRow, 'created_at' | 'updated_at'> & {
 		created_at?: string
 		updated_at?: string
 	}
-}): Promise<void> {
+}): D1PreparedStatement {
 	const now = new Date().toISOString()
-	await input.db
+	return input.db
 		.prepare(
 			`INSERT INTO secret_entries (
 				bucket_id, name, description, encrypted_value, allowed_hosts, allowed_capabilities, allowed_packages, created_at, updated_at
@@ -118,10 +118,41 @@ export async function upsertSecretEntry(input: {
 			input.row.created_at ?? now,
 			input.row.updated_at ?? now,
 		)
-		.run()
 }
 
-export async function updateApprovedUserSecretEntryForPackage(input: {
+export async function upsertSecretEntry(input: {
+	db: D1Database
+	row: Omit<SecretEntryRow, 'created_at' | 'updated_at'> & {
+		created_at?: string
+		updated_at?: string
+	}
+}): Promise<void> {
+	await prepareUpsertSecretEntryStatement(input).run()
+}
+
+/**
+ * Persist multiple secret entry upserts in one D1 batch so a worker eviction
+ * cannot leave a partial write. Statement order is preserved (callers that
+ * rotate OAuth refresh tokens must put the refresh-token write first).
+ */
+export async function upsertSecretEntriesAtomically(input: {
+	db: D1Database
+	rows: Array<
+		Omit<SecretEntryRow, 'created_at' | 'updated_at'> & {
+			created_at?: string
+			updated_at?: string
+		}
+	>
+}): Promise<void> {
+	if (input.rows.length === 0) return
+	await input.db.batch(
+		input.rows.map((row) =>
+			prepareUpsertSecretEntryStatement({ db: input.db, row }),
+		),
+	)
+}
+
+function prepareUpdateApprovedUserSecretEntryForPackageStatement(input: {
 	db: D1Database
 	userId: string
 	packageId: string
@@ -129,8 +160,8 @@ export async function updateApprovedUserSecretEntryForPackage(input: {
 	description: string
 	encryptedValue: string
 	updatedAt: string
-}): Promise<boolean> {
-	const result = await input.db
+}): D1PreparedStatement {
+	return input.db
 		.prepare(
 			`UPDATE secret_entries
 			SET description = ?, encrypted_value = ?, updated_at = ?
@@ -156,8 +187,123 @@ export async function updateApprovedUserSecretEntryForPackage(input: {
 			input.userId,
 			input.packageId,
 		)
-		.run()
+}
+
+export async function updateApprovedUserSecretEntryForPackage(input: {
+	db: D1Database
+	userId: string
+	packageId: string
+	name: string
+	description: string
+	encryptedValue: string
+	updatedAt: string
+}): Promise<boolean> {
+	const result =
+		await prepareUpdateApprovedUserSecretEntryForPackageStatement(input).run()
 	return (result.meta.changes ?? 0) > 0
+}
+
+/**
+ * Atomically update multiple package-approved user secrets. Uses one UPDATE so
+ * either every named secret is rewritten or none are (fail-closed when any
+ * secret is missing or lacks the package in `allowed_packages`). Statement
+ * order of `updates` is preserved in the CASE bindings for determinism.
+ */
+export async function updateApprovedUserSecretEntriesForPackageAtomically(input: {
+	db: D1Database
+	userId: string
+	packageId: string
+	updates: Array<{
+		name: string
+		description: string
+		encryptedValue: string
+		updatedAt: string
+	}>
+}): Promise<void> {
+	if (input.updates.length === 0) return
+	if (input.updates.length === 1) {
+		const only = input.updates[0]
+		if (!only) return
+		const updated = await updateApprovedUserSecretEntryForPackage({
+			db: input.db,
+			userId: input.userId,
+			packageId: input.packageId,
+			name: only.name,
+			description: only.description,
+			encryptedValue: only.encryptedValue,
+			updatedAt: only.updatedAt,
+		})
+		if (!updated) {
+			throw new Error('package cannot mutate one or more secrets')
+		}
+		return
+	}
+
+	const names = input.updates.map((update) => update.name)
+	const namePlaceholders = names.map(() => '?').join(', ')
+	const descriptionCase = names.map(() => 'WHEN ? THEN ?').join(' ')
+	const encryptedCase = names.map(() => 'WHEN ? THEN ?').join(' ')
+	const updatedAt = input.updates[0]?.updatedAt
+	if (!updatedAt) {
+		throw new Error('At least one secret update is required.')
+	}
+
+	const result = await input.db
+		.prepare(
+			`UPDATE secret_entries
+			SET
+				description = CASE name ${descriptionCase} ELSE description END,
+				encrypted_value = CASE name ${encryptedCase} ELSE encrypted_value END,
+				updated_at = ?
+			WHERE name IN (${namePlaceholders})
+				AND bucket_id = (
+					SELECT id
+					FROM secret_buckets
+					WHERE user_id = ? AND scope = 'user' AND binding_key = ''
+					LIMIT 1
+				)
+				AND json_valid(allowed_packages)
+				AND EXISTS (
+					SELECT 1
+					FROM json_each(allowed_packages)
+					WHERE value = ?
+				)
+				AND (
+					SELECT COUNT(*)
+					FROM secret_entries e
+					JOIN secret_buckets b ON b.id = e.bucket_id
+					WHERE b.user_id = ?
+						AND b.scope = 'user'
+						AND b.binding_key = ''
+						AND e.name IN (${namePlaceholders})
+						AND json_valid(e.allowed_packages)
+						AND EXISTS (
+							SELECT 1
+							FROM json_each(e.allowed_packages)
+							WHERE value = ?
+						)
+				) = ?`,
+		)
+		.bind(
+			...input.updates.flatMap((update) => [update.name, update.description]),
+			...input.updates.flatMap((update) => [
+				update.name,
+				update.encryptedValue,
+			]),
+			updatedAt,
+			...names,
+			input.userId,
+			input.packageId,
+			input.userId,
+			...names,
+			input.packageId,
+			names.length,
+		)
+		.run()
+
+	if ((result.meta.changes ?? 0) !== names.length) {
+		throw new Error('package cannot mutate one or more secrets')
+	}
 }
 
 export async function deleteSecretEntry(input: {

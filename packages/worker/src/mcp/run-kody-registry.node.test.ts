@@ -2242,6 +2242,7 @@ test('runBundledModuleWithRegistry injects OAuth helper prelude when execute hel
 					integration_get: async () => ({}),
 					value_get: async () => ({}),
 					secret_set: async () => ({}),
+					secret_set_many: async () => ({}),
 				},
 			},
 		)
