@@ -20,10 +20,7 @@ import {
 	type PermissionString,
 	type RoleName,
 } from '#worker/identity/permissions.ts'
-import {
-	displayNameFromEmail,
-	getUsernameFormatValidationError,
-} from '#worker/identity/username.ts'
+import { resolveDisplayName } from '#worker/identity/username.ts'
 import { createDb, usersTable } from '#worker/db.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
 import { type McpUserContext } from '@kody-internal/shared/chat.ts'
@@ -49,12 +46,6 @@ export type ResolvedRequestAuth = {
 }
 
 const requestAuthStore = new WeakMap<Request, Promise<ResolvedRequestAuth>>()
-
-function getDisplayName(input: { email: string; username: string }) {
-	return getUsernameFormatValidationError(input.username)
-		? displayNameFromEmail(input.email)
-		: input.username
-}
 
 async function resolveRequestAuth(
 	request: Request,
@@ -85,14 +76,10 @@ async function resolveRequestAuth(
 		}
 	}
 
-	const passwordChangedAtRaw = userRecord.password_changed_at?.trim() ?? ''
-	const passwordChangedAtMs = parsePasswordChangedAtMs(passwordChangedAtRaw)
-	// Non-empty but unparseable must fail closed — do not treat as "never changed".
 	if (
-		(passwordChangedAtRaw !== '' && passwordChangedAtMs === null) ||
-		isAuthSessionInvalidatedByPasswordChange({
+		isSessionInvalidatedByStoredPasswordChange({
 			issuedAt,
-			passwordChangedAtMs,
+			storedPasswordChangedAt: userRecord.password_changed_at,
 		})
 	) {
 		return {
@@ -114,7 +101,7 @@ async function resolveRequestAuth(
 	}
 
 	const stableUserId = resolveUserStableId(userRecord)
-	const displayName = getDisplayName({
+	const displayName = resolveDisplayName({
 		email: userRecord.email,
 		username: userRecord.username,
 	})
@@ -171,6 +158,33 @@ export function parsePasswordChangedAtMs(value: string | null | undefined) {
 	if (!Number.isFinite(ms)) return null
 	const hasFractionalSeconds = /(?:[T ])\d{2}:\d{2}:\d{2}\.\d/.test(normalized)
 	return hasFractionalSeconds ? ms : ms + 999
+}
+
+/**
+ * True when a session predates the account's stored `password_changed_at`.
+ *
+ * Every session flavor (browser `kody_session`, package-app `kody_pkg_session`)
+ * must share this decision, so a password reset can never revoke one and leave
+ * another alive.
+ *
+ * Fail-closed behavior is scoped to accounts that have a stored timestamp: a
+ * value that exists but cannot be parsed invalidates the session, and so does a
+ * missing `issuedAt`. An account that has never changed its password keeps
+ * sessions with no `issuedAt` — cookies issued before `issuedAt` existed stay
+ * valid until a password change, which is the documented tradeoff in the
+ * "Accepted residual risks" section of `docs/contributing/security.md`.
+ */
+export function isSessionInvalidatedByStoredPasswordChange(input: {
+	issuedAt: number | undefined
+	storedPasswordChangedAt: string | null | undefined
+}): boolean {
+	const passwordChangedAtRaw = input.storedPasswordChangedAt?.trim() ?? ''
+	const passwordChangedAtMs = parsePasswordChangedAtMs(passwordChangedAtRaw)
+	if (passwordChangedAtRaw !== '' && passwordChangedAtMs === null) return true
+	return isAuthSessionInvalidatedByPasswordChange({
+		issuedAt: input.issuedAt,
+		passwordChangedAtMs,
+	})
 }
 
 export function loadResolvedRequestAuth(

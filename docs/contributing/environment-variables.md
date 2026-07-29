@@ -85,6 +85,29 @@ Optional Wrangler `var` (public, non-secret; see
   `https://cdn.usefathom.com` in `script-src` and `img-src` for the tracker and
   its image beacon.
 
+## Hosted package app origin
+
+Optional Wrangler `var` (public, non-secret; see
+`packages/worker/src/app/app-base-url.ts` and
+`packages/worker/src/app/package-app-origin.ts`):
+
+- `PACKAGE_APP_BASE_URL` — the origin that hosted package apps are served from.
+  Production sets `https://kodyapps.dev` in `packages/worker/wrangler.jsonc`,
+  and the deploy derives a Workers `custom_domain` route from it so Cloudflare
+  provisions DNS and the edge certificate (see
+  [setup-manifest.md](./setup-manifest.md)). It **must be a separate registrable
+  domain** from `APP_BASE_URL`: that is what makes author-supplied package code
+  cross-site, so the `SameSite=Lax` `kody_session` cookie never reaches it.
+  Preview, tests, and E2E leave it unset and keep serving package apps inline on
+  the app origin at `/@{username}/packages/*`.
+
+  `npm run dev` runs the **production** Wrangler environment, so the committed
+  production value reaches local dev too; `getPackageAppBaseUrl` ignores an
+  origin a local server cannot answer on, which keeps `npm run dev` inline. Set
+  `PACKAGE_APP_BASE_URL=http://packages.localhost:<port>` in
+  `packages/worker/.env` to exercise the two-origin flow locally. See
+  [Hosted package app origin isolation](./security.md#hosted-package-app-origin-isolation).
+
 ## MCP `execute` and outbound HTTP
 
 MCP `execute` runs sandboxed JavaScript with a global `fetch`. Calls to

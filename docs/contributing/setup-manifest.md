@@ -61,6 +61,38 @@ This project uses the following resources:
   - Production and preview route embedding calls through this binding. When
     `AI_GATEWAY_ID` is configured, calls are sent through AI Gateway via the
     Workers AI binding options.
+- Second registrable domain for hosted package apps
+  - Production: `kodyapps.dev` (zone in the same Cloudflare account, on
+    Cloudflare nameservers), attached to the production Worker as a Workers
+    **custom domain**, which provisions the DNS record and edge certificate.
+  - The attach happens on deploy, but the route is **generated, not committed**:
+    `writeGeneratedWranglerConfig` (`tools/ci/resource-utils.ts`) derives
+    `routes: [{ pattern: <PACKAGE_APP_BASE_URL host>, custom_domain: true }]`
+    for the target environment while writing
+    `packages/worker/wrangler-production.generated.json`. The var
+    `PACKAGE_APP_BASE_URL=https://kodyapps.dev` in
+    `packages/worker/wrangler.jsonc` is therefore the single source of truth for
+    both the host the Worker routes on and the domain the deploy attaches; they
+    cannot drift.
+  - The route deliberately does **not** live in
+    `packages/worker/wrangler.jsonc`: `npm run dev` runs `wrangler dev` against
+    the **production** environment, and Wrangler resolves local request URLs
+    against the first configured route, so a committed route makes every local
+    request arrive as `http://kodyapps.dev/...` — canonical URLs, OAuth resource
+    metadata, and login redirects then point at the production domain from
+    localhost.
+  - The app origin (`heykody.dev`) stays attached out-of-band; Wrangler does not
+    remove routes that the config omits.
+  - Attaching a custom domain needs a deploy token with edit access to the
+    target zone. Without it the deploy step fails on the custom domain instead
+    of silently skipping it.
+  - The domain exists to be a **different registrable domain** from the app
+    origin so author-supplied package code is cross-site. Do not point it at a
+    subdomain of the app origin, and do not host anything first-party on it. See
+    [Hosted package app origin isolation](./security.md#hosted-package-app-origin-isolation).
+  - Forks that do not register a second domain simply leave
+    `PACKAGE_APP_BASE_URL` unset; package apps then serve inline on the app
+    origin, which is weaker isolation.
 - Workers Observability OTLP destination (account-level)
   - Workers automatic tracing is enabled via `observability.traces` in
     `packages/worker/wrangler.jsonc`; traces are viewable in the Workers
@@ -202,6 +234,17 @@ automatically:
   Most request-scoped app/MCP URLs use the inbound request origin so OAuth
   metadata matches the host the client connected to. Password reset email sends
   require this value and use `kody@<hostname>` as the sender.)
+- `PACKAGE_APP_BASE_URL` (optional Wrangler `var`; origin for hosted package
+  apps. Production sets `https://kodyapps.dev` in
+  `packages/worker/wrangler.jsonc`, and the deploy attaches that host as a
+  Workers custom domain from the generated config (see the Cloudflare resources
+  list above). Must be a **separate registrable domain** from `APP_BASE_URL` —
+  see
+  [Hosted package app origin isolation](./security.md#hosted-package-app-origin-isolation).
+  Local dev ignores any value it cannot serve itself, and preview/test leave it
+  unset, so those keep serving package apps inline on the app origin. Point it
+  at `http://packages.localhost:<port>` in `packages/worker/.env` to exercise
+  the two-origin flow locally.)
 - `APP_COMMIT_SHA` (optional; set automatically by deploy workflows for
   version-aware `/health` checks)
 - `CLOUDFLARE_ACCOUNT_ID` (required for the Cloudflare Email Service REST API
