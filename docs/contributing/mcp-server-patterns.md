@@ -316,10 +316,15 @@ export async function registerTools(agent: MCP) {
 - Tool docs/schemas/handler stay in sync
 - Easier to add/remove tools without touching unrelated tools
 
-**Example in this repo:** Server instructions live in
-`packages/worker/src/mcp/index.ts`, and tool metadata is colocated with tool
-registration + schemas in `packages/worker/src/mcp/tools/search.ts` (with
-`packages/worker/src/mcp/register-tools.ts` as the small aggregator).
+**Example in this repo:** Server instructions are built by
+`buildMcpServerInstructions` in `packages/worker/src/mcp/server-instructions.ts`
+(with fragments under `packages/worker/src/mcp/instructions/`). The snippet
+above is the generic pattern for small tools; the search tool deliberately
+splits its responsibilities across metadata/schemas
+(`packages/worker/src/mcp/tools/search-tool-definition.ts`), registration
+(`search-register.ts`), and the handler (`search-tool-runner.ts`) because each
+piece grew large, with `packages/worker/src/mcp/register-tools.ts` as the small
+aggregator. Preserve that split rather than folding it back into one file.
 
 ---
 

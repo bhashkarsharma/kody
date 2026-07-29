@@ -14,6 +14,8 @@ Use `package.json` as the canonical source of truth for saved package metadata.
   must match `kody.id` (for example `@scope/my-package` pairs with
   `kody.id: "my-package"`)
 - `exports` — authoritative import/export map
+- `private` — optional; a `"private": true` package cannot be published as a
+  community listing
 - `kody.id` — user-scoped Kody package id
 - `kody.description` — short public tagline for search/detail (max 200)
 - `kody.tags` — search tags
@@ -26,9 +28,13 @@ Use `package.json` as the canonical source of truth for saved package metadata.
 - `kody.subscriptions` — optional package-owned event subscriptions
 - `kody.emits` — optional package-emitted event topic declarations
 - `kody.webhooks` — optional inbound webhook declarations bound to package
-  exports
+  exports (see [`docs/use/webhooks.md`](../use/webhooks.md))
 - `kody.jobs` — optional package-owned schedules
 - `kody.retrievers` — optional package-owned search/context retrievers
+
+The validation schema (`authoredPackageJsonSchema` in
+`packages/worker/src/package-registry/types.ts`) is authoritative when this list
+and the code disagree.
 
 The package manifest is `package.json`.
 
@@ -68,6 +74,7 @@ Think in terms of:
 - package-owned services
 - package-owned jobs
 - package-owned subscriptions
+- package-owned webhooks
 - package-owned retrievers
 - package-owned webhooks
 - package-owned workflows (declared in runtime code, not the manifest)
