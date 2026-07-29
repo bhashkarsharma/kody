@@ -9,6 +9,7 @@ import {
 } from '#mcp/secrets/errors.ts'
 import { EntitlementLimitError } from '#worker/entitlements/errors.ts'
 import { createUnboundRuntimeHelperMessage } from '#worker/package-runtime/unbound-runtime-helpers.ts'
+import { createStorageEstimateReadError } from '#worker/storage-estimate-error.ts'
 import {
 	createKodyRemoteProxy,
 	createKodyProviderProxySource,
@@ -20,6 +21,7 @@ import {
 	formatLimitedExecutionOutput,
 	getExecutionErrorDetails,
 	limitExecutionResultValue,
+	runWithDynamicWorkerEvaluationBudget,
 } from './executor.ts'
 import { assertGeneratedExecutorSourceIsBundleSafe } from './kody-remote-proxy-source.ts'
 import { createDynamicWorkerCompatibilityOptions } from '#worker/dynamic-worker-compatibility.ts'
@@ -417,6 +419,257 @@ test('createExecuteExecutor aligns dynamic worker compatibility with shared opti
 
 	const workerOptions = fakeLoader.createdOptions.get(fakeLoader.ids[0]!)
 	expect(workerOptions).toMatchObject(createDynamicWorkerCompatibilityOptions())
+})
+
+test('explicit request budgets cap independent roots at four without blocking separate requests', async () => {
+	type BudgetState = {
+		active: number
+		maxActive: number
+		started: number
+		releases: Array<() => void>
+	}
+	const createBudgetState = (): BudgetState => ({
+		active: 0,
+		maxActive: 0,
+		started: 0,
+		releases: [],
+	})
+	const createBlockingLoader = (state: BudgetState) =>
+		({
+			get(_id: string, factory: () => FakeWorkerOptions) {
+				factory()
+				return {
+					getEntrypoint() {
+						return {
+							async evaluate() {
+								state.started += 1
+								state.active += 1
+								state.maxActive = Math.max(state.maxActive, state.active)
+								await new Promise<void>((resolve) => {
+									state.releases.push(() => {
+										state.active -= 1
+										resolve()
+									})
+								})
+								return { result: 'done', logs: [] }
+							},
+						}
+					},
+				}
+			},
+		}) as unknown as Env['LOADER']
+	const exports = createExecutorTestExports()
+	const providers = [{ name: 'kody', fns: {} }]
+	const runFiveRoots = (userId: string, state: BudgetState) =>
+		runWithDynamicWorkerEvaluationBudget(
+			async () =>
+				await Promise.all(
+					Array.from({ length: 5 }, async (_, index) => {
+						return await createExecuteExecutor({
+							env: createExecutorTestEnv(createBlockingLoader(state)),
+							exports,
+							gatewayProps: createGatewayProps(userId),
+						}).execute(`async () => ${index}`, providers)
+					}),
+				),
+		)
+
+	const firstState = createBudgetState()
+	const firstRequest = runFiveRoots('first-request-user', firstState)
+	await expect.poll(() => firstState.started).toBe(4)
+	expect(firstState.active).toBe(4)
+	expect(firstState.maxActive).toBe(4)
+
+	const secondState = createBudgetState()
+	const secondRequest = runFiveRoots('second-request-user', secondState)
+	await expect.poll(() => secondState.started).toBe(4)
+	expect(secondState.active).toBe(4)
+	expect(secondState.maxActive).toBe(4)
+
+	firstState.releases.shift()?.()
+	secondState.releases.shift()?.()
+	await expect.poll(() => firstState.started).toBe(5)
+	await expect.poll(() => secondState.started).toBe(5)
+	expect(firstState.active).toBe(4)
+	expect(secondState.active).toBe(4)
+
+	for (const release of firstState.releases.splice(0)) release()
+	for (const release of secondState.releases.splice(0)) release()
+	await expect(firstRequest).resolves.toHaveLength(5)
+	await expect(secondRequest).resolves.toHaveLength(5)
+	expect(firstState.active).toBe(0)
+	expect(secondState.active).toBe(0)
+})
+
+test('createExecuteExecutor fails fast when nested fan-out saturates its request budget', async () => {
+	let evaluationCount = 0
+	let maxActiveEvaluations = 0
+	let activeEvaluations = 0
+	let releaseChildren: () => void = () => {}
+	const childrenMayFinish = new Promise<void>((resolve) => {
+		releaseChildren = resolve
+	})
+	let nestedEnv: Env
+	const exports = createExecutorTestExports()
+	const providers = [{ name: 'kody', fns: {} }]
+	const loader = {
+		get(_id: string, factory: () => FakeWorkerOptions) {
+			factory()
+			return {
+				getEntrypoint() {
+					return {
+						async evaluate() {
+							evaluationCount += 1
+							activeEvaluations += 1
+							maxActiveEvaluations = Math.max(
+								maxActiveEvaluations,
+								activeEvaluations,
+							)
+							if (evaluationCount === 1) {
+								return await Promise.all(
+									Array.from({ length: 5 }, async (_, index) => {
+										return await createExecuteExecutor({
+											env: nestedEnv,
+											exports,
+											gatewayProps: createGatewayProps('nested-user'),
+										}).execute(`async () => ${index}`, providers)
+									}),
+								)
+							}
+							await childrenMayFinish
+							activeEvaluations -= 1
+							return { result: 'child', logs: [] }
+						},
+					}
+				},
+			}
+		},
+	} as unknown as Env['LOADER']
+	nestedEnv = createExecutorTestEnv(loader)
+
+	const rootExecution = createExecuteExecutor({
+		env: nestedEnv,
+		exports,
+		gatewayProps: createGatewayProps('nested-user'),
+	}).execute('async () => "root"', providers)
+
+	await expect(rootExecution).rejects.toThrow(
+		'Dynamic worker concurrency limit exceeded: each request may have up to 4 concurrent dynamic worker invocations.',
+	)
+	releaseChildren()
+	expect(evaluationCount).toBe(4)
+	expect(maxActiveEvaluations).toBe(4)
+})
+
+test('createExecuteExecutor fails fast instead of deadlocking recursive evaluations beyond four', async () => {
+	let evaluationCount = 0
+	let recursiveEnv: Env
+	const exports = createExecutorTestExports()
+	const providers = [{ name: 'kody', fns: {} }]
+	const loader = {
+		get(_id: string, factory: () => FakeWorkerOptions) {
+			factory()
+			return {
+				getEntrypoint() {
+					return {
+						async evaluate() {
+							evaluationCount += 1
+							return await createExecuteExecutor({
+								env: recursiveEnv,
+								exports,
+								gatewayProps: createGatewayProps('recursive-user'),
+							}).execute(`async () => ${evaluationCount}`, providers)
+						},
+					}
+				},
+			}
+		},
+	} as unknown as Env['LOADER']
+	recursiveEnv = createExecutorTestEnv(loader)
+
+	const startedAtMs = Date.now()
+	await expect(
+		createExecuteExecutor({
+			env: recursiveEnv,
+			exports,
+			gatewayProps: createGatewayProps('recursive-user'),
+		}).execute('async () => "root"', providers),
+	).rejects.toThrow(
+		'Dynamic worker concurrency limit exceeded: each request may have up to 4 concurrent dynamic worker invocations.',
+	)
+	expect(Date.now() - startedAtMs).toBeLessThan(1_000)
+	expect(evaluationCount).toBe(4)
+})
+
+test('createExecuteExecutor fails fast when saturated sibling evaluations recurse together', async () => {
+	let evaluationCount = 0
+	let childCount = 0
+	let releaseChildren: () => void = () => {}
+	const allChildrenStarted = new Promise<void>((resolve) => {
+		releaseChildren = resolve
+	})
+	let recursiveEnv: Env
+	const exports = createExecutorTestExports()
+	const providers = [{ name: 'kody', fns: {} }]
+	const loader = {
+		get(_id: string, factory: () => FakeWorkerOptions) {
+			const options = factory()
+			const serializedOptions = JSON.stringify(options)
+			const kind = serializedOptions.includes('root-marker')
+				? 'root'
+				: serializedOptions.includes('child-marker')
+					? 'child'
+					: 'descendant'
+			return {
+				getEntrypoint() {
+					return {
+						async evaluate() {
+							evaluationCount += 1
+							if (kind === 'root') {
+								return await Promise.all(
+									Array.from({ length: 3 }, async (_, index) =>
+										createExecuteExecutor({
+											env: recursiveEnv,
+											exports,
+											gatewayProps: createGatewayProps('mixed-user'),
+										}).execute(
+											`async () => "child-marker-${index}"`,
+											providers,
+										),
+									),
+								)
+							}
+							if (kind === 'child') {
+								childCount += 1
+								if (childCount === 3) releaseChildren()
+								await allChildrenStarted
+								return await createExecuteExecutor({
+									env: recursiveEnv,
+									exports,
+									gatewayProps: createGatewayProps('mixed-user'),
+								}).execute('async () => "descendant-marker"', providers)
+							}
+							return { result: 'descendant', logs: [] }
+						},
+					}
+				},
+			}
+		},
+	} as unknown as Env['LOADER']
+	recursiveEnv = createExecutorTestEnv(loader)
+
+	const startedAtMs = Date.now()
+	await expect(
+		createExecuteExecutor({
+			env: recursiveEnv,
+			exports,
+			gatewayProps: createGatewayProps('mixed-user'),
+		}).execute('async () => "root-marker"', providers),
+	).rejects.toThrow(
+		'Dynamic worker concurrency limit exceeded: each request may have up to 4 concurrent dynamic worker invocations.',
+	)
+	expect(Date.now() - startedAtMs).toBeLessThan(1_000)
+	expect(evaluationCount).toBe(4)
 })
 
 test('createExecuteExecutor reuses stable dynamic worker ids until binding context or module graph changes', async () => {
@@ -1115,6 +1368,50 @@ test('executor maps secret errors, formats guidance, extracts raw content, and t
 		kind: 'sandbox_runtime_stale',
 		nextStep: expect.stringContaining('fresh sandbox'),
 		suggestedAction: { type: 'report_bug' },
+	})
+
+	expect(
+		getExecutionErrorDetails(new Error('Too many concurrent dynamic workers')),
+	).toMatchObject({
+		kind: 'dynamic_worker_capacity_exceeded',
+		limit: 4,
+		nextStep: expect.stringContaining('Retry'),
+		suggestedAction: { type: 'retry' },
+	})
+	expect(
+		getExecutionErrorDetails(
+			new Error(
+				'[invocation_failed] Dynamic worker concurrency limit exceeded: each request may have up to 4 concurrent dynamic worker invocations. Wait for one to finish before starting another.',
+			),
+		),
+	).toMatchObject({
+		kind: 'dynamic_worker_capacity_exceeded',
+		limit: 4,
+		suggestedAction: { type: 'retry' },
+	})
+	expect(
+		getExecutionErrorDetails(
+			new Error('Too many concurrent dynamic worker requests'),
+		),
+	).toBeNull()
+
+	const storageEstimateError = createStorageEstimateReadError({
+		storageId: 'package:unreadable',
+		attempts: 3,
+		cause: new Error('RPC disconnected'),
+	})
+	expect(
+		getExecutionErrorDetails(
+			new Error('Nested execute failed.', {
+				cause: new Error(`[execution_failed] ${storageEstimateError.message}`),
+			}),
+		),
+	).toMatchObject({
+		kind: 'storage_estimate_unavailable',
+		storageId: 'package:unreadable',
+		attempts: 3,
+		nextStep: expect.stringContaining('safely blocked'),
+		suggestedAction: { type: 'retry' },
 	})
 
 	const errors = [

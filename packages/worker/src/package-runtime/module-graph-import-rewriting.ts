@@ -65,6 +65,13 @@ type RewriteReplacement = {
 	value: string
 }
 
+export type LoadedKodyGraphPackage = LoadedPackageSource & {
+	row: SavedPackageRecord
+	prefix: string
+}
+
+export type LoadedKodyGraphPackages = Map<string, LoadedKodyGraphPackage>
+
 type RewriteState = {
 	env: Env
 	baseUrl: string
@@ -83,18 +90,16 @@ type RewriteState = {
 	 * artifacts that later get composed into foreign bundles.
 	 */
 	rootPackageId: string | null
+	includeTypeOnlyKodyPackages: boolean
 	proxies: Map<string, string>
 	dynamicPackageImports: Map<string, string>
-	packages: Map<
-		string,
-		LoadedPackageSource & { row: SavedPackageRecord; prefix: string }
-	>
+	packages: LoadedKodyGraphPackages
 }
 
 async function maybeEnsurePublishedArtifactTarget(input: {
 	state: RewriteState
 	specifier: string
-	loaded: LoadedPackageSource & { row: SavedPackageRecord; prefix: string }
+	loaded: LoadedKodyGraphPackage
 }): Promise<string | null> {
 	if (!input.loaded.source.published_commit) {
 		return null
@@ -164,7 +169,7 @@ function assertReplacementsDoNotOverlap(
 async function ensurePackageLoaded(
 	state: RewriteState,
 	specifier: string,
-): Promise<LoadedPackageSource & { row: SavedPackageRecord; prefix: string }> {
+): Promise<LoadedKodyGraphPackage> {
 	const parsed = parseKodyPackageSpecifier(specifier)
 	const packageKey = parsed.packageName
 	const existing = state.packages.get(packageKey)
@@ -196,6 +201,18 @@ async function ensurePackageLoaded(
 		const targetPath = joinPath(entry.prefix, normalizedPath)
 		if (isTypeDeclarationFilePath(normalizedPath)) {
 			state.files[targetPath] = content
+			if (state.includeTypeOnlyKodyPackages) {
+				for (const node of collectLiteralImportNodes(content, {
+					includeTypeOnly: true,
+				})) {
+					if (
+						node.kind === 'static' &&
+						node.specifier.startsWith(packageSpecifierPrefix)
+					) {
+						await ensurePackageLoaded(state, node.specifier)
+					}
+				}
+			}
 			continue
 		}
 		state.files[targetPath] = await rewriteKodyImports({
@@ -357,7 +374,9 @@ async function rewriteKodyImports(input: {
 	 */
 	sourcePackageId: string | null
 }) {
-	const importNodes = collectLiteralImportNodes(input.source)
+	const importNodes = collectLiteralImportNodes(input.source, {
+		includeTypeOnly: input.state.includeTypeOnlyKodyPackages,
+	})
 	const dynamicImportNodes = collectDynamicImportExpressionNodes(input.source)
 	if (importNodes.length === 0 && dynamicImportNodes.length === 0) {
 		return input.source
@@ -458,6 +477,7 @@ export async function prepareKodyGraphFiles(input: {
 	sourceFiles: Record<string, string>
 	entryPoint: string
 	rootPackageId?: string | null
+	includeTypeOnlyKodyPackages?: boolean
 }) {
 	const files: Record<string, string> = {
 		[runtimeModulePath]: createRuntimeModuleSource(),
@@ -481,6 +501,7 @@ export async function prepareKodyGraphFiles(input: {
 		sourceFiles: input.sourceFiles,
 		rootPackage,
 		rootPackageId: input.rootPackageId?.trim() || null,
+		includeTypeOnlyKodyPackages: input.includeTypeOnlyKodyPackages === true,
 		proxies: new Map(),
 		dynamicPackageImports: new Map(),
 		packages: new Map(),
