@@ -17,6 +17,15 @@ import { storageRunnerDurableObjectName } from '#worker/user-scoped-durable-obje
 const defaultStorageExportPageSize = 250
 const maxStorageExportPageSize = 1_000
 const maxConcurrentStorageEstimateReads = 16
+/** One bounded pause before re-reading a failed estimate chunk. */
+export const storageEstimateReadRetryDelayMs = 150
+/**
+ * `ctx.storage.sql.databaseSize` for a never-written StorageRunner DO (one
+ * SQLite page). Audit/entitlement callers that need a "has user data" signal
+ * must compare against this floor rather than treating any positive size as
+ * non-empty.
+ */
+export const emptyStorageRunnerEstimatedBytes = 4096
 
 type StorageEntry = {
 	key: string
@@ -566,6 +575,52 @@ export function storageRunnerRpc(input: {
 	}
 }
 
+async function readStorageEstimateChunkWithRetry(input: {
+	env: Env
+	userId: string
+	storageIds: Array<string>
+}): Promise<Array<StorageEstimateResult>> {
+	const readOne = (storageId: string) =>
+		storageRunnerRpc({
+			env: input.env,
+			userId: input.userId,
+			storageId,
+		}).getEstimatedBytes()
+
+	// Wait for every first-attempt read to settle before retrying so a fast
+	// rejection cannot overlap still-pending peers and exceed the fan-out cap.
+	const firstAttempt = await Promise.allSettled(
+		input.storageIds.map((storageId) => readOne(storageId)),
+	)
+	const firstValues: Array<StorageEstimateResult> = []
+	let firstFailed = false
+	for (const result of firstAttempt) {
+		if (result.status === 'fulfilled') {
+			firstValues.push(result.value)
+			continue
+		}
+		firstFailed = true
+	}
+	if (!firstFailed) {
+		return firstValues
+	}
+
+	await new Promise<void>((resolve) => {
+		setTimeout(resolve, storageEstimateReadRetryDelayMs)
+	})
+	try {
+		return await Promise.all(
+			input.storageIds.map((storageId) => readOne(storageId)),
+		)
+	} catch (retryError) {
+		// An unreadable bucket cannot safely be treated as zero usage.
+		throw new Error(
+			'Unable to verify the storage byte entitlement because a bucket estimate could not be read.',
+			{ cause: retryError },
+		)
+	}
+}
+
 export async function assertStorageRunnerWriteWithinEntitlement(input: {
 	env: Env
 	userId: string
@@ -603,26 +658,15 @@ export async function assertStorageRunnerWriteWithinEntitlement(input: {
 				offset < storageIds.length;
 				offset += maxConcurrentStorageEstimateReads
 			) {
-				let estimates: Array<StorageEstimateResult>
-				try {
-					estimates = await Promise.all(
-						storageIds
-							.slice(offset, offset + maxConcurrentStorageEstimateReads)
-							.map((storageId) =>
-								storageRunnerRpc({
-									env: input.env,
-									userId: input.userId,
-									storageId,
-								}).getEstimatedBytes(),
-							),
-					)
-				} catch (error) {
-					// An unreadable bucket cannot safely be treated as zero usage.
-					throw new Error(
-						'Unable to verify the storage byte entitlement because a bucket estimate could not be read.',
-						{ cause: error },
-					)
-				}
+				const chunkIds = storageIds.slice(
+					offset,
+					offset + maxConcurrentStorageEstimateReads,
+				)
+				const estimates = await readStorageEstimateChunkWithRetry({
+					env: input.env,
+					userId: input.userId,
+					storageIds: chunkIds,
+				})
 				durableObjectBytes += estimates.reduce(
 					(total, estimate) => total + estimate.estimatedBytes,
 					0,
