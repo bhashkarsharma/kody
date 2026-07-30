@@ -47,6 +47,12 @@ type ReusableTypecheckService = {
 	}
 }
 
+type TypecheckGeneration = {
+	queue: Promise<void>
+	pendingCount: number
+	servicePromise: Promise<ReusableTypecheckService> | null
+}
+
 const entryPath = 'entry.ts'
 const tsconfigPath = 'tsconfig.json'
 const runtimeTypesPath = 'kody-runtime.d.ts'
@@ -62,7 +68,12 @@ const maxExecuteTypecheckSourceBytes = 512 * 1024
 const maxExecuteTypecheckPackageFiles = 500
 const maxExecuteTypecheckPackageBytes = 5 * 1024 * 1024
 const maxPendingExecuteTypechecks = 4
+// Cold service creation fetches and extracts worker-bundler's TypeScript lib
+// declarations. Keep that bounded separately from the warm diagnostics hold.
+const maxExecuteTypecheckServiceStartupMs = 10_000
 const maxExecuteTypecheckHoldMs = 2_000
+const maxExecuteTypecheckQueueWaitMs =
+	maxExecuteTypecheckServiceStartupMs + maxExecuteTypecheckHoldMs
 
 class MemoryTypecheckFileSystem implements TypecheckFileSystem {
 	readonly #files: Map<string, string>
@@ -131,10 +142,15 @@ function createRuntimeTypes() {
 }`
 }
 
-let reusableTypecheckServicePromise: Promise<ReusableTypecheckService> | null =
-	null
-let typecheckQueue = Promise.resolve()
-let pendingTypecheckCount = 0
+function createTypecheckGeneration(): TypecheckGeneration {
+	return {
+		queue: Promise.resolve(),
+		pendingCount: 0,
+		servicePromise: null,
+	}
+}
+
+let currentTypecheckGeneration = createTypecheckGeneration()
 
 async function loadTypescriptLanguageService() {
 	// Keep the multi-megabyte compiler out of the default-off Worker's eager
@@ -145,8 +161,8 @@ async function loadTypescriptLanguageService() {
 	return createTypescriptLanguageService
 }
 
-async function getReusableTypecheckService() {
-	reusableTypecheckServicePromise ??= loadTypescriptLanguageService().then(
+async function getReusableTypecheckService(generation: TypecheckGeneration) {
+	generation.servicePromise ??= loadTypescriptLanguageService().then(
 		(createTypescriptLanguageService) =>
 			createTypescriptLanguageService({
 				fileSystem: new MemoryTypecheckFileSystem({
@@ -156,12 +172,12 @@ async function getReusableTypecheckService() {
 				}),
 			}) as Promise<ReusableTypecheckService>,
 	)
-	const servicePromise = reusableTypecheckServicePromise
+	const servicePromise = generation.servicePromise
 	try {
 		return await servicePromise
 	} catch (error) {
-		if (reusableTypecheckServicePromise === servicePromise) {
-			reusableTypecheckServicePromise = null
+		if (generation.servicePromise === servicePromise) {
+			generation.servicePromise = null
 		}
 		throw error
 	}
@@ -171,25 +187,53 @@ async function withTypecheckLock<T>(
 	phases: ExecuteTypecheckPhaseRecorder,
 	callback: (service: ReusableTypecheckService) => T,
 ) {
-	if (pendingTypecheckCount >= maxPendingExecuteTypechecks) {
+	const generation = currentTypecheckGeneration
+	if (generation.pendingCount >= maxPendingExecuteTypechecks) {
 		throw new ExecuteTypecheckError([
 			`The pre-execution TypeScript checker already has ${maxPendingExecuteTypechecks} active or queued requests. Retry after one finishes.`,
 		])
 	}
-	pendingTypecheckCount += 1
-	const previous = typecheckQueue
+	generation.pendingCount += 1
+	const previous = generation.queue
 	let release: () => void = () => {}
-	typecheckQueue = new Promise<void>((resolve) => {
+	generation.queue = new Promise<void>((resolve) => {
 		release = resolve
 	})
-	await phases.measure('queue', async () => {
-		await previous
-	})
 	let timeoutId: ReturnType<typeof setTimeout> | null = null
+	let queueTimeoutId: ReturnType<typeof setTimeout> | null = null
 	let startupTimedOut = false
-	const servicePromise = getReusableTypecheckService()
-	const cachedServicePromise = reusableTypecheckServicePromise
+	let cachedServicePromise: Promise<ReusableTypecheckService> | null = null
 	try {
+		await phases.measure(
+			'queue',
+			async () =>
+				await Promise.race([
+					previous,
+					new Promise<never>((_resolve, reject) => {
+						queueTimeoutId = setTimeout(() => {
+							if (currentTypecheckGeneration === generation) {
+								currentTypecheckGeneration = createTypecheckGeneration()
+							}
+							reject(
+								new ExecuteTypecheckError([
+									`The pre-execution TypeScript checker exceeded its ${maxExecuteTypecheckQueueWaitMs}ms queue budget. Retry the execute call.`,
+								]),
+							)
+						}, maxExecuteTypecheckQueueWaitMs)
+					}),
+				]),
+		)
+		if (currentTypecheckGeneration !== generation) {
+			throw new ExecuteTypecheckError([
+				'The pre-execution TypeScript checker queue was reset after an earlier request stalled. Retry the execute call.',
+			])
+		}
+		if (queueTimeoutId !== null) {
+			clearTimeout(queueTimeoutId)
+			queueTimeoutId = null
+		}
+		const servicePromise = getReusableTypecheckService(generation)
+		cachedServicePromise = generation.servicePromise
 		const service = await phases.measure(
 			'compiler-startup',
 			async () =>
@@ -200,10 +244,10 @@ async function withTypecheckLock<T>(
 							startupTimedOut = true
 							reject(
 								new ExecuteTypecheckError([
-									`The pre-execution TypeScript checker exceeded its ${maxExecuteTypecheckHoldMs}ms service startup budget.`,
+									`The pre-execution TypeScript checker exceeded its ${maxExecuteTypecheckServiceStartupMs}ms service startup budget.`,
 								]),
 							)
-						}, maxExecuteTypecheckHoldMs)
+						}, maxExecuteTypecheckServiceStartupMs)
 					}),
 				]),
 		)
@@ -219,16 +263,16 @@ async function withTypecheckLock<T>(
 			// isolate. Do not turn a completed valid check into a false-positive
 			// failure; discard the slow service so the next request starts fresh.
 			service.languageService.dispose?.()
-			reusableTypecheckServicePromise = null
+			generation.servicePromise = null
 		}
 		return result
 	} catch (error) {
 		if (
 			startupTimedOut &&
 			cachedServicePromise &&
-			reusableTypecheckServicePromise === cachedServicePromise
+			generation.servicePromise === cachedServicePromise
 		) {
-			reusableTypecheckServicePromise = null
+			generation.servicePromise = null
 			void cachedServicePromise.then(
 				(service) => service.languageService.dispose?.(),
 				() => undefined,
@@ -237,7 +281,8 @@ async function withTypecheckLock<T>(
 		throw error
 	} finally {
 		if (timeoutId !== null) clearTimeout(timeoutId)
-		pendingTypecheckCount -= 1
+		if (queueTimeoutId !== null) clearTimeout(queueTimeoutId)
+		generation.pendingCount -= 1
 		release()
 	}
 }
