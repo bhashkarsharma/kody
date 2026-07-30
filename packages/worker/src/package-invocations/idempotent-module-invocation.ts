@@ -5,7 +5,7 @@ import { runBundledModuleWithRegistry } from '#mcp/run-kody-registry.ts'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
 import { type RunRecordContext } from '#worker/run-records/types.ts'
 import { type SavedPackageRecord } from '#worker/package-registry/types.ts'
-import { getEntitySourceById } from '#worker/repo/entity-sources.ts'
+import { getEntitySourceByIdForUser } from '#worker/repo/entity-sources.ts'
 import {
 	getEmailAttachmentById,
 	getEmailMessageById,
@@ -63,6 +63,14 @@ export async function invokeSavedPackageModule(input: {
 	runtimeInvokeDepth?: number
 	toolFactories: PackageRuntimeToolFactories
 	waitUntil?: (promise: Promise<unknown>) => void
+	/**
+	 * Artifact already prepared by a `packages.invokeChecked` check phase
+	 * moments earlier; skips a second manifest + artifact load. The claim
+	 * still happens first, so replay semantics are unchanged.
+	 */
+	preloadedModuleArtifact?: Awaited<
+		ReturnType<typeof ensureModuleArtifact>
+	> | null
 }) {
 	return await withAccountWriteLease({
 		db: input.env.APP_DB,
@@ -276,20 +284,23 @@ export async function invokeSavedPackageModule(input: {
 			}
 
 			try {
-				const { artifact, source: sourceRow } = await ensureModuleArtifact({
-					env: input.env,
-					baseUrl: input.baseUrl,
-					savedPackage: input.savedPackage,
-					selector: input.moduleSelector,
-					userId: input.actor.userId,
-				})
+				const { artifact, source: sourceRow } =
+					input.preloadedModuleArtifact ??
+					(await ensureModuleArtifact({
+						env: input.env,
+						baseUrl: input.baseUrl,
+						savedPackage: input.savedPackage,
+						selector: input.moduleSelector,
+						userId: input.actor.userId,
+					}))
 				const repoSource =
-					artifact.packageContext?.sourceId != null
-						? await getEntitySourceById(
-								input.env.APP_DB,
-								artifact.packageContext.sourceId,
-							)
-						: sourceRow
+					artifact.packageContext?.sourceId == null ||
+					artifact.packageContext.sourceId === sourceRow.id
+						? sourceRow
+						: await getEntitySourceByIdForUser(input.env.APP_DB, {
+								id: artifact.packageContext.sourceId,
+								userId: input.actor.userId,
+							})
 				const callerContext = createMcpCallerContext({
 					baseUrl: input.baseUrl,
 					executionOrigin: 'background',

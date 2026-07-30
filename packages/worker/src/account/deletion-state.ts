@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { utcSqliteTimestamp } from '@kody-internal/shared/date-keys.ts'
 
 export class AccountDeletionInProgressError extends Error {
@@ -80,10 +81,54 @@ export async function assertAccountWritable(env: Env, stableUserId: string) {
 	await assertAccountWritableDb(env.APP_DB, stableUserId)
 }
 
+/**
+ * Live lease frames keyed by stable user id, propagated down the current
+ * async call chain. Nested {@link withAccountWriteLease} calls for the same
+ * user reuse the outer lease while its frame is still active instead of
+ * paying another acquire/release round trip to D1 (~5 statements each): the
+ * outer lease spans the nested write, so deletion stays blocked for exactly
+ * as long as it does today. MCP requests, app requests, job runs, and
+ * package invocations all take a lease at their boundary, so before this
+ * reuse a single execute call that invoked one package export paid for two
+ * full leases.
+ *
+ * Frames deactivate when the outer lease releases. Detached work (for
+ * example `waitUntil` callbacks spawned inside `write`) inherits this
+ * AsyncLocalStorage context, and without the active flag it would keep
+ * skipping acquisition after the lease row was already released.
+ */
+type AccountWriteLeaseFrame = { active: boolean }
+const heldAccountWriteLeaseStorage = new AsyncLocalStorage<
+	ReadonlyMap<string, AccountWriteLeaseFrame>
+>()
+
 export async function withAccountWriteLease<T>(input: {
 	db: D1Database
 	stableUserId: string
 	holder?: string
+	write: () => Promise<T>
+}) {
+	const heldLeases = heldAccountWriteLeaseStorage.getStore()
+	if (heldLeases?.get(input.stableUserId)?.active) {
+		return await input.write()
+	}
+	const frame: AccountWriteLeaseFrame = { active: true }
+	const nextHeldLeases = new Map(heldLeases)
+	nextHeldLeases.set(input.stableUserId, frame)
+	try {
+		return await heldAccountWriteLeaseStorage.run(nextHeldLeases, async () =>
+			acquireAccountWriteLeaseAndWrite({ ...input, frame }),
+		)
+	} finally {
+		frame.active = false
+	}
+}
+
+async function acquireAccountWriteLeaseAndWrite<T>(input: {
+	db: D1Database
+	stableUserId: string
+	holder?: string
+	frame: AccountWriteLeaseFrame
 	write: () => Promise<T>
 }) {
 	if (typeof input.db.batch !== 'function') {
@@ -101,6 +146,7 @@ export async function withAccountWriteLease<T>(input: {
 		try {
 			return await input.write()
 		} finally {
+			input.frame.active = false
 			await input.db
 				.prepare(
 					`UPDATE users
@@ -159,6 +205,7 @@ export async function withAccountWriteLease<T>(input: {
 		if (held?.held !== 1) throw new AccountWriteLeaseLostError()
 		return result
 	} finally {
+		input.frame.active = false
 		const releasedAt = utcSqliteTimestamp()
 		const released = await input.db
 			.prepare(
