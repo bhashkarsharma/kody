@@ -238,6 +238,12 @@ export async function invokePackageExportWithToolFactories(input: {
 	runtimeInvokeDepth?: number
 	toolFactories: PackageRuntimeToolFactories
 	waitUntil?: (promise: Promise<unknown>) => void
+	/**
+	 * Internal workflow runner: skip the idempotency ledger so Cloudflare
+	 * Workflow step retries re-execute instead of replaying a cached timeout.
+	 */
+	ephemeral?: boolean
+	executorTimeoutMs?: number | null
 }): Promise<PackageInvocationResponse> {
 	const packageIdOrKodyId = input.request.packageIdOrKodyId.trim()
 	if (!packageIdOrKodyId) {
@@ -249,9 +255,12 @@ export async function invokePackageExportWithToolFactories(input: {
 	}
 	const exportName = normalizeExportName(input.request.exportName)
 	// External HTTP token invocations stay keyed-only: providers retry
-	// deliveries, so exactly-once is the point of this surface.
-	const idempotencyKey = normalizeNullableString(input.request.idempotencyKey)
-	if (!idempotencyKey) {
+	// deliveries, so exactly-once is the point of this surface. Workflow
+	// step retries pass ephemeral: true and run key-less instead.
+	const idempotencyKey = input.ephemeral
+		? null
+		: normalizeNullableString(input.request.idempotencyKey)
+	if (!input.ephemeral && !idempotencyKey) {
 		return buildJsonErrorResponse({
 			status: 400,
 			code: 'missing_idempotency_key',
@@ -265,7 +274,7 @@ export async function invokePackageExportWithToolFactories(input: {
 			status: 403,
 			code: 'source_not_allowed',
 			message: 'This token is not allowed to invoke the requested source.',
-			idempotencyKey,
+			idempotencyKey: idempotencyKey ?? undefined,
 		})
 	}
 	const savedPackage = await resolveSavedPackage({
@@ -278,7 +287,7 @@ export async function invokePackageExportWithToolFactories(input: {
 			status: 404,
 			code: 'package_not_found',
 			message: buildSavedPackageNotFoundMessage(packageIdOrKodyId),
-			idempotencyKey,
+			idempotencyKey: idempotencyKey ?? undefined,
 		})
 	}
 	if (!tokenAllowsPackage({ token: input.token, savedPackage })) {
@@ -286,7 +295,7 @@ export async function invokePackageExportWithToolFactories(input: {
 			status: 403,
 			code: 'package_not_allowed',
 			message: 'This token is not allowed to invoke the requested package.',
-			idempotencyKey,
+			idempotencyKey: idempotencyKey ?? undefined,
 		})
 	}
 	if (!tokenAllowsExport({ token: input.token, exportName })) {
@@ -294,11 +303,11 @@ export async function invokePackageExportWithToolFactories(input: {
 			status: 403,
 			code: 'export_not_allowed',
 			message: `This token is not allowed to invoke export "${exportName}".`,
-			idempotencyKey,
+			idempotencyKey: idempotencyKey ?? undefined,
 		})
 	}
 
-	return await invokeSavedPackageModule({
+	const shared = {
 		env: input.env,
 		baseUrl: input.baseUrl,
 		actor: {
@@ -311,16 +320,25 @@ export async function invokePackageExportWithToolFactories(input: {
 		savedPackage,
 		invocationName: exportName,
 		moduleSelector: {
-			kind: 'export',
+			kind: 'export' as const,
 			exportName,
 		},
 		params: input.request.params,
-		idempotencyKey,
 		source,
 		topic,
-		notFoundCode: 'export_not_found',
+		notFoundCode: 'export_not_found' as const,
 		runtimeInvokeDepth: input.runtimeInvokeDepth ?? 0,
 		toolFactories: input.toolFactories,
 		waitUntil: input.waitUntil,
+		executorTimeoutMs: input.executorTimeoutMs,
+	}
+
+	if (!idempotencyKey) {
+		return await runSavedPackageModuleEphemeral(shared)
+	}
+
+	return await invokeSavedPackageModule({
+		...shared,
+		idempotencyKey,
 	})
 }
