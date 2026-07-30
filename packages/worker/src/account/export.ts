@@ -1456,10 +1456,14 @@ function buildManifest(input: {
 		discovery: { section: 'job_manager' },
 	}
 	sections.run_records = {
+		// The section carries runs plus the RunLog DO's package-invocation
+		// idempotency ledger rows, so count both when the export payload is
+		// present. The inventory fallback comes from `summarize` (runs only).
 		count:
-			input.durableObjects?.runRecords?.runs.length ??
-			input.inventoryCounts?.runRecords ??
-			0,
+			input.durableObjects?.runRecords == null
+				? (input.inventoryCounts?.runRecords ?? 0)
+				: input.durableObjects.runRecords.runs.length +
+					input.durableObjects.runRecords.packageInvocations.length,
 		warnings: input.warnings.filter((warning) =>
 			warning.startsWith('Run records '),
 		),
@@ -1772,10 +1776,18 @@ export async function readAccountExportSection(input: {
 		})
 		return {
 			section: input.section,
-			items: page.runs.map((run) => ({
-				run,
-				logs: page.logs.filter((log) => log.runId === run.id),
-			})),
+			// Runs page first; once runs are exhausted the same cursor continues
+			// through the keyed package-invocation idempotency ledger rows that
+			// live in the same per-user RunLog Durable Object.
+			items: [
+				...page.runs.map((run) => ({
+					run,
+					logs: page.logs.filter((log) => log.runId === run.id),
+				})),
+				...page.packageInvocations.map((packageInvocation) => ({
+					packageInvocation,
+				})),
+			],
 			truncated: page.truncated,
 			nextStartAfter: page.nextStartAfter,
 			pageSize,
