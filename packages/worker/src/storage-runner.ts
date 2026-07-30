@@ -8,7 +8,9 @@ import {
 	readUserD1StorageBytes,
 } from '#worker/entitlements/service.ts'
 import {
-	listUserStorageBucketIds,
+	listUserStorageBucketEstimates,
+	maybeRefreshStorageBucketEstimate,
+	recordStorageBucketEstimate,
 	registerStorageBucket,
 	storageBucketKindFromStorageId,
 } from '#worker/storage-buckets/service.ts'
@@ -18,8 +20,15 @@ import { storageRunnerDurableObjectName } from '#worker/user-scoped-durable-obje
 const defaultStorageExportPageSize = 250
 const maxStorageExportPageSize = 1_000
 const maxConcurrentStorageEstimateReads = 16
-/** One bounded pause before re-reading a failed estimate chunk. */
-export const storageEstimateReadRetryDelayMs = 150
+/**
+ * Backoff pauses between estimate read attempts (attempts = length + 1).
+ * Entitlement baselines only probe the write-target bucket plus any bucket
+ * that has never been measured, so the probe set is small enough to afford
+ * several attempts: production showed a single 150ms retry was not enough to
+ * ride out transient per-bucket DO estimate-read failures, which used to
+ * block tiny writes outright.
+ */
+export const storageEstimateReadRetryDelaysMs = [150, 600, 2400] as const
 /**
  * Bound each StorageRunner `getEstimatedBytes` RPC so one hung DO cannot own
  * the whole sandbox deadline (~90s). Fail closed after this budget.
@@ -45,9 +54,10 @@ const readOnlyStorageSqlPrefixes = [
 
 /**
  * Per-run memo for storage-byte entitlement totals. The first mutating write
- * in a sandbox pays the all-bucket estimate fan-out; later writes reuse that
- * baseline and accumulate `reservedBytes` so the run still accounts for its
- * own earlier accepted writes without rescanning every Durable Object.
+ * in a sandbox pays the baseline read (D1 sums plus a live probe of the
+ * target bucket and any buckets without a stored estimate); later writes
+ * reuse that baseline and accumulate `reservedBytes` so the run still
+ * accounts for its own earlier accepted writes without re-reading.
  */
 export type StorageBytesEntitlementRunCache = {
 	baseline: Promise<{
@@ -605,16 +615,46 @@ export function storageRunnerRpc(input: {
 		})
 	}
 
+	// After a successful mutation, opportunistically refresh this bucket's
+	// stored estimate on its inventory row (throttled per isolate) so the
+	// storage-byte entitlement baseline can read it from D1 instead of
+	// probing every bucket's Durable Object. The persist is UPDATE-only, so
+	// unlike registration it is safe on clearStorage paths that run while a
+	// user or bucket is being deleted: it can never recreate a removed row.
+	const refreshOwnedBucketEstimate = () => {
+		maybeRefreshStorageBucketEstimate({
+			env: input.env,
+			userId: input.userId,
+			storageId: input.storageId,
+			readEstimatedBytes: async () =>
+				(
+					await withStorageEstimateReadTimeout(
+						() => runner.getEstimatedBytes(),
+						input.storageId,
+					)
+				).estimatedBytes,
+		})
+	}
+
 	return {
 		getValue: (payload: { key: string }) => runner.getValue(payload),
-		setValue: (payload: { key: string; value: unknown }) => {
+		setValue: async (payload: { key: string; value: unknown }) => {
 			registerOwnedBucket()
-			return runner.setValue(payload)
+			const result = await runner.setValue(payload)
+			refreshOwnedBucketEstimate()
+			return result
 		},
-		deleteValue: (payload: { key: string }) => {
+		deleteValue: async (payload: { key: string }) => {
 			registerOwnedBucket()
-			return runner.deleteValue(payload)
+			const result = await runner.deleteValue(payload)
+			refreshOwnedBucketEstimate()
+			return result
 		},
+		// clearStorage intentionally does not refresh the stored estimate:
+		// nearly every clear precedes deletion of the inventory row (account,
+		// package, and job cleanup), and the rare user-facing clear leaves at
+		// most a stale-high estimate that over-counts (fail-safe) until the
+		// bucket's next mutating write measures it live again.
 		clearStorage: () => runner.clearStorage(),
 		getEstimatedBytes: () => runner.getEstimatedBytes(),
 		listValues: (payload: {
@@ -626,23 +666,31 @@ export function storageRunnerRpc(input: {
 			pageSize?: number
 			startAfter?: string | null
 		}) => runner.exportStorage(payload),
-		importStorage: (payload: {
+		importStorage: async (payload: {
 			mode: 'replace'
 			replacePage: 'first' | 'continue'
 			entries: Array<{ key: string; valueJson: string }>
 		}) => {
 			registerOwnedBucket()
-			return runner.importStorage(payload)
+			const result = await runner.importStorage(payload)
+			refreshOwnedBucketEstimate()
+			return result
 		},
-		sqlQuery: (payload: {
+		sqlQuery: async (payload: {
 			query: string
 			params?: Array<unknown>
 			writable?: boolean
 		}) => {
+			const mutating =
+				Boolean(payload.writable) && !isReadOnlyStorageSqlQuery(payload.query)
 			if (payload.writable) {
 				registerOwnedBucket()
 			}
-			return runner.sqlQuery(payload)
+			const result = await runner.sqlQuery(payload)
+			if (mutating) {
+				refreshOwnedBucketEstimate()
+			}
+			return result
 		},
 	}
 }
@@ -651,7 +699,11 @@ async function readStorageEstimateChunkWithRetry(input: {
 	env: Env
 	userId: string
 	storageIds: Array<string>
+	/** Backoff pauses between attempts; attempts = length + 1. */
+	retryDelaysMs?: ReadonlyArray<number>
 }): Promise<Array<StorageEstimateResult>> {
+	const retryDelaysMs = input.retryDelaysMs ?? storageEstimateReadRetryDelaysMs
+	const maxAttempts = retryDelaysMs.length + 1
 	const readOne = (storageId: string) =>
 		withStorageEstimateReadTimeout(
 			() =>
@@ -663,51 +715,52 @@ async function readStorageEstimateChunkWithRetry(input: {
 			storageId,
 		)
 
-	// Wait for every first-attempt read to settle before retrying so a fast
-	// rejection cannot overlap still-pending peers and exceed the fan-out cap.
-	const firstAttempt = await Promise.allSettled(
-		input.storageIds.map((storageId) => readOne(storageId)),
-	)
 	const values: Array<StorageEstimateResult | undefined> = Array.from({
 		length: input.storageIds.length,
 	})
-	const failedIndexes: Array<number> = []
-	for (const [index, result] of firstAttempt.entries()) {
-		if (result.status === 'fulfilled') {
-			values[index] = result.value
-			continue
-		}
-		failedIndexes.push(index)
-	}
-	if (failedIndexes.length > 0) {
-		await new Promise<void>((resolve) => {
-			setTimeout(resolve, storageEstimateReadRetryDelayMs)
-		})
-		const retry = await Promise.allSettled(
-			failedIndexes.map((index) =>
+	let pendingIndexes = input.storageIds.map((_storageId, index) => index)
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		// Wait for every attempt's reads to settle before retrying so a fast
+		// rejection cannot overlap still-pending peers and exceed the fan-out
+		// cap.
+		const results = await Promise.allSettled(
+			pendingIndexes.map((index) =>
 				readOne(input.storageIds[index] ?? 'unknown'),
 			),
 		)
-		for (const [retryIndex, result] of retry.entries()) {
-			const index = failedIndexes[retryIndex]
+		const failedIndexes: Array<number> = []
+		let firstFailureReason: unknown
+		for (const [resultIndex, result] of results.entries()) {
+			const index = pendingIndexes[resultIndex]
 			if (index === undefined) continue
 			if (result.status === 'fulfilled') {
 				values[index] = result.value
 				continue
 			}
+			if (failedIndexes.length === 0) {
+				firstFailureReason = result.reason
+			}
+			failedIndexes.push(index)
+		}
+		if (failedIndexes.length === 0) break
+		if (attempt === maxAttempts) {
 			// An unreadable bucket cannot safely be treated as zero usage.
 			throw createStorageEstimateReadError({
-				storageId: input.storageIds[index] ?? 'unknown',
-				attempts: 2,
-				cause: result.reason,
+				storageId: input.storageIds[failedIndexes[0] ?? -1] ?? 'unknown',
+				attempts: maxAttempts,
+				cause: firstFailureReason,
 			})
 		}
+		pendingIndexes = failedIndexes
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, retryDelaysMs[attempt - 1] ?? 0)
+		})
 	}
 	return values.map((value, index) => {
 		if (value === undefined) {
 			throw createStorageEstimateReadError({
 				storageId: input.storageIds[index] ?? 'unknown',
-				attempts: 2,
+				attempts: maxAttempts,
 				cause: new Error('Storage estimate retry completed without a value.'),
 			})
 		}
@@ -715,36 +768,76 @@ async function readStorageEstimateChunkWithRetry(input: {
 	})
 }
 
+/**
+ * One bucket's live `getEstimatedBytes`, bounded by the estimate read
+ * timeout and retried per `retryDelaysMs` (defaults to the entitlement
+ * policy). Throws the fail-closed estimate read error when every attempt
+ * fails. Used by the estimate backfill lane.
+ */
+export async function readStorageBucketEstimatedBytes(input: {
+	env: Env
+	userId: string
+	storageId: string
+	retryDelaysMs?: ReadonlyArray<number>
+}): Promise<number> {
+	const estimates = await readStorageEstimateChunkWithRetry({
+		env: input.env,
+		userId: input.userId,
+		storageIds: [input.storageId],
+		retryDelaysMs: input.retryDelaysMs,
+	})
+	return estimates[0]?.estimatedBytes ?? 0
+}
+
 async function readStorageBytesEntitlementBaseline(input: {
 	env: Env
 	userId: string
 	storageId: string
 }) {
-	const [d1Bytes, registeredStorageIds] = await Promise.all([
+	const [d1Bytes, bucketEstimates] = await Promise.all([
 		readUserD1StorageBytes({
 			db: input.env.APP_DB,
 			userId: input.userId,
 		}),
-		listUserStorageBucketIds({
+		listUserStorageBucketEstimates({
 			env: input.env,
 			userId: input.userId,
 		}),
 	])
 	// Registration is asynchronous, so include the bucket being written even
-	// when its inventory row has not landed yet. The Set avoids double-counting
-	// once it is registered. Estimate reads are batched to cap concurrent DO
-	// fan-out; total work remains O(bucket count) so every inventoried bucket is
-	// counted exactly. Large inventories are expected to stay rare; callers that
-	// issue many mutating SQL statements in one sandbox should pass a run cache
-	// so only the first write pays this scan.
-	const storageIds = [...new Set([...registeredStorageIds, input.storageId])]
+	// when its inventory row has not landed yet. The Map avoids double-counting
+	// once it is registered.
+	const estimatesByStorageId = new Map<string, number | null>(
+		bucketEstimates.map((bucket) => [bucket.storageId, bucket.estimatedBytes]),
+	)
+	if (!estimatesByStorageId.has(input.storageId)) {
+		estimatesByStorageId.set(input.storageId, null)
+	}
+	// Live getEstimatedBytes RPCs are limited to the bucket that triggered
+	// this baseline read (fresh measurement for the bucket about to grow)
+	// plus any bucket whose inventory row has no stored estimate yet; probed
+	// values are persisted below and the estimate backfill lane retries any
+	// row that stays unmeasured. Every other bucket contributes its stored
+	// D1 estimate, so the cold mutating path no longer fans out across the
+	// whole inventory. With a run cache, a later write in the same run that
+	// targets a different already-inventoried bucket reuses that bucket's
+	// stored estimate rather than probing it live — bounded staleness the
+	// run cache offsets by accumulating the run's own reserved bytes.
 	let durableObjectBytes = 0
+	const storageIdsToProbe: Array<string> = []
+	for (const [storageId, estimatedBytes] of estimatesByStorageId) {
+		if (storageId === input.storageId || estimatedBytes === null) {
+			storageIdsToProbe.push(storageId)
+			continue
+		}
+		durableObjectBytes += estimatedBytes
+	}
 	for (
 		let offset = 0;
-		offset < storageIds.length;
+		offset < storageIdsToProbe.length;
 		offset += maxConcurrentStorageEstimateReads
 	) {
-		const chunkIds = storageIds.slice(
+		const chunkIds = storageIdsToProbe.slice(
 			offset,
 			offset + maxConcurrentStorageEstimateReads,
 		)
@@ -753,14 +846,21 @@ async function readStorageBytesEntitlementBaseline(input: {
 			userId: input.userId,
 			storageIds: chunkIds,
 		})
-		durableObjectBytes += estimates.reduce(
-			(total, estimate) => total + estimate.estimatedBytes,
-			0,
-		)
+		for (const [index, estimate] of estimates.entries()) {
+			durableObjectBytes += estimate.estimatedBytes
+			// Fire-and-forget persist (UPDATE-only) so the next isolate reads
+			// this bucket's estimate from D1 instead of probing the DO again.
+			recordStorageBucketEstimate({
+				env: input.env,
+				userId: input.userId,
+				storageId: chunkIds[index],
+				estimatedBytes: estimate.estimatedBytes,
+			})
+		}
 	}
 	return {
 		bytes: d1Bytes + durableObjectBytes,
-		storageIds: new Set(storageIds),
+		storageIds: new Set(estimatesByStorageId.keys()),
 	}
 }
 
@@ -771,9 +871,9 @@ export async function assertStorageRunnerWriteWithinEntitlement(input: {
 	storageId: string
 	requested?: number
 	/**
-	 * Optional per-sandbox memo. When set, the expensive all-bucket estimate
-	 * runs once; later asserts reuse the baseline and accumulate reserved
-	 * bytes from earlier accepted writes in this run.
+	 * Optional per-sandbox memo. When set, the baseline read (D1 sums plus
+	 * the bounded live probes) runs once; later asserts reuse the baseline
+	 * and accumulate reserved bytes from earlier accepted writes in this run.
 	 */
 	cache?: StorageBytesEntitlementRunCache | null
 }) {

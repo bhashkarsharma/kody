@@ -491,6 +491,10 @@
 		{
 			"filename": "0117-feature-flag-exposure-rollups.sql",
 			"sha256": "21c909ac033dbe55fc0654b8a729a4cb3344f769dcb7b1e86aa8f978ed89a6cd"
+		},
+		{
+			"filename": "0118-user-storage-bucket-estimated-bytes.sql",
+			"sha256": "6bde29d7af33c4378bac5a5729e66c7fbb2206e6162ddffa5c988630f4d614c2"
 		}
 	]
 }
