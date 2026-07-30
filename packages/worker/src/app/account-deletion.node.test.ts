@@ -349,6 +349,26 @@ function createTestDb(
 								}
 								return { meta: { changes: changed } }
 							}
+							const replaceJsonMatch = lower.match(
+								/^update (\w+) set (\w+) = replace\(\2, \?, \?\) where \2 like \?$/,
+							)
+							if (replaceJsonMatch) {
+								const table = replaceJsonMatch[1] as string
+								const column = replaceJsonMatch[2] as string
+								const search = String(params[0])
+								const replacement = String(params[1])
+								const likePattern = String(params[2])
+								const needle = likePattern.replace(/^%/, '').replace(/%$/, '')
+								let changed = 0
+								for (const row of rows[table] ?? []) {
+									const current = row[column]
+									if (typeof current !== 'string') continue
+									if (!current.includes(needle)) continue
+									row[column] = current.split(search).join(replacement)
+									changed += 1
+								}
+								return { meta: { changes: changed } }
+							}
 							const replaceColumnMatch = lower.match(
 								/^update (\w+) set (\w+) = \? where (\w+) = \?$/,
 							)
@@ -921,6 +941,53 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			{ user_id: userAaa, banned_by_user_id: userBbb },
 			{ user_id: userBbb, banned_by_user_id: userAaa },
 		],
+		package_codemod_run_items: [
+			{
+				id: 'codemod-item-1',
+				run_id: 'codemod-run-1',
+				user_id: userAaa,
+				package_id: 'pkg-1',
+				kody_id: 'demo',
+				status: 'applied',
+			},
+			{
+				id: 'codemod-item-2',
+				run_id: 'codemod-run-2',
+				user_id: userBbb,
+				package_id: 'pkg-2',
+				kody_id: 'demo-b',
+				status: 'applied',
+			},
+		],
+		package_codemod_runs: [
+			{
+				id: 'codemod-run-1',
+				codemod_id: '0001-ambient-storage-to-package-storage',
+				mode: 'apply',
+				scope_user_id: userAaa,
+				initiated_by_user_id: userAaa,
+				filters_json: JSON.stringify({ userIds: [userAaa, userBbb] }),
+				status: 'completed',
+			},
+			{
+				id: 'codemod-run-fleet',
+				codemod_id: '0001-ambient-storage-to-package-storage',
+				mode: 'scan',
+				scope_user_id: null,
+				initiated_by_user_id: userBbb,
+				filters_json: JSON.stringify({ userIds: [userAaa] }),
+				status: 'completed',
+			},
+			{
+				id: 'codemod-run-2',
+				codemod_id: '0001-ambient-storage-to-package-storage',
+				mode: 'apply',
+				scope_user_id: userBbb,
+				initiated_by_user_id: userBbb,
+				filters_json: JSON.stringify({ userIds: [userBbb] }),
+				status: 'completed',
+			},
+		],
 	})
 
 	const deletedKvKeys: Array<string> = []
@@ -933,6 +1000,9 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'derived-cache:v1:community-icon:v1:listing-1:abc123',
 		'derived-cache:v1:community-icon:v1:listing-1:historical',
 		'source-snapshot:v1:src-2:def456',
+		`package-codemod-revert:${userAaa}:item-1`,
+		`package-codemod-revert:${userAaa}:item-2`,
+		`package-codemod-revert:${userBbb}:item-other`,
 		'package-retriever-manifest:v1:user-aaa:pkg-1:abc123',
 		'package-retriever-index-entry:v1:user-aaa:search:pkg-1:notes',
 		'package-retriever-index-entry:v1:user-aaa:context:pkg-1:notes',
@@ -1246,6 +1316,48 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	expect(rows.community_bans).toEqual([
 		{ user_id: userBbb, banned_by_user_id: 'deleted-user' },
 	])
+	expect(rows.package_codemod_run_items).toEqual([
+		{
+			id: 'codemod-item-2',
+			run_id: 'codemod-run-2',
+			user_id: userBbb,
+			package_id: 'pkg-2',
+			kody_id: 'demo-b',
+			status: 'applied',
+		},
+	])
+	expect(rows.package_codemod_runs).toEqual([
+		{
+			id: 'codemod-run-1',
+			codemod_id: '0001-ambient-storage-to-package-storage',
+			mode: 'apply',
+			scope_user_id: 'deleted-user',
+			initiated_by_user_id: 'deleted-user',
+			filters_json: JSON.stringify({ userIds: ['deleted-user', userBbb] }),
+			status: 'completed',
+		},
+		{
+			id: 'codemod-run-fleet',
+			codemod_id: '0001-ambient-storage-to-package-storage',
+			mode: 'scan',
+			scope_user_id: null,
+			initiated_by_user_id: userBbb,
+			filters_json: JSON.stringify({ userIds: ['deleted-user'] }),
+			status: 'completed',
+		},
+		{
+			id: 'codemod-run-2',
+			codemod_id: '0001-ambient-storage-to-package-storage',
+			mode: 'apply',
+			scope_user_id: userBbb,
+			initiated_by_user_id: userBbb,
+			filters_json: JSON.stringify({ userIds: [userBbb] }),
+			status: 'completed',
+		},
+	])
+	for (const run of rows.package_codemod_runs ?? []) {
+		expect(String(run['filters_json'])).not.toContain(userAaa)
+	}
 	expect(rows.users).toEqual([{ id: 2, email: 'b@example.com' }])
 	expect(result.deletedRowCounts.password_resets).toBe(2)
 	expect(result.deletedRowCounts.user_roles).toBe(1)
@@ -1279,6 +1391,8 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		'derived-cache:v1:community-icon:v1:listing-1:abc123',
 		'derived-cache:v1:community-icon:v1:listing-1:commit-1',
 		'derived-cache:v1:community-icon:v1:listing-1:historical',
+		`package-codemod-revert:${userAaa}:item-1`,
+		`package-codemod-revert:${userAaa}:item-2`,
 		'package-retriever-index-entry:v1:user-aaa:context:pkg-1:notes',
 		'package-retriever-index-entry:v1:user-aaa:search:pkg-1:notes',
 		'package-retriever-index:v1:user-aaa:context',
@@ -1294,6 +1408,9 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	)
 	expect(deletedKvKeys).not.toContain(
 		'package-retriever-index:v1:user-bbb:search',
+	)
+	expect(deletedKvKeys).not.toContain(
+		`package-codemod-revert:${userBbb}:item-other`,
 	)
 
 	// Result accounting captures the per-table counts.
@@ -1314,7 +1431,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	expect(result.updatedRowCounts.community_bans).toBe(1)
 	expect(result.deletedRowCounts.platform_feedback).toBe(1)
 	expect(result.updatedRowCounts.platform_feedback).toBe(1)
-	expect(result.deletedKvKeys).toBe(14)
+	expect(result.deletedKvKeys).toBe(16)
 	expect(result.deletedCommunityAssets).toBe(5)
 	expect(result.deletedEmailBlobs).toBe(2)
 	// Prefix sweeps remove current and historical assets without crossing users.

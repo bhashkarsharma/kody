@@ -463,6 +463,10 @@
 		{
 			"filename": "0110-enable-execute-pre-exec-typecheck-for-kentcdodds.sql",
 			"sha256": "b5a30dc7757e5b02ff745d23910ebdf94ba2ef284c6f7b29498d5d6ddd9dd4b2"
+		},
+		{
+			"filename": "0111-package-codemod-ledger.sql",
+			"sha256": "d42350b7bfa88400d8133a8d8436dd6fa2e25e3ab7650e047c447e7f4704863e"
 		}
 	]
 }

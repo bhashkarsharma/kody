@@ -258,6 +258,89 @@ never emit. Failed `execute` calls do persist and do emit.
 Use this topic for notifier packages that email, write to Sheets, spawn an
 agent, or otherwise react when something in the user's account fails.
 
+## `package.codemod.applied`
+
+After a successful package codemod **apply**, Kody dispatches
+`package.codemod.applied` to packages saved by the **owning user** of the
+migrated package that declare the topic. Delivery follows the same best-effort
+host dispatch path as `run.error.recorded` — there is no Queue / DLQ for this
+topic. Failures during subscriber discovery or package-invocation infrastructure
+are logged and do not fail the codemod apply.
+
+Handlers receive a metadata-first payload:
+
+```ts
+type PackageCodemodSubscriptionEnvelope = {
+	event: 'package.codemod.applied'
+	codemod: {
+		id: string
+		description: string
+	}
+	package: {
+		package_id: string
+		kody_id: string
+	}
+	run: {
+		run_id: string
+		item_id: string
+	}
+	changed_paths: Array<string>
+	before_commit: string | null
+	after_commit: string | null
+}
+```
+
+`changed_paths` lists published-tree paths the codemod transform modified.
+`before_commit` and `after_commit` are the package's published commit before and
+after apply. The event deliberately omits file contents — fetch the current
+published source with repo or package capabilities when a handler needs diffs or
+full files. Community listing snapshots are unchanged by apply; only the owning
+saved package advances. `run.item_id` is the apply ledger item id.
+
+Use this topic for notifier packages that record migrations, ping owners, or
+trigger follow-up automation when platform codemods rewrite user package source.
+
+## `package.codemod.reverted`
+
+After a successful package codemod **revert**, Kody dispatches
+`package.codemod.reverted` to packages saved by the **owning user** of the
+restored package that declare the topic. Delivery semantics match
+`package.codemod.applied` and `run.error.recorded`.
+
+Handlers receive the same envelope shape with
+`event: 'package.codemod.reverted'`:
+
+```ts
+type PackageCodemodSubscriptionEnvelope = {
+	event: 'package.codemod.reverted'
+	codemod: {
+		id: string
+		description: string
+	}
+	package: {
+		package_id: string
+		kody_id: string
+	}
+	run: {
+		run_id: string
+		item_id: string
+	}
+	changed_paths: Array<string>
+	before_commit: string | null
+	after_commit: string | null
+}
+```
+
+For revert, `before_commit` is the post-codemod published commit (the source
+apply item's `afterCommit`) and `after_commit` is the restored pre-codemod
+commit. `changed_paths` is copied from the source apply item (paths the codemod
+originally changed), not recomputed at revert time. `run.item_id` is the new
+revert-run ledger item id. Revert snapshots expire from KV after 90 days, so
+revert and this event are unavailable once the snapshot is gone.
+
+Use this topic when automation must react to an operator or user undoing a prior
+codemod apply.
+
 ## `community.activity.recorded` (admins)
 
 Successful community fork and rating writes enqueue a durable

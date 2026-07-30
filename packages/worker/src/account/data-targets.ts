@@ -37,6 +37,20 @@ export type UserScopedDataTarget =
 			setColumn: string
 			value: string
 	  }
+	| {
+			/**
+			 * Rewrite a JSON text column that may embed the deleted user's id
+			 * (for example filters_json.userIds). Deletion-only: export still
+			 * reaches the table through other match columns when appropriate.
+			 */
+			kind: 'replace_user_id_in_json_column'
+			table: string
+			column: string
+			value: string
+			includeInExport?: boolean
+			surface?: string
+			reason?: string
+	  }
 	| { kind: 'bucket_parent'; table: string; parentTable: string }
 	| { kind: 'attachment_parent'; table: string }
 	| {
@@ -119,6 +133,36 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 	{ kind: 'user_id', table: 'user_activation_milestones' },
 	{ kind: 'user_id', table: 'user_package_run_successes' },
 	{ kind: 'user_id', table: 'agent_package_conversation_uses' },
+	// Per-package codemod outcomes belong to the package owner. Delete before
+	// anonymizing run attribution so orphaned items do not outlive the user.
+	{ kind: 'user_id', table: 'package_codemod_run_items' },
+	// Codemod runs are operator ledger rows: scope_user_id / initiated_by_user_id
+	// are attribution only. Keep the run for audit and anonymize both columns
+	// (matching community_bans.banned_by_user_id / package_scope_grants).
+	{
+		kind: 'replace_user_column',
+		table: 'package_codemod_runs',
+		matchColumn: 'scope_user_id',
+		setColumn: 'scope_user_id',
+		value: 'deleted-user',
+	},
+	{
+		kind: 'replace_user_column',
+		table: 'package_codemod_runs',
+		matchColumn: 'initiated_by_user_id',
+		setColumn: 'initiated_by_user_id',
+		value: 'deleted-user',
+	},
+	{
+		kind: 'replace_user_id_in_json_column',
+		table: 'package_codemod_runs',
+		column: 'filters_json',
+		value: 'deleted-user',
+		includeInExport: false,
+		surface: 'package_codemod_runs_filters_json',
+		reason:
+			'Fleet/canary filter payloads may list the deleted user in userIds; deletion rewrites that id to deleted-user. Export reaches package_codemod_runs through scope/initiator columns instead.',
+	},
 	{ kind: 'mcp_memory_suppression' },
 	{ kind: 'user_id', table: 'mcp_memories' },
 	{ kind: 'user_id', table: 'mcp_user_server_instructions' },
@@ -363,6 +407,7 @@ export function getAccountD1UserColumnCoverage() {
 				covered.add(`${target.table}.${target.matchColumn}`)
 				break
 			}
+			case 'replace_user_id_in_json_column':
 			case 'bucket_parent':
 			case 'attachment_parent':
 			case 'community_listing_child':
@@ -399,6 +444,12 @@ export type UserScopedTargetMatch = {
 		| { kind: 'delete' }
 		| { kind: 'null_columns'; columns: ReadonlyArray<string> }
 		| { kind: 'replace_column'; column: string; value: string }
+		| {
+				kind: 'replace_json_string'
+				column: string
+				search: string
+				replacement: string
+		  }
 }
 
 export function resolveUserScopedTargetTable(
@@ -417,6 +468,7 @@ export function resolveUserScopedTargetTable(
 		case 'user_columns':
 		case 'null_user_column':
 		case 'replace_user_column':
+		case 'replace_user_id_in_json_column':
 		case 'bucket_parent':
 		case 'community_listing_child': {
 			return target.table
@@ -495,6 +547,22 @@ export function buildUserScopedTargetMatch(input: {
 					kind: 'replace_column',
 					column: target.setColumn,
 					value: target.value,
+				},
+			}
+		}
+		case 'replace_user_id_in_json_column': {
+			const quotedUserId = `"${input.mcpUserId}"`
+			const quotedReplacement = `"${target.value}"`
+			return {
+				table,
+				whereSql: `${target.column} LIKE ?`,
+				qualifiedWhereSql: `${table}.${target.column} LIKE ?`,
+				params: [`%${quotedUserId}%`],
+				mutation: {
+					kind: 'replace_json_string',
+					column: target.column,
+					search: quotedUserId,
+					replacement: quotedReplacement,
 				},
 			}
 		}
@@ -578,6 +646,18 @@ export function buildUserScopedDeleteOrUpdateSql(
 				params: [match.mutation.value, ...match.params],
 			}
 		}
+		case 'replace_json_string': {
+			return {
+				sql: `UPDATE ${match.table}
+						SET ${match.mutation.column} = REPLACE(${match.mutation.column}, ?, ?)
+						WHERE ${match.whereSql}`,
+				params: [
+					match.mutation.search,
+					match.mutation.replacement,
+					...match.params,
+				],
+			}
+		}
 		default: {
 			const exhaustive: never = match.mutation
 			throw new Error(
@@ -615,6 +695,7 @@ export const accountExportForeignUserIdColumnsByTable: Readonly<
 	community_activity_events: ['actor_user_id'],
 	community_reports: ['listing_owner_user_id', 'resolved_by_user_id'],
 	account_write_lease_repairs: ['target_user_id', 'repaired_by_user_id'],
+	package_codemod_runs: ['scope_user_id', 'initiated_by_user_id'],
 	package_scope_grants: [
 		'scope_owner_user_id',
 		'grantee_user_id',
