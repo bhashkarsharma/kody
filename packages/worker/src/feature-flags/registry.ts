@@ -53,13 +53,13 @@ export const featureFlagDefinitions = [
 		key: 'execute-pre-exec-typecheck',
 		defaultEnabled: false,
 		description:
-			'Runs the pre-execution TypeScript checker for ad hoc execute modules before sandbox execution. Keep off globally during rollout and enable with per-user overrides.',
+			'Validates ad hoc execute modules (size, syntax, default export) before sandbox execution. Keep off globally during rollout and enable with per-user overrides.',
 		successMetric: {
 			eventType: 'execute',
 			measure: 'error_rate',
 			goal: 'decrease',
 			hypothesis:
-				'Typechecking execute modules before sandbox execution should catch type errors early and lower the execute error rate.',
+				'Validating execute modules before sandbox execution should catch malformed modules early and lower the execute error rate.',
 		},
 	},
 ] as const satisfies ReadonlyArray<FeatureFlagDefinition>
