@@ -503,6 +503,10 @@
 		{
 			"filename": "0122-user-d1-storage-bytes.sql",
 			"sha256": "1fd69b59afdee9db70dacc043c326ec00aaa5825ce57865168e8977f3064004d"
+		},
+		{
+			"filename": "0123-inbound-delivery-effect-indexes.sql",
+			"sha256": "eb972cefd3ebf6c692b75600c27a68df9c401e113700bb9b1d4e0a62ea31bc13"
 		}
 	]
 }
