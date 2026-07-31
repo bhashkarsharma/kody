@@ -74,6 +74,13 @@ function createEntitlementsTestDb(
 	const counts = input.counts ?? {}
 	const counters = input.counters ?? []
 	const queries: Array<{ sql: string; params: Array<unknown> }> = []
+	const initialStorageBytes = Object.values(counts).reduce(
+		(total, count) => total + (count ?? 0),
+		0,
+	)
+	const storageBytesByUser = new Map(
+		users.map((user) => [user.stable_user_id, initialStorageBytes]),
+	)
 
 	function countFor(query: string) {
 		const tableNames = [
@@ -146,6 +153,10 @@ function createEntitlementsTestDb(
 										: null
 								) as T | null
 							}
+							if (query.includes('SELECT d1_storage_bytes AS bytes')) {
+								const bytes = storageBytesByUser.get(String(params[0]))
+								return (bytes === undefined ? null : { bytes }) as T | null
+							}
 							if (query.includes('FROM entitlement_daily_counters')) {
 								const row = counters.find(
 									(counter) =>
@@ -162,6 +173,20 @@ function createEntitlementsTestDb(
 							throw new Error(`Unsupported first query: ${query}`)
 						},
 						async run() {
+							if (
+								query.includes('SET d1_storage_bytes = d1_storage_bytes + ?')
+							) {
+								const userId = String(params[2])
+								const existing = storageBytesByUser.get(userId)
+								if (
+									existing === undefined ||
+									existing + Number(params[3]) > Number(params[4])
+								) {
+									return { meta: { changes: 0 } }
+								}
+								storageBytesByUser.set(userId, existing + Number(params[0]))
+								return { meta: { changes: 1 } }
+							}
 							if (query.includes('INSERT INTO entitlement_daily_counters')) {
 								const isConditionalConsume = query.includes('count + 1 <= ?')
 								const amount = isConditionalConsume ? 1 : Number(params[3])
@@ -335,7 +360,7 @@ test('storage byte entry estimates support net-positive upsert deltas', () => {
 	)
 })
 
-test('getUserPlan resolves plans, defaults scoped misses to max, and rejects invalid stored plans', async () => {
+test('getUserPlan resolves plans, defaults unresolved contexts to free, and rejects invalid stored plans', async () => {
 	const userId = await createStableUserIdFromEmail(plannedEmail)
 	const unknownPlanEmail = 'unknown-plan@example.com'
 	const unknownPlanUserId = await createStableUserIdFromEmail(unknownPlanEmail)
@@ -349,10 +374,10 @@ test('getUserPlan resolves plans, defaults scoped misses to max, and rejects inv
 			},
 		],
 	})
-	expect(await getUserPlan(db, { userId: 'user-1', email: null })).toBe('max')
-	expect(await getUserPlan(db, { userId: 'user-1', email: '' })).toBe('max')
+	expect(await getUserPlan(db, { userId: 'user-1', email: null })).toBe('free')
+	expect(await getUserPlan(db, { userId: 'user-1', email: '' })).toBe('free')
 	expect(await getUserPlan(db, { userId: 'user-1', email: plannedEmail })).toBe(
-		'max',
+		'free',
 	)
 	expect(queries).toEqual([])
 
@@ -363,13 +388,13 @@ test('getUserPlan resolves plans, defaults scoped misses to max, and rejects inv
 	expect(queries.at(-1)?.sql).toContain('email = ? AND stable_user_id = ?')
 	expect(queries.at(-1)?.params).toEqual([plannedEmail, userId])
 
-	// Mismatched email/stable-id pair is intentionally max (no warn).
+	// Mismatched email/stable-id pairs fail closed without warning.
 	expect(
 		await getUserPlan(db, {
 			userId,
 			email: unknownPlanEmail,
 		}),
-	).toBe('max')
+	).toBe('free')
 
 	await expect(
 		getUserPlan(db, {
@@ -413,10 +438,10 @@ test('getCachedUserPlan caches per db binding and never caches failures', async 
 	).toBe('free')
 
 	// Anonymous / invalid ids short-circuit without touching the cache or D1.
-	expect(await getCachedUserPlan(db, { userId, email: null })).toBe('max')
+	expect(await getCachedUserPlan(db, { userId, email: null })).toBe('free')
 	expect(
 		await getCachedUserPlan(db, { userId: 'user-1', email: plannedEmail }),
-	).toBe('max')
+	).toBe('free')
 
 	// Failures are not pinned for the TTL: the next call retries D1.
 	let firstCall = true
@@ -544,10 +569,10 @@ test('assertWithinEntitlement passes under the limit, throws at it, and enforces
 	expect(error.message).toBe(buildEntitlementLimitMessage(error.details))
 })
 
-test('assertWithinEntitlement enforces max concurrent workflow limit without email', async () => {
-	const maxLimit = planLimits.max.maxConcurrentWorkflows
+test('assertWithinEntitlement enforces free concurrent workflow limit without email', async () => {
+	const freeLimit = planLimits.free.maxConcurrentWorkflows
 	const { db } = createEntitlementsTestDb({
-		counts: { workflow_runs: maxLimit },
+		counts: { workflow_runs: freeLimit },
 	})
 	const error = await assertWithinEntitlement({
 		db,
@@ -562,9 +587,9 @@ test('assertWithinEntitlement enforces max concurrent workflow limit without ema
 		throw new Error('Expected an EntitlementLimitError.')
 	}
 	expect(error.details).toMatchObject({
-		plan: 'max',
-		limit: maxLimit,
-		current: maxLimit,
+		plan: 'free',
+		limit: freeLimit,
+		current: freeLimit,
 	})
 })
 
@@ -744,9 +769,9 @@ test('refundDailyEntitlement decrements the user/day counter and floors at zero'
 	).toBe(0)
 })
 
-test('missing-email lookups resolve to max and honor max email caps', async () => {
+test('missing-email lookups fail closed and honor free email caps', async () => {
 	const { db, counters } = createEntitlementsTestDb()
-	const sendLimit = maxPlanEmailLimits.email_sends_per_day
+	const sendLimit = planLimits.free.maxEmailSendsPerDay
 	const now = new Date('2026-07-05T15:00:00.000Z')
 	for (let index = 0; index < sendLimit; index += 1) {
 		await consumeDailyEntitlement({
@@ -768,7 +793,7 @@ test('missing-email lookups resolve to max and honor max email caps', async () =
 		}),
 	).rejects.toBeInstanceOf(EntitlementLimitError)
 
-	const receiveLimit = maxPlanEmailLimits.email_receives_per_day
+	const receiveLimit = planLimits.free.maxEmailReceivesPerDay
 	for (let index = 0; index < receiveLimit; index += 1) {
 		await consumeDailyEntitlement({
 			db,
@@ -798,7 +823,7 @@ test('missing-email lookups resolve to max and honor max email caps', async () =
 	expect(denied.details).toMatchObject({
 		code: 'entitlement_limit_exceeded',
 		resource: 'email_receives_per_day',
-		plan: 'max',
+		plan: 'free',
 		limit: receiveLimit,
 		current: receiveLimit,
 	})
@@ -940,6 +965,12 @@ test('storage bytes enforce for planned users and enforce finite max storage cap
 		email: plannedEmail,
 		requested: 1,
 	})
+	expect(underLimit.queries.some(({ sql }) => sql.includes('SUM('))).toBe(false)
+	expect(
+		underLimit.queries.some(({ sql }) =>
+			sql.includes('SET d1_storage_bytes = d1_storage_bytes + ?'),
+		),
+	).toBe(true)
 })
 
 test('getPlanRank orders free < pro < partner < max', () => {

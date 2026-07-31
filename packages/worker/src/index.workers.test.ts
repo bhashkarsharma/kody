@@ -57,6 +57,11 @@ const mocks = vi.hoisted(() => ({
 		updated: 0,
 		failed: 0,
 	})),
+	reconcileD1StorageBytes: vi.fn(async () => ({
+		scanned: 0,
+		updated: 0,
+		failed: 0,
+	})),
 }))
 
 vi.mock('./jobs/reconcile-artifacts-pushes.ts', () => ({
@@ -113,6 +118,10 @@ vi.mock('#worker/billing/subscription-sync.ts', () => ({
 
 vi.mock('#worker/storage-buckets/estimate-backfill.ts', () => ({
 	backfillStorageBucketEstimates: mocks.backfillStorageBucketEstimates,
+}))
+
+vi.mock('#worker/entitlements/d1-storage-reconciliation.ts', () => ({
+	reconcileD1StorageBytes: mocks.reconcileD1StorageBytes,
 }))
 
 vi.mock('#worker/jobs/job-schedule-watchdog.ts', () => ({
@@ -180,6 +189,10 @@ test('scheduled runs gated lanes and passes EMAIL_BLOBS to system-email retentio
 	expect(mocks.backfillStorageBucketEstimates).toHaveBeenCalledWith(
 		expect.objectContaining({ now: new Date(scheduledTime) }),
 	)
+	expect(mocks.reconcileD1StorageBytes).toHaveBeenCalledTimes(1)
+	const reconciliationInput = mocks.reconcileD1StorageBytes.mock.calls[0]?.[0]
+	expect(reconciliationInput?.db === env.APP_DB).toBe(true)
+	expect(reconciliationInput?.now).toEqual(new Date(scheduledTime))
 	expect(mocks.pruneRetention).not.toHaveBeenCalled()
 })
 
