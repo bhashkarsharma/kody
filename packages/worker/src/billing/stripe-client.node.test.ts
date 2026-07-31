@@ -1,9 +1,14 @@
 import { expect, test, vi } from 'vitest'
-import { silenceExpectedConsoleErrors } from '#worker/test-support/console-spies.ts'
+import {
+	consoleError,
+	silenceExpectedConsoleErrors,
+} from '#worker/test-support/console-spies.ts'
 import {
 	BillingNotConfiguredError,
+	cancelSubscription,
 	createBillingPortalSession,
 	createCheckoutSession,
+	deleteCustomer,
 	getCheckoutSession,
 	listSubscriptions,
 	StripeApiError,
@@ -200,6 +205,47 @@ test('stripe client request contracts for checkout, subscriptions, and portal', 
 		expect(body.get('return_url')).toBe('https://app.example.com/account')
 	} finally {
 		vi.unstubAllGlobals()
+	}
+})
+
+test('stripe client immediately cancels subscriptions and deletes customers', async () => {
+	const fetchMock = vi
+		.fn()
+		.mockResolvedValueOnce(
+			jsonResponse({ id: 'sub_active', status: 'canceled' }),
+		)
+		.mockResolvedValueOnce(jsonResponse({ id: 'cus_delete', deleted: true }))
+	vi.stubGlobal('fetch', fetchMock)
+	try {
+		const env = { STRIPE_SECRET_KEY: 'sk_test_secret' }
+		await cancelSubscription(env, 'sub_active')
+		await deleteCustomer(env, 'cus_delete')
+
+		expect(fetchMock).toHaveBeenCalledTimes(2)
+		expect(fetchMock.mock.calls[0]).toEqual([
+			'https://api.stripe.com/v1/subscriptions/sub_active',
+			expect.objectContaining({ method: 'DELETE' }),
+		])
+		expect(fetchMock.mock.calls[1]).toEqual([
+			'https://api.stripe.com/v1/customers/cus_delete',
+			expect.objectContaining({ method: 'DELETE' }),
+		])
+
+		consoleError.mockImplementation(() => {})
+		fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'unavailable' }, 503))
+		await expect(
+			deleteCustomer(env, 'cus_sensitive_identifier'),
+		).rejects.toBeInstanceOf(StripeApiError)
+		expect(consoleError).toHaveBeenCalledWith('stripe_api_error', {
+			status: 503,
+			path: '/v1/customers/<redacted>',
+		})
+		expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+			'cus_sensitive_identifier',
+		)
+	} finally {
+		vi.unstubAllGlobals()
+		consoleError.mockReset()
 	}
 })
 
