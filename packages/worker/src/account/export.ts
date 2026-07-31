@@ -473,12 +473,10 @@ const exportStorageIdBaseSql = `SELECT id FROM (
 		WHERE user_id = ? AND storage_id IS NOT NULL
 	UNION SELECT storage_id FROM user_storage_buckets
 		WHERE user_id = ?
-	UNION SELECT id FROM saved_packages
-		WHERE user_id = ? AND has_app = 1
 )`
 
 function exportStorageIdBaseParams(userId: string) {
-	return [userId, userId, userId, userId] as const
+	return [userId, userId, userId] as const
 }
 
 function tryDecodeURIComponent(value: string) {
@@ -2043,7 +2041,6 @@ export async function readAccountExportSection(input: {
 					`${exportStorageIdBaseSql} WHERE id > ? ORDER BY id LIMIT ?`,
 				)
 					.bind(
-						input.mcpUserId,
 						input.mcpUserId,
 						input.mcpUserId,
 						input.mcpUserId,

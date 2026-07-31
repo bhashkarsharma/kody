@@ -1339,7 +1339,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 		jobVectorId(packageJobId),
 		'package_pkg-1',
 	])
-	expect(clearStorageMock).toHaveBeenCalledTimes(7)
+	expect(clearStorageMock).toHaveBeenCalledTimes(6)
 	expect(purgeJobManagerMock).toHaveBeenCalledTimes(1)
 	expect(purgeRepoSessionMock).toHaveBeenCalledWith({
 		sessionId: 'rs-1',
@@ -1414,7 +1414,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	)
 	expect(result.deletedVectors).toBe(5)
 	expect(result.clearedDurableObjects).toMatchObject({
-		storageRunners: 7,
+		storageRunners: 6,
 		runLogs: 1,
 		jobManagers: 1,
 		repoSessions: 1,
