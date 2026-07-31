@@ -5,6 +5,8 @@ import {
 } from '#app/oauth-providers.ts'
 import { loadSessionInfo } from '#app/session-info.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
+import { getTurnstileSiteKey } from '#app/public-form-protection.ts'
+import { getSignupMode } from '#app/signup-mode.ts'
 
 export function createAuthPageHandler(
 	env: Env,
@@ -47,6 +49,8 @@ export function createAuthPageHandler(
 				loaderData: {
 					authProviders: {
 						ok: true,
+						signupMode: getSignupMode(env),
+						turnstileSiteKey: getTurnstileSiteKey(env),
 						providers: getEnabledOauthProviders(env).map((provider) => ({
 							id: provider,
 							label: oauthProviderDefinitions[provider].label,
