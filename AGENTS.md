@@ -1,21 +1,10 @@
 # kody agent index
 
-Instructions for **agents and humans working in this repository** (building and
-maintaining Kody). End-user / MCP usage docs live under
-[`docs/use/`](./docs/use/index.md).
-
 Kody is a multi-user personal assistant: every signed-in user gets a fully
 isolated assistant (own packages, jobs, secrets, values, memories, remote
-connectors, email inboxes, durable storage). Every read/write path, every
-Durable Object id backing user-owned state, and every search/vector path must be
-scoped by `userId`. Cross-user data sharing is a bug.
+connectors, email inboxes, durable storage).
 
-Use Node 26 and npm for installs and scripts (`npm install`, `npm run ...`).
-
-`npm run validate` is the single authoritative local gate: read-only, runs the
-same checks CI runs, and if it passes locally CI passes. `npm run validate:fix`
-is the explicit opt-in for mutating auto-fixes. Details (what it runs, CI job
-split, Husky hooks): [docs/contributing/setup.md](./docs/contributing/setup.md).
+`npm run validate` is the single authoritative local gate.
 
 This file is intentionally brief. Detailed instructions live in focused docs:
 
