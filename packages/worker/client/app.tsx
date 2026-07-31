@@ -1,8 +1,11 @@
 import { type Handle, css } from 'remix/ui'
+import { on } from './event-mixin.ts'
 import { clientRouteLoaders, clientRoutes } from './routes/index.tsx'
 import {
 	listenToRouterMutations,
 	listenToRouterNavigation,
+	listenToRouterNavigationEnd,
+	navigate,
 	registerRouteLoaders,
 	Router,
 } from './client-router.tsx'
@@ -22,6 +25,7 @@ import {
 	getSecondaryButtonCss,
 	layoutMaxWidths,
 	primaryLinkCss,
+	visuallyHiddenUntilFocusedCss,
 } from './styles/style-primitives.ts'
 import { type AppLoaderData } from '#app/loader-data.ts'
 import { userHasRole } from '#worker/identity/permissions.ts'
@@ -46,6 +50,7 @@ export function App(handle: Handle<AppProps>) {
 	let lastSessionRefreshAt = 0
 	let sessionMaybeStale = false
 	let currentPathname = readRouterPathname(handle)
+	let lastFocusManagedPathname = currentPathname
 
 	// Navigation-triggered refreshes are throttled: auth rarely changes
 	// mid-session and every SPA navigation was previously a /session round
@@ -106,6 +111,17 @@ export function App(handle: Handle<AppProps>) {
 			currentPathname = readRouterPathname(handle)
 			queueThrottledSessionRefresh()
 			handle.update()
+		})
+		listenToRouterNavigationEnd(handle, (detail) => {
+			const nextPathname = new URL(detail.location, window.location.origin)
+				.pathname
+			if (nextPathname === lastFocusManagedPathname) return
+			lastFocusManagedPathname = nextPathname
+			handle.queueTask(() => {
+				const main = document.getElementById('main')
+				if (!(main instanceof HTMLElement)) return
+				main.focus({ preventScroll: true })
+			})
 		})
 		// Router form POSTs mutate server state, which may include auth (e.g.
 		// logout destroys the session cookie), so the next navigation must
@@ -186,6 +202,22 @@ export function App(handle: Handle<AppProps>) {
 						boxSizing: 'border-box',
 					})}
 				>
+					<a
+						href="#main"
+						mix={[
+							on('click', (event) => {
+								const main = document.getElementById('main')
+								if (!(main instanceof HTMLElement)) return
+								event.preventDefault()
+								navigate('#main')
+								main.focus({ preventScroll: true })
+								main.scrollIntoView()
+							}),
+							css(visuallyHiddenUntilFocusedCss),
+						]}
+					>
+						Skip to content
+					</a>
 					{hideWaitlistBanner ? null : <WaitlistBanner />}
 					<div
 						mix={css({
@@ -296,7 +328,11 @@ export function App(handle: Handle<AppProps>) {
 								) : null}
 							</div>
 						</nav>
-						<main mix={css({ width: '100%', boxSizing: 'border-box' })}>
+						<main
+							id="main"
+							tabIndex={-1}
+							mix={css({ width: '100%', boxSizing: 'border-box' })}
+						>
 							<Router
 								routes={clientRoutes}
 								loaderData={handle.props.loaderData}
