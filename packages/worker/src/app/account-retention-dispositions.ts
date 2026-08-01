@@ -16,7 +16,6 @@ export const accountRetentionDispositions: ReadonlyArray<AccountRetentionDisposi
 		{ table: 'email_messages', kind: 'scheduled_policy' },
 		{ table: 'email_attachments', kind: 'scheduled_policy' },
 		{ table: 'email_threads', kind: 'scheduled_policy' },
-		{ table: 'entitlement_daily_counters', kind: 'scheduled_policy' },
 		{ table: 'usage_rollups', kind: 'scheduled_policy' },
 		{ table: 'feature_flag_exposure_rollups', kind: 'scheduled_policy' },
 		{ table: 'audit_events', kind: 'scheduled_policy' },
@@ -32,6 +31,12 @@ export const accountRetentionDispositions: ReadonlyArray<AccountRetentionDisposi
 			kind: 'alternate_cleanup',
 			reason:
 				'Ad-hoc jobs are cleaned by the hourly job_retention sweeper using account/platform retention windows; package-owned and preserved jobs are durable until explicit delete, package sync, or account deletion.',
+		},
+		{
+			table: 'entitlement_daily_counters',
+			kind: 'alternate_cleanup',
+			reason:
+				'The quiescent daily-counter mirror is pending a later drop migration; account deletion removes user rows during the code-first retirement window.',
 		},
 		{
 			table: 'mcp_memories',

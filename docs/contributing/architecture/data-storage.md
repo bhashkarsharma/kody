@@ -388,8 +388,10 @@ layout is `index1 = userId`, `blob1 = event type`, `blob2 = delivery outcome`,
 `blob3 = source timestamp`, and `double1 = 1`. Admin queries return only
 platform-wide day/outcome counts and weight sampled rows by `_sample_interval`.
 When Analytics Engine SQL is unreachable, these two charts zero-fill while the
-rest of the page renders. Local development uses the existing D1 counters and
-delivery-event table because Wrangler's emulated dataset has no SQL API.
+rest of the page renders. Local development cannot query Wrangler's emulated
+Analytics Engine SQL API: email quota aggregates degrade to empty (with an
+explicit warning) rather than reading the retired D1 mirror, while
+delivery-outcome aggregates still read D1 `email_delivery_events`.
 
 **Mailbox expand-phase parity events** reuse the same `EMAIL_EVENTS` dataset
 with a separate row shape defined in
@@ -637,21 +639,17 @@ time-pruned. Deletion-fence legacy lease rows are bounded by the D1 snapshot
 replace on `markDeleting` rather than time retention; DO-authority rows clear on
 release/repair/purge.
 
-**Expand-phase D1 mirrors (daily counters only):** enforcement and point reads
-are authoritative in UserMeter for daily counters. D1
-`entitlement_daily_counters` is **not** dropped — it remains a best-effort
-mirror for existing readers and reporting. After each DO consume/refund/inbound
-claim, the entitlements service schedules a non-awaited absolute mirror write
-keyed by `(user_id, resource, day)` with a revision-ordered `updated_at` token
-(`r/` + zero-padded revision from `userMeterMirrorUpdatedAtToken`) so late
-writes cannot overwrite newer state. See
+**D1 daily mirror writes stopped:** enforcement, point reads, bootstrap, and
+mirror paths no longer read or write `entitlement_daily_counters`. The admin
+parity report (`admin_user_meter_parity`) temporarily reads the table while it
+exists for migration verification. The physical table stays quiescent until a
+follow-up migration-only deploy drops it. See
 [Entitlements](./entitlements.md#usermeter-expand-phase).
 
 **Daily cold bootstrap:** a missing `(resource, day)` row returns
-`needs_bootstrap`. The service performs one legacy D1 point read on
-`entitlement_daily_counters`, then `initialize()` seeds the DO row with
-`INSERT OR IGNORE` (concurrent callers cannot double-apply the baseline). Warm
-daily paths never read D1 for enforcement.
+`needs_bootstrap`. The service calls `initialize({ count: 0 })` with
+`INSERT OR IGNORE` (concurrent callers stay safe). Warm daily paths never read
+D1 for enforcement.
 
 Account deletion calls `UserMeter.purge()` (one RPC per user, no D1 id scan;
 `deleteAll` clears counters, claims, storage-byte shadow, package-service
@@ -1668,10 +1666,13 @@ Current retention policies:
   After Mailbox cut-over, the same 365-day window and blob-before-row ordering
   are self-enforced by the Mailbox DO alarm; `system:email` stays on the D1
   system-email retention job.
-- `entitlement_daily_counters`: expand-phase **mirror** of UserMeter daily
-  counters (authoritative state lives in the per-user `UserMeter` DO). Rows keep
-  400 days by `day` key until mirror retirement is verified after
-  reporting-off-D1 merges; the table is not dropped in this phase.
+- `entitlement_daily_counters`: **quiescent pending drop** — mirror writes,
+  bootstrap reads, and scheduled retention pruning stop in the code deploy. The
+  admin parity report (`admin_user_meter_parity`) temporarily reads the table
+  while it exists; account deletion keeps removing rows while the physical table
+  exists; a follow-up code deploy removes that inventory target before the later
+  drop migration. Daily counter retention lives in the per-user `UserMeter` DO
+  (`userMeterDailyCounterRetentionDays`).
 - `usage_rollups`: per user/metric/month rollups keep 24 months by `month` key;
   raw Analytics Engine usage events follow platform retention.
 - `feature_flag_exposure_rollups`: local-dev/test flag exposure rollups keep 90
