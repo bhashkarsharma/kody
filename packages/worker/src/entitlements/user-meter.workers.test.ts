@@ -562,6 +562,11 @@ test('UserMeter daily entitlement consume/refund/read/export/purge workflow is p
 		counters: [],
 		storageBytesShadow: null,
 		packageServiceStatesShadow: [],
+		deletionShadow: {
+			deletingAt: null,
+			activeWriteLeaseCount: 0,
+			writeLeases: [],
+		},
 		nextStartAfter: null,
 		truncated: false,
 	})
@@ -689,6 +694,11 @@ test('UserMeter purge blocks concurrent RPCs across deleteAll and schema restore
 		counters: [],
 		storageBytesShadow: null,
 		packageServiceStatesShadow: [],
+		deletionShadow: {
+			deletingAt: null,
+			activeWriteLeaseCount: 0,
+			writeLeases: [],
+		},
 		nextStartAfter: null,
 		truncated: false,
 	})
@@ -991,6 +1001,11 @@ test('UserMeter storage RPCs, export shadow field, and purge work additively', a
 		mirrorUpdatedAt: userMeterMirrorUpdatedAtToken(3),
 	})
 	expect(firstPage.packageServiceStatesShadow).toEqual([])
+	expect(firstPage.deletionShadow).toEqual({
+		deletingAt: null,
+		activeWriteLeaseCount: 0,
+		writeLeases: [],
+	})
 
 	const secondPage = await meter.exportCounters({
 		pageSize: 2,
@@ -1001,6 +1016,7 @@ test('UserMeter storage RPCs, export shadow field, and purge work additively', a
 	expect(secondPage.nextStartAfter).toBeNull()
 	expect(secondPage.storageBytesShadow).toBeNull()
 	expect(secondPage.packageServiceStatesShadow).toBeNull()
+	expect(secondPage.deletionShadow).toBeNull()
 
 	await expect(
 		readUserD1StorageBytes({ db: env.APP_DB, userId: user.userId }),
@@ -1014,6 +1030,11 @@ test('UserMeter storage RPCs, export shadow field, and purge work additively', a
 		counters: [],
 		storageBytesShadow: null,
 		packageServiceStatesShadow: [],
+		deletionShadow: {
+			deletingAt: null,
+			activeWriteLeaseCount: 0,
+			writeLeases: [],
+		},
 		nextStartAfter: null,
 		truncated: false,
 	})
@@ -1175,6 +1196,7 @@ test('UserMeter package-service shadow upserts are monotonic, isolated, exportab
 		startAfter: firstPage.nextStartAfter,
 	})
 	expect(secondPage.packageServiceStatesShadow).toBeNull()
+	expect(secondPage.deletionShadow).toBeNull()
 
 	await expect(
 		meterA.deletePackageServiceState({
@@ -1253,4 +1275,207 @@ test('UserMeter package-service shadow upserts are monotonic, isolated, exportab
 			}),
 		],
 	})
+}, 30_000)
+
+test('UserMeter deletion shadow is monotonic, isolated, exportable, and preserves tombstone across purge', async () => {
+	const userA = await seedFreeUser('meter-deletion-a')
+	const userB = await seedFreeUser('meter-deletion-b')
+	const meterA = userMeterRpc({ env, userId: userA.userId })
+	const meterB = userMeterRpc({ env, userId: userB.userId })
+
+	const firstMark = await meterA.shadowMarkDeleting({
+		deletingAt: '2026-08-01 10:00:00',
+	})
+	expect(firstMark).toEqual({
+		deletingAt: '2026-08-01 10:00:00',
+		created: true,
+	})
+	const secondMark = await meterA.shadowMarkDeleting({
+		deletingAt: '2026-08-01 11:00:00',
+	})
+	expect(secondMark).toEqual({
+		deletingAt: '2026-08-01 10:00:00',
+		created: false,
+	})
+
+	await expect(
+		meterB.shadowAcquireWriteLease({
+			token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+			holder: 'test:writer',
+			acquiredAt: '2026-08-01 10:05:00',
+		}),
+	).resolves.toEqual({ acquired: true })
+	await expect(
+		meterB.shadowAcquireWriteLease({
+			token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+			holder: 'test:writer',
+			acquiredAt: '2026-08-01 10:05:00',
+		}),
+	).resolves.toEqual({ acquired: true })
+	await expect(
+		meterB.shadowAcquireWriteLease({
+			token: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+			holder: 'test:other',
+			acquiredAt: '2026-08-01 10:06:00',
+		}),
+	).resolves.toEqual({ acquired: true })
+	expect(await meterB.countActiveWriteLeases()).toEqual({ count: 2 })
+
+	const listed = await meterB.listWriteLeases({ pageSize: 1 })
+	expect(listed.leases).toHaveLength(1)
+	expect(listed.truncated).toBe(true)
+	const listedRest = await meterB.listWriteLeases({
+		pageSize: 10,
+		startAfter: listed.nextStartAfter,
+	})
+	expect(listedRest.leases).toHaveLength(1)
+	expect(listedRest.truncated).toBe(false)
+
+	await expect(
+		meterB.shadowReleaseWriteLease({
+			token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+		}),
+	).resolves.toEqual({ released: true })
+	expect(await meterB.countActiveWriteLeases()).toEqual({ count: 1 })
+
+	await expect(
+		meterA.shadowAcquireWriteLease({
+			token: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+			holder: 'test:blocked',
+			acquiredAt: '2026-08-01 10:07:00',
+		}),
+	).resolves.toEqual({ acquired: false })
+
+	const bootstrap = await meterB.bootstrapDeletionState({
+		deletingAt: '2026-08-01 12:00:00',
+		leases: [
+			{
+				token: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+				holder: 'test:other',
+				acquiredAt: '2026-08-01 10:06:00',
+			},
+			{
+				token: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+				holder: 'test:boot',
+				acquiredAt: '2026-08-01 10:08:00',
+			},
+		],
+	})
+	expect(bootstrap).toEqual({
+		deletingAtApplied: true,
+		leasesApplied: 1,
+		leasesSkipped: 1,
+	})
+
+	const day = '2026-08-01'
+	for (const resource of [
+		'email_receives_per_day',
+		'email_sends_per_day',
+	] as const) {
+		await meterA.initialize({
+			resource,
+			day,
+			count: 1,
+			updatedAt: '2026-08-01T12:00:00.000Z',
+		})
+	}
+	const firstPage = await meterA.exportCounters({ pageSize: 1 })
+	expect(firstPage.truncated).toBe(true)
+	expect(firstPage.deletionShadow).toEqual({
+		deletingAt: '2026-08-01 10:00:00',
+		activeWriteLeaseCount: 0,
+		writeLeases: [],
+	})
+	const secondPage = await meterA.exportCounters({
+		pageSize: 1,
+		startAfter: firstPage.nextStartAfter,
+	})
+	expect(secondPage.deletionShadow).toBeNull()
+
+	await expect(meterA.purge()).resolves.toEqual({ ok: true })
+	expect(await meterA.readDeletionState()).toEqual({
+		deletingAt: '2026-08-01 10:00:00',
+	})
+	expect(await meterA.countActiveWriteLeases()).toEqual({ count: 0 })
+	expect(await meterA.read({ resource: 'email_sends_per_day', day })).toEqual({
+		outcome: 'needs_bootstrap',
+	})
+	expect(await meterA.exportCounters({})).toEqual({
+		counters: [],
+		storageBytesShadow: null,
+		packageServiceStatesShadow: [],
+		deletionShadow: {
+			deletingAt: '2026-08-01 10:00:00',
+			activeWriteLeaseCount: 0,
+			writeLeases: [],
+		},
+		nextStartAfter: null,
+		truncated: false,
+	})
+	await expect(
+		meterA.shadowAcquireWriteLease({
+			token: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+			holder: 'test:post-purge',
+			acquiredAt: '2026-08-01 13:00:00',
+		}),
+	).resolves.toEqual({ acquired: false })
+
+	expect(await meterB.readDeletionState()).toEqual({
+		deletingAt: '2026-08-01 12:00:00',
+	})
+	expect(await meterB.listWriteLeases({})).toMatchObject({
+		leases: expect.arrayContaining([
+			expect.objectContaining({
+				token: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+			}),
+			expect.objectContaining({
+				token: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+			}),
+		]),
+	})
+
+	const replaced = await meterB.shadowReplaceDeletionState({
+		deletingAt: '2026-08-01 14:00:00',
+		leases: [
+			{
+				token: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+				holder: 'test:replace',
+				acquiredAt: '2026-08-01 10:09:00',
+			},
+		],
+	})
+	expect(replaced).toEqual({
+		deletingAt: '2026-08-01 12:00:00',
+		created: false,
+		leaseCount: 1,
+	})
+	expect(await meterB.listWriteLeases({})).toEqual({
+		leases: [
+			{
+				token: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+				holder: 'test:replace',
+				acquiredAt: '2026-08-01 10:09:00',
+			},
+		],
+		nextStartAfter: null,
+		truncated: false,
+	})
+	expect(await meterB.exportCounters({})).toMatchObject({
+		deletionShadow: {
+			deletingAt: '2026-08-01 12:00:00',
+			activeWriteLeaseCount: 1,
+			writeLeases: [{ acquiredAt: '2026-08-01 10:09:00' }],
+		},
+	})
+	await expect(
+		meterB.shadowReplaceDeletionState({
+			deletingAt: '2026-08-01 15:00:00',
+			leases: [],
+		}),
+	).resolves.toEqual({
+		deletingAt: '2026-08-01 12:00:00',
+		created: false,
+		leaseCount: 0,
+	})
+	expect(await meterB.countActiveWriteLeases()).toEqual({ count: 0 })
 }, 30_000)
