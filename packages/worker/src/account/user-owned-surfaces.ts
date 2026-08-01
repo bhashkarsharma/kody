@@ -8,6 +8,7 @@ export type UserOwnedDurableObjectSurface = {
 		| 'package_realtime_session'
 		| 'package_service_instance'
 		| 'run_log'
+		| 'user_meter'
 		| 'mcp'
 	binding: string
 	/** Result key used in AccountDeletionResult.clearedDurableObjects when purged */
@@ -122,6 +123,14 @@ export const accountUserOwnedDurableObjectSurfaces: ReadonlyArray<UserOwnedDurab
 			export: 'include',
 			notes:
 				'Per-user RunLog DO (RUN_LOG binding; idFromName(userId)). Stores pruned run history (runs + run_logs), the keyed package-invocation idempotency ledger, and dedicated unpruned state: workflow_projections (binding_name, typically DYNAMIC_CALLABLE_WORKFLOWS; mirrors expand-phase D1 workflow_runs), job_run_observability (terminal outcomes/counters; D1 jobs keeps schedule + last_run_at for retention only), package_run_successes, and activation_milestones. Run rows self-prune inside the DO; dedicated tables do not. Account deletion clearAll deletes every table and reinitializes schema. Account export pages all tables through the run_records section (runs first, then ledger, then dedicated phases).',
+		},
+		{
+			id: 'user_meter',
+			binding: 'USER_METER',
+			deletionResultKey: 'userMeters',
+			export: 'include',
+			notes:
+				'Per-user daily entitlement counters (one DO per stable userId). Self-prunes stale UTC-day rows inside the DO rather than through a retention cron lane; account deletion purge clears counters and the inbound delivery ledger, and account export pages counters through the user_meter section via exportCounters.',
 		},
 		{
 			id: 'mcp',

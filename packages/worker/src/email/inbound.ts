@@ -200,6 +200,7 @@ export async function handleInboundEmail(
 		| 'APP_BASE_URL'
 		| 'USER_EMAIL_DOMAIN'
 		| 'USAGE_EVENTS'
+		| 'USER_METER'
 	> &
 		EmailReportingEnv,
 	ctx?: ExecutionContext,
@@ -487,8 +488,10 @@ export async function handleInboundEmail(
 					)
 					const receivesToday = await readUserInboundReceiveCount({
 						db: env.APP_DB,
+						env,
 						userId,
 						day: userInboundQuotaDay(quotaNow),
+						now: quotaNow,
 					})
 					if (receivesToday >= receiveLimit) {
 						message.setReject('Recipient mailbox is over quota.')
@@ -535,6 +538,9 @@ export async function handleInboundEmail(
 					})
 				}
 			}
+			const waitUntil = ctx
+				? (promise: Promise<unknown>) => ctx.waitUntil(promise)
+				: undefined
 			let claimedDelivery: InboundDelivery
 			let chargedReceive = false
 			try {
@@ -547,6 +553,7 @@ export async function handleInboundEmail(
 					}
 					claimedDelivery = await chargeUserInboundDeliveryOnce({
 						db: env.APP_DB,
+						env,
 						delivery: chargeCandidate,
 						plan: account.plan,
 						limit: resolveEmailResourceLimit(
@@ -554,6 +561,7 @@ export async function handleInboundEmail(
 							'email_receives_per_day',
 						),
 						now: quotaNow,
+						waitUntil,
 					})
 					// The charge helper returns the candidate object only when this
 					// invocation won the atomic D1 charge. A concurrently committed

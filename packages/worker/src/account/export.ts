@@ -34,6 +34,11 @@ import {
 	listRunRecordStorageIds,
 	summarizeRunRecords,
 } from '#worker/run-records/service.ts'
+import {
+	userMeterNamespace,
+	userMeterRpc,
+} from '#worker/entitlements/user-meter-client.ts'
+import { type UserMeterExportResult } from '#worker/entitlements/user-meter-do.ts'
 import { resolveUserStableId } from '#worker/user-id.ts'
 import {
 	listAccountUserPackageServices,
@@ -55,6 +60,7 @@ export const accountExportSectionNames = [
 	'storage_runner',
 	'job_manager',
 	'run_records',
+	'user_meter',
 	'remote_connector_session',
 	'package_service',
 	'oauth_grants',
@@ -126,6 +132,7 @@ type UserExportInventory = {
 type ManifestInventoryCounts = {
 	storageRunners: number
 	runRecords: number
+	userMeterCounters: number
 	remoteConnectorSessions: number
 	packageServices: number
 	artifactRepos: number
@@ -238,6 +245,7 @@ function formatRunRecordsExportSectionItems(page: RunRecordsExportPayload) {
 type AccountExportDurableObjects = {
 	jobManager: unknown | null
 	runRecords: RunRecordsExportPayload | null
+	userMeter: UserMeterExportResult | null
 	remoteConnectorSessions: Array<{
 		instanceId: string
 		export: RemoteConnectorSessionExport | null
@@ -1017,6 +1025,7 @@ async function collectManifestInventoryCounts(input: {
 	const [
 		storageRunners,
 		runRecords,
+		userMeterCounters,
 		remoteConnectorSessions,
 		packageServices,
 		artifactRepos,
@@ -1032,6 +1041,16 @@ async function collectManifestInventoryCounts(input: {
 				userId: input.userId,
 			})
 			return summary.total
+		}),
+		safeCount('user meter counters', async () => {
+			if (!userMeterNamespace(input.env)) return 0
+			const page = await userMeterRpc({
+				env: input.env,
+				userId: input.userId,
+			}).exportCounters({
+				pageSize: maxExportPageSize,
+			})
+			return page.counters.length
 		}),
 		safeCount('remote connectors', async () =>
 			countScalar(
@@ -1070,6 +1089,7 @@ async function collectManifestInventoryCounts(input: {
 	return {
 		storageRunners,
 		runRecords,
+		userMeterCounters,
 		remoteConnectorSessions,
 		packageServices,
 		artifactRepos,
@@ -1312,6 +1332,36 @@ async function exportUserRunRecords(input: {
 	}
 }
 
+async function exportUserMeterCounters(input: {
+	env: AccountExportEnv
+	userId: string
+	warnings: Array<string>
+}): Promise<UserMeterExportResult | null> {
+	try {
+		if (!userMeterNamespace(input.env)) {
+			input.warnings.push(
+				'USER_METER binding was unavailable; user meter counters were not exported.',
+			)
+			return null
+		}
+		const page = await userMeterRpc({
+			env: input.env,
+			userId: input.userId,
+		}).exportCounters({
+			pageSize: maxExportPageSize,
+		})
+		if (page.truncated) {
+			input.warnings.push(
+				`User meter counters were truncated in the full export; use account_export_section with section "user_meter" to retrieve additional pages.`,
+			)
+		}
+		return page
+	} catch (error) {
+		input.warnings.push(`User meter export failed: ${getErrorMessage(error)}`)
+		return null
+	}
+}
+
 async function exportRemoteConnectorSessions(input: {
 	env: AccountExportEnv
 	userId: string
@@ -1404,32 +1454,42 @@ async function exportDurableObjects(input: {
 	inventory: UserExportInventory
 	warnings: Array<string>
 }): Promise<AccountExportDurableObjects> {
-	const [storageRunners, remoteConnectorSessions, packageServices, runRecords] =
-		await Promise.all([
-			exportStorageRunners({
-				env: input.env,
-				userId: input.userId,
-				storageIds: input.inventory.storageIds,
-				warnings: input.warnings,
-			}),
-			exportRemoteConnectorSessions({
-				env: input.env,
-				userId: input.userId,
-				connectors: input.inventory.remoteConnectors,
-				warnings: input.warnings,
-			}),
-			exportPackageServices({
-				env: input.env,
-				userId: input.userId,
-				services: input.inventory.packageServices,
-				warnings: input.warnings,
-			}),
-			exportUserRunRecords({
-				env: input.env,
-				userId: input.userId,
-				warnings: input.warnings,
-			}),
-		])
+	const [
+		storageRunners,
+		remoteConnectorSessions,
+		packageServices,
+		runRecords,
+		userMeter,
+	] = await Promise.all([
+		exportStorageRunners({
+			env: input.env,
+			userId: input.userId,
+			storageIds: input.inventory.storageIds,
+			warnings: input.warnings,
+		}),
+		exportRemoteConnectorSessions({
+			env: input.env,
+			userId: input.userId,
+			connectors: input.inventory.remoteConnectors,
+			warnings: input.warnings,
+		}),
+		exportPackageServices({
+			env: input.env,
+			userId: input.userId,
+			services: input.inventory.packageServices,
+			warnings: input.warnings,
+		}),
+		exportUserRunRecords({
+			env: input.env,
+			userId: input.userId,
+			warnings: input.warnings,
+		}),
+		exportUserMeterCounters({
+			env: input.env,
+			userId: input.userId,
+			warnings: input.warnings,
+		}),
+	])
 	let jobManager: unknown | null = null
 	try {
 		jobManager = await exportJobManagerForUser({
@@ -1442,6 +1502,7 @@ async function exportDurableObjects(input: {
 	return {
 		jobManager,
 		runRecords,
+		userMeter,
 		remoteConnectorSessions,
 		packageServices,
 		storageRunners,
@@ -1505,6 +1566,17 @@ function buildManifest(input: {
 			warning.startsWith('Run records '),
 		),
 		discovery: { section: 'run_records' },
+	}
+	sections.user_meter = {
+		count:
+			input.durableObjects?.userMeter == null
+				? (input.inventoryCounts?.userMeterCounters ?? 0)
+				: input.durableObjects.userMeter.counters.length,
+		warnings: input.warnings.filter(
+			(warning) =>
+				warning.startsWith('User meter ') || warning.startsWith('USER_METER '),
+		),
+		discovery: { section: 'user_meter' },
 	}
 	sections.remote_connector_sessions = {
 		count:
@@ -1818,6 +1890,27 @@ export async function readAccountExportSection(input: {
 			// run successes, activation milestones). Raw run-id cursors remain
 			// valid; later phases use prefixed cursors from exportRuns.
 			items: formatRunRecordsExportSectionItems(page),
+			truncated: page.truncated,
+			nextStartAfter: page.nextStartAfter,
+			pageSize,
+			warnings,
+		}
+	}
+	if (input.section === 'user_meter') {
+		if (!userMeterNamespace(input.env)) {
+			throw new Error('USER_METER binding was unavailable.')
+		}
+		const pageSize = normalizePageSize(input.pageSize)
+		const page = await userMeterRpc({
+			env: input.env,
+			userId: input.mcpUserId,
+		}).exportCounters({
+			pageSize,
+			startAfter: input.startAfter ?? null,
+		})
+		return {
+			section: input.section,
+			items: page.counters,
 			truncated: page.truncated,
 			nextStartAfter: page.nextStartAfter,
 			pageSize,
