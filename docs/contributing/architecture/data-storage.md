@@ -946,7 +946,39 @@ retention pass: successful work with expired rows remaining schedules a
 near-immediate continuation (`mailboxRetentionContinuationDelayMs`); R2 delete
 failures use hourly backoff (`mailboxRetentionRetryDelayMs`). Write-path alarm
 selection never postpones an earlier existing alarm under sustained writes
-(near-equal times within skew keep the existing alarm).
+(near-equal times within skew keep the existing alarm). `alarm` and the
+owner-bound `runRetentionNow({ ownerId })` RPC share one private retention pass
+(natural production cutoffs only — no arbitrary cutoff override) and the same
+post-pass alarm reschedule; the RPC returns before/after `countMailbox`
+aggregates plus `blobDeleteFailures` / `expiredRemaining` (no row ids or
+content).
+
+**Admin accelerated coverage** (`admin_mailbox_maintenance`;
+`packages/worker/src/admin/mailbox-maintenance.ts`): audited admin-only
+discriminated actions — `status` (aggregate tracked/matching/mismatch/error/
+incomplete/eligible counts plus matching/check timestamps and earliest cutover;
+no email content), `reconcile` (bounded `reconcileMailboxParity`, `batch_size`
+max 100, then status), and `retention` (natural cutoffs only):
+
+1. Run existing D1 `pruneUserEmailMessagesForRetention` then
+   `pruneEmailDeliveryEventsForRetention` (bounded batches; message prune keeps
+   blob-before-row authority during expand).
+2. Keyset-page non-deleting non-system owners with mail/parity state by
+   `stable_user_id ASC` (`start_after_user_id` / `nextStartAfter` / `truncated`;
+   never parity `checked_at` ordering; `limit` default/max 20).
+3. Before each owner DO pass, check for remaining natural-cutoff-expired D1
+   `email_messages` (`emailMessageRetentionDays` = 365) or
+   `email_delivery_events` (`emailDeliveryEventRetentionDays` = 90). If any
+   remain (e.g. omitted by the global oldest-first batch), skip
+   `runRetentionNow`, count `pendingD1Owners`, and still advance the cursor so
+   repeated global D1 batches can drain — never DO/R2-delete while D1 expired
+   rows remain for that owner.
+4. Otherwise call owner-bound `Mailbox.runRetentionNow` with concurrency ≤4 and
+   a ~10s wall budget (stop scheduling new owners after the deadline; cursor is
+   the last considered owner). Per-owner failures are isolated.
+
+Returns D1 delete/error totals plus aggregate Mailbox before/after counts (no
+message ids or email content). No seed or arbitrary-cutoff surface.
 
 Account deletion calls `Mailbox.purge()` (one RPC per user, no D1 id scan;
 result key `mailboxes`). During expand, `purge` clears DO SQLite / alarm state
