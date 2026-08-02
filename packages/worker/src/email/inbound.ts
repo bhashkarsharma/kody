@@ -26,22 +26,32 @@ import {
 } from './parser.ts'
 import {
 	buildInboundDelivery,
-	claimInboundDeliveryWindow,
-	claimInboundDeliveryStorage,
 	chargeSystemInboundDeliveryOnce,
-	chargeUserInboundDeliveryOnce,
 	getInboundDeliveryWindow,
 	getInboundDelivery,
-	markInboundDeliveryRejected,
-	pruneExpiredInboundDedupePointers,
-	reconcileStaleInboundDeliveries,
 	readSystemInboundReceiveCount,
 	readUserInboundReceiveCount,
-	releaseInboundDeliveryStorage,
 	systemInboundQuotaDay,
 	type InboundDelivery,
 	userInboundQuotaDay,
 } from './inbound-delivery.ts'
+import {
+	claimSystemInboundDeliveryStorage,
+	claimSystemInboundDeliveryWindow,
+	markSystemInboundDeliveryRejected,
+	pruneSystemExpiredInboundDedupePointers,
+	reconcileSystemStaleInboundDeliveries,
+	releaseSystemInboundDeliveryStorage,
+} from './system-inbound-delivery-authority.ts'
+import {
+	createUserInboundDeliveryAuthority,
+	type UserInboundDeliveryAuthority,
+	type UserInboundDeliveryAuthorityEnv,
+} from './inbound-delivery-authority.ts'
+import {
+	pruneUserExpiredInboundDedupePointers,
+	reconcileUserStaleInboundDeliveries,
+} from './inbound-delivery-reconciliation-authority.ts'
 import {
 	getPlatformEmailDomain,
 	getSystemEmailDomain,
@@ -85,12 +95,17 @@ async function rejectClaimedInboundDelivery(input: {
 	message: ForwardableEmailMessage
 	delivery: InboundDelivery
 	reason: string
+	authority?: UserInboundDeliveryAuthority
 }) {
-	const transitioned = await markInboundDeliveryRejected({
-		db: input.db,
-		delivery: input.delivery,
-		reason: input.reason,
-	}).catch((error: unknown) => {
+	const transitioned = await (
+		input.authority
+			? input.authority.reject(input.delivery, input.reason)
+			: markSystemInboundDeliveryRejected({
+					db: input.db,
+					delivery: input.delivery,
+					reason: input.reason,
+				})
+	).catch((error: unknown) => {
 		warnRejectionAuditWriteFailed(error)
 		throw error
 	})
@@ -120,6 +135,7 @@ async function parseAndStoreInboundEmail(input: {
 	blobs: R2Bucket
 	delivery: InboundDelivery
 	parsed: Awaited<ReturnType<typeof parseForwardableEmailRawMime>>
+	authority?: UserInboundDeliveryAuthority
 }) {
 	const now = new Date().toISOString()
 	try {
@@ -130,6 +146,7 @@ async function parseAndStoreInboundEmail(input: {
 			parsed: input.parsed,
 			subjectNormalized: normalizeSubject(input.parsed.subject),
 			now,
+			authority: input.authority,
 		})
 	} catch (error) {
 		if (error instanceof RetryableInboundStorageError) throw error
@@ -141,18 +158,26 @@ async function parseAndStoreInboundEmail(input: {
 }
 
 async function cleanupInboundDurability(input: {
-	db: D1Database
-	blobs: R2Bucket
+	env: UserInboundDeliveryAuthorityEnv & { EMAIL_BLOBS: R2Bucket }
 	userId: string
 }) {
 	try {
-		await reconcileStaleInboundDeliveries(input)
-		await pruneExpiredInboundDedupePointers({
-			db: input.db,
-			userId: input.userId,
-		})
+		if (input.userId === systemEmailOwnerId) {
+			await reconcileSystemStaleInboundDeliveries({
+				db: input.env.APP_DB,
+				blobs: input.env.EMAIL_BLOBS,
+				userId: input.userId,
+			})
+			await pruneSystemExpiredInboundDedupePointers({
+				db: input.env.APP_DB,
+				userId: input.userId,
+			})
+		} else {
+			await reconcileUserStaleInboundDeliveries(input)
+			await pruneUserExpiredInboundDedupePointers(input)
+		}
 		await deleteEmptyEmailThreads({
-			db: input.db,
+			db: input.env.APP_DB,
 			userId: input.userId,
 			before: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
 			limit: 20,
@@ -276,6 +301,7 @@ export async function handleInboundEmail(
 		db: env.APP_DB,
 		stableUserId: userId,
 		async write() {
+			const authority = createUserInboundDeliveryAuthority({ env, userId })
 			// Require email + canonical stable id together (same contract as
 			// getUserPlan / isAccountEmailVerified) so a mismatched identity pair
 			// cannot apply another account's plan or verification state.
@@ -435,8 +461,7 @@ export async function handleInboundEmail(
 			}
 
 			await cleanupInboundDurability({
-				db: env.APP_DB,
-				blobs: env.EMAIL_BLOBS,
+				env,
 				userId,
 			})
 			let rawMime: string
@@ -458,18 +483,12 @@ export async function handleInboundEmail(
 				quotaDay: userInboundQuotaDay(quotaNow),
 				now: quotaNow,
 			})
-			const activeWindow = await getInboundDeliveryWindow({
-				db: env.APP_DB,
-				userId,
-				fingerprint: candidateDelivery.fingerprint,
-				now: quotaNow,
-			})
-			let delivery = activeWindow ?? candidateDelivery
-			let existingDelivery = await getInboundDelivery({
-				db: env.APP_DB,
-				userId,
-				deliveryId: delivery.deliveryId,
-			})
+			const activeWindow = await authority.getWindow(
+				candidateDelivery.fingerprint,
+				quotaNow,
+			)
+			const delivery = activeWindow ?? candidateDelivery
+			let existingDelivery = await authority.get(delivery.deliveryId)
 			if (!existingDelivery) {
 				try {
 					// New deliveries check storage bytes and stored-message caps
@@ -534,26 +553,6 @@ export async function handleInboundEmail(
 					return
 				}
 			}
-			if (!activeWindow) {
-				delivery = await claimInboundDeliveryWindow({
-					db: env.APP_DB,
-					delivery: candidateDelivery,
-					now: quotaNow,
-				})
-				if (
-					!existingDelivery ||
-					existingDelivery.deliveryId !== delivery.deliveryId
-				) {
-					existingDelivery = await getInboundDelivery({
-						db: env.APP_DB,
-						userId,
-						deliveryId: delivery.deliveryId,
-					})
-				}
-			}
-			const waitUntil = ctx
-				? (promise: Promise<unknown>) => ctx.waitUntil(promise)
-				: undefined
 			let claimedDelivery: InboundDelivery
 			let chargedReceive = false
 			try {
@@ -564,9 +563,7 @@ export async function handleInboundEmail(
 						...delivery,
 						quotaDay: userInboundQuotaDay(quotaNow),
 					}
-					claimedDelivery = await chargeUserInboundDeliveryOnce({
-						db: env.APP_DB,
-						env,
+					const chargeResult = await authority.charge({
 						delivery: chargeCandidate,
 						plan: account.plan,
 						limit: resolveEmailResourceLimit(
@@ -574,12 +571,9 @@ export async function handleInboundEmail(
 							'email_receives_per_day',
 						),
 						now: quotaNow,
-						waitUntil,
 					})
-					// The charge helper returns the candidate object only when this
-					// invocation won the atomic D1 charge. A concurrently committed
-					// delivery is returned as a separately parsed object.
-					chargedReceive = claimedDelivery === chargeCandidate
+					claimedDelivery = chargeResult.delivery
+					chargedReceive = chargeResult.charged
 				}
 			} catch (error) {
 				if (!isEntitlementLimitError(error)) throw error
@@ -647,6 +641,7 @@ export async function handleInboundEmail(
 					message,
 					delivery: claimedDelivery,
 					reason,
+					authority,
 				})
 				if (!rejected) return
 				await recordReceiveUsage({ outcome: 'error' })
@@ -658,12 +653,11 @@ export async function handleInboundEmail(
 				})
 				return
 			}
-			const storageClaim = await claimInboundDeliveryStorage({
-				db: env.APP_DB,
-				delivery: claimedDelivery,
-				expectedAttachmentCount: parsed.attachments.length,
-				usageStartedAt: new Date(receiveStartedAtMs).toISOString(),
-			})
+			const storageClaim = await authority.claimStorage(
+				claimedDelivery,
+				parsed.attachments.length,
+				new Date(receiveStartedAtMs).toISOString(),
+			)
 			if (!storageClaim.claimed) {
 				if (storageClaim.delivery?.state === 'received') {
 					await scheduleInboundReceivedTerminalWork({
@@ -689,18 +683,18 @@ export async function handleInboundEmail(
 					blobs: env.EMAIL_BLOBS,
 					delivery: storageClaim.delivery,
 					parsed,
+					authority,
 				})
 			} catch (error) {
-				await releaseInboundDeliveryStorage({
-					db: env.APP_DB,
-					delivery: storageClaim.delivery,
-				}).catch((releaseError) => {
-					console.error(
-						'inbound-email-storage-lease-release-failed',
-						storageClaim.delivery.deliveryId,
-						releaseError,
-					)
-				})
+				await authority
+					.releaseStorage(storageClaim.delivery)
+					.catch((releaseError) => {
+						console.error(
+							'inbound-email-storage-lease-release-failed',
+							storageClaim.delivery.deliveryId,
+							releaseError,
+						)
+					})
 				throw error
 			}
 			// Mailbox dual-write only after durable D1/R2 commit + finalization win.
@@ -729,6 +723,8 @@ async function handleSystemInboundEmail(input: {
 		| 'BUNDLE_ARTIFACTS_KV'
 		| 'APP_BASE_URL'
 		| 'USAGE_EVENTS'
+		| 'MAILBOX'
+		| 'USER_METER'
 	>
 	recipient: string
 	localPart: SystemEmailLocal
@@ -798,8 +794,7 @@ async function handleSystemInboundEmail(input: {
 	}
 
 	await cleanupInboundDurability({
-		db: input.env.APP_DB,
-		blobs: input.env.EMAIL_BLOBS,
+		env: input.env,
 		userId: systemEmailOwnerId,
 	})
 	let rawMime: string
@@ -870,7 +865,7 @@ async function handleSystemInboundEmail(input: {
 		}
 	}
 	if (!activeWindow) {
-		delivery = await claimInboundDeliveryWindow({
+		delivery = await claimSystemInboundDeliveryWindow({
 			db: input.env.APP_DB,
 			delivery: candidateDelivery,
 			now: quotaNow,
@@ -952,7 +947,7 @@ async function handleSystemInboundEmail(input: {
 		await recordReceiveUsage({ outcome: 'error' })
 		return
 	}
-	const storageClaim = await claimInboundDeliveryStorage({
+	const storageClaim = await claimSystemInboundDeliveryStorage({
 		db: input.env.APP_DB,
 		delivery: claimedDelivery,
 		expectedAttachmentCount: parsed.attachments.length,
@@ -973,7 +968,7 @@ async function handleSystemInboundEmail(input: {
 			parsed,
 		})
 	} catch (error) {
-		await releaseInboundDeliveryStorage({
+		await releaseSystemInboundDeliveryStorage({
 			db: input.env.APP_DB,
 			delivery: storageClaim.delivery,
 		}).catch((releaseError) => {

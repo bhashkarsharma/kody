@@ -9,9 +9,8 @@ const mocks = vi.hoisted(() => ({
 		events: [],
 		eventsTruncated: false,
 	})),
-	mirrorMailboxDeliveryEventFromD1: vi.fn(async () => ({
-		status: 'mirrored' as const,
-	})),
+	authorityGet: vi.fn(async () => ({ state: 'received' as const })),
+	createAuthority: vi.fn(),
 	processInboundDeliveryEffects: vi.fn(async () => ({
 		outcome: 'complete' as const,
 	})),
@@ -19,7 +18,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('./mailbox-live-mirror.ts', () => ({
 	mirrorMailboxMessageGraphFromD1: mocks.mirrorMailboxMessageGraphFromD1,
-	mirrorMailboxDeliveryEventFromD1: mocks.mirrorMailboxDeliveryEventFromD1,
+}))
+
+vi.mock('./inbound-delivery-authority.ts', () => ({
+	createUserInboundDeliveryAuthority: mocks.createAuthority,
 }))
 
 vi.mock('./inbound-effects.ts', () => ({
@@ -44,7 +46,8 @@ function createCapturedWaitUntilContext() {
 
 function resetMocks() {
 	mocks.mirrorMailboxMessageGraphFromD1.mockReset()
-	mocks.mirrorMailboxDeliveryEventFromD1.mockReset()
+	mocks.authorityGet.mockReset()
+	mocks.createAuthority.mockReset()
 	mocks.processInboundDeliveryEffects.mockReset()
 	mocks.mirrorMailboxMessageGraphFromD1.mockResolvedValue({
 		messageId: 'msg-1',
@@ -52,15 +55,14 @@ function resetMocks() {
 		events: [],
 		eventsTruncated: false,
 	})
-	mocks.mirrorMailboxDeliveryEventFromD1.mockResolvedValue({
-		status: 'mirrored' as const,
-	})
+	mocks.authorityGet.mockResolvedValue({ state: 'received' as const })
+	mocks.createAuthority.mockReturnValue({ get: mocks.authorityGet })
 	mocks.processInboundDeliveryEffects.mockResolvedValue({
 		outcome: 'complete' as const,
 	})
 }
 
-test('received terminal work orders graph then effects then event mirror via waitUntil', async () => {
+test('received terminal work orders graph then effects then authority snapshot via waitUntil', async () => {
 	resetMocks()
 	consoleError.mockImplementation(() => {})
 	const order: Array<string> = []
@@ -84,9 +86,9 @@ test('received terminal work orders graph then effects then event mirror via wai
 		order.push('effects')
 		return { outcome: 'complete' as const }
 	})
-	mocks.mirrorMailboxDeliveryEventFromD1.mockImplementation(async () => {
+	mocks.authorityGet.mockImplementation(async () => {
 		order.push('event')
-		return { status: 'mirrored' as const }
+		return { state: 'received' as const }
 	})
 
 	const { ctx, waitUntilPromises } = createCapturedWaitUntilContext()
@@ -121,12 +123,7 @@ test('received terminal work orders graph then effects then event mirror via wai
 		durationMs: 12,
 		waitUntil: expect.any(Function),
 	})
-	expect(mocks.mirrorMailboxDeliveryEventFromD1).toHaveBeenCalledWith({
-		env,
-		db: env.APP_DB,
-		userId: 'user-aaa',
-		eventId: 'delivery-1',
-	})
+	expect(mocks.authorityGet).toHaveBeenCalledWith('delivery-1')
 })
 
 test('graph failure does not skip D1 effects; effects failure skips event mirror and logs once', async () => {
@@ -154,7 +151,7 @@ test('graph failure does not skip D1 effects; effects failure skips event mirror
 	})
 
 	expect(mocks.processInboundDeliveryEffects).toHaveBeenCalledTimes(1)
-	expect(mocks.mirrorMailboxDeliveryEventFromD1).not.toHaveBeenCalled()
+	expect(mocks.authorityGet).not.toHaveBeenCalled()
 	expect(consoleError).toHaveBeenCalledWith(
 		'Inbound email effect dispatch failed',
 		expect.objectContaining({ message: 'effects exploded' }),
@@ -182,10 +179,10 @@ test('received and rejected coordinators skip system:email owners', async () => 
 
 	expect(mocks.mirrorMailboxMessageGraphFromD1).not.toHaveBeenCalled()
 	expect(mocks.processInboundDeliveryEffects).not.toHaveBeenCalled()
-	expect(mocks.mirrorMailboxDeliveryEventFromD1).not.toHaveBeenCalled()
+	expect(mocks.authorityGet).not.toHaveBeenCalled()
 })
 
-test('rejected terminal schedules delivery-event mirror only', async () => {
+test('rejected terminal schedules authority snapshot repair only', async () => {
 	resetMocks()
 	const { ctx, waitUntilPromises } = createCapturedWaitUntilContext()
 	const env = { APP_DB: {} } as unknown as Parameters<
@@ -203,10 +200,50 @@ test('rejected terminal schedules delivery-event mirror only', async () => {
 	await Promise.all(waitUntilPromises)
 	expect(mocks.mirrorMailboxMessageGraphFromD1).not.toHaveBeenCalled()
 	expect(mocks.processInboundDeliveryEffects).not.toHaveBeenCalled()
-	expect(mocks.mirrorMailboxDeliveryEventFromD1).toHaveBeenCalledWith({
-		env,
-		db: env.APP_DB,
-		userId: 'user-ccc',
-		eventId: 'delivery-3',
+	expect(mocks.authorityGet).toHaveBeenCalledWith('delivery-3')
+})
+
+test('rejected terminal contains and logs projection repair failures', async () => {
+	resetMocks()
+	consoleError.mockImplementation(() => {})
+	mocks.authorityGet.mockRejectedValueOnce(new Error('projection unavailable'))
+	const { ctx, waitUntilPromises } = createCapturedWaitUntilContext()
+
+	await scheduleInboundRejectedTerminalWork({
+		env: { APP_DB: {} } as unknown as Parameters<
+			typeof scheduleInboundRejectedTerminalWork
+		>[0]['env'],
+		userId: 'user-ddd',
+		deliveryId: 'delivery-4',
+		ctx,
 	})
+
+	expect(waitUntilPromises).toHaveLength(1)
+	await expect(Promise.all(waitUntilPromises)).resolves.toEqual([undefined])
+	expect(consoleError).toHaveBeenCalledWith(
+		'Inbound email rejection projection repair failed',
+		expect.objectContaining({ message: 'projection unavailable' }),
+	)
+})
+
+test('rejected terminal contains synchronous authority construction failures', async () => {
+	resetMocks()
+	consoleError.mockImplementation(() => {})
+	mocks.createAuthority.mockImplementation(() => {
+		throw new Error('MAILBOX binding unavailable')
+	})
+
+	await expect(
+		scheduleInboundRejectedTerminalWork({
+			env: { APP_DB: {} } as unknown as Parameters<
+				typeof scheduleInboundRejectedTerminalWork
+			>[0]['env'],
+			userId: 'user-sync-construction',
+			deliveryId: 'delivery-sync-construction',
+		}),
+	).resolves.toBeUndefined()
+	expect(consoleError).toHaveBeenCalledWith(
+		'Inbound email rejection projection repair failed',
+		expect.objectContaining({ message: 'MAILBOX binding unavailable' }),
+	)
 })

@@ -4,11 +4,9 @@ import PostalMime from 'postal-mime'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
 import { normalizeEmailAddress } from './address.ts'
 import { resolveInboundEmailAuthVerdict } from './auth-verdict.ts'
-import {
-	getInboundDelivery,
-	markInboundDeliveryReceived,
-	type InboundDelivery,
-} from './inbound-delivery.ts'
+import { getInboundDelivery, type InboundDelivery } from './inbound-delivery.ts'
+import { type UserInboundDeliveryAuthority } from './inbound-delivery-authority.ts'
+import { markSystemInboundDeliveryReceived } from './system-inbound-delivery-authority.ts'
 import {
 	mirrorMailboxMessageGraphFromD1,
 	type MailboxLiveMirrorEnv,
@@ -353,6 +351,7 @@ export async function storeIdempotentInboundEmail(input: {
 	parsed: ParsedInboundEmail
 	subjectNormalized: string
 	now: string
+	authority?: Pick<UserInboundDeliveryAuthority, 'get' | 'receive'>
 }) {
 	const { delivery, parsed } = input
 	if (!delivery.storageLease) {
@@ -496,21 +495,30 @@ export async function storeIdempotentInboundEmail(input: {
 
 	let finalizedDelivery: InboundDelivery
 	try {
-		finalizedDelivery = await markInboundDeliveryReceived({
-			db: input.db,
+		const finalization = {
 			delivery,
 			usageDurationMs: delivery.usageStartedAt
 				? Date.now() - Date.parse(delivery.usageStartedAt)
 				: 0,
 			usageMonth: (stored.receivedAt ?? stored.createdAt).slice(0, 7),
 			usageBytes: stored.rawSize ?? 0,
-		})
+		}
+		finalizedDelivery = input.authority
+			? await input.authority.receive(finalization)
+			: await markSystemInboundDeliveryReceived({
+					db: input.db,
+					...finalization,
+				})
 	} catch (error) {
-		const committed = await getInboundDelivery({
-			db: input.db,
-			userId: delivery.userId,
-			deliveryId: delivery.deliveryId,
-		}).catch(() => null)
+		const committed = await (
+			input.authority
+				? input.authority.get(delivery.deliveryId)
+				: getInboundDelivery({
+						db: input.db,
+						userId: delivery.userId,
+						deliveryId: delivery.deliveryId,
+					})
+		).catch(() => null)
 		if (committed?.state !== 'received') {
 			throw new RetryableInboundStorageError(
 				'Failed to finalize the inbound delivery ledger; the stable delivery will be retried.',
@@ -689,8 +697,9 @@ export async function recordBoundedEmailRejectionEvent(input: {
 	const row = await input.db
 		.prepare(
 			`INSERT INTO email_delivery_events (
-				id, user_id, inbox_id, event_type, provider, detail_json, created_at
-			) VALUES (?, ?, ?, 'rejected', 'cloudflare-email-routing', ?, ?)
+				id, user_id, inbox_id, event_type, provider, detail_json,
+				needs_effect_reconcile, created_at
+			) VALUES (?, ?, ?, 'rejected', 'cloudflare-email-routing', ?, 0, ?)
 			ON CONFLICT(id) DO UPDATE SET detail_json = json_set(
 				email_delivery_events.detail_json,
 				'$.count', COALESCE(json_extract(email_delivery_events.detail_json, '$.count'), 0) + 1,

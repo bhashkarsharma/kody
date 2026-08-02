@@ -22,6 +22,14 @@ import {
 	updateMailboxMessageDelivery,
 } from './mailbox-mutations.ts'
 import {
+	claimMailboxInboundDeliveryCleanup,
+	markMailboxInboundDeliveryOrphanCleaned,
+	releaseMailboxInboundDeliveryCleanup,
+} from './mailbox-inbound-cleanup-ledger.ts'
+import { bootstrapMailboxDeliveryEvents } from './mailbox-delivery-event-bootstrap.ts'
+import { upsertMailboxDeliveryEvents } from './mailbox-delivery-event-upsert.ts'
+import { shouldSkipMailboxDeliveryEventWrite } from './mailbox-inbound-bootstrap.ts'
+import {
 	claimMailboxInboundDeliveryStorage,
 	claimMailboxInboundDeliveryWindow,
 	deferMailboxInboundDeliveryReconciliation,
@@ -46,10 +54,10 @@ import {
 } from './mailbox-inbound-effect-ledger.ts'
 import {
 	assertMailboxNonEmptyString,
-	mailboxUpsertDeliveryEventsMax,
 	type MailboxAttachmentInput,
 	type MailboxAttachmentRecord,
 	type MailboxBlobReferencePage,
+	type MailboxBootstrapDeliveryEventsResult,
 	type MailboxCountMessagesInput,
 	type MailboxCountResult,
 	type MailboxDeleteDeliveryEventInput,
@@ -72,7 +80,6 @@ import {
 	type MailboxThreadRecord,
 	type MailboxTouchThreadInput,
 	type MailboxUpdateMessageDeliveryInput,
-	type MailboxUpsertDeliveryEventBatchItemResult,
 	type MailboxUpsertDeliveryEventsResult,
 } from './mailbox-types.ts'
 
@@ -84,23 +91,13 @@ import {
  * external attachment bytes stay in `EMAIL_BLOBS`; rows retain keys.
  * `system:email` stays in D1 by design.
  *
- * Dual-write / read-cutover live paths are wired elsewhere. Additive step 2a
- * inbound ledger CAS RPCs are exposed but not live-wired (D1 remains
- * authority for inbound ledger/effects).
+ * Dual-write / read-cutover live paths are wired elsewhere. USER inbound
+ * ledger/effect transitions are authoritative here; `system:email` remains D1.
  */
 
 class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 	private readonly store: MailboxStore
-	/**
-	 * In-isolate cache: once an alarm is scheduled, hot writes skip
-	 * getAlarm/setAlarm. Cleared when retention becomes idle or a write may
-	 * need an earlier wake.
-	 */
 	private retentionAlarmArmed = false
-	/**
-	 * In-isolate: no future retention work. Cleared on every data write so
-	 * ensureRetentionAlarm re-arms for the new row's due-time.
-	 */
 	private retentionIdleConfirmed = false
 
 	constructor(ctx: DurableObjectState, env: Env) {
@@ -108,7 +105,6 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		this.store = new MailboxStore(ctx.storage)
 		this.ctx.blockConcurrencyWhile(async () => {
 			this.store.initializeSchema()
-			// Observe existing alarm only — never arm in the constructor.
 			this.retentionAlarmArmed = (await this.ctx.storage.getAlarm()) != null
 		})
 	}
@@ -216,7 +212,6 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return this.runRetentionPass()
 	}
 
-	/** Atomic mirror of thread + message + attachments for dual-write. */
 	async mirrorMessage(input: {
 		ownerId: string
 		thread?: MailboxThreadInput | null
@@ -247,10 +242,6 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return { ok: true, accepted }
 	}
 
-	/**
-	 * Upsert a delivery event (idempotent on `provider_event_id`) and optionally
-	 * apply a monotonic latest `delivery_status` update on the message.
-	 */
 	async upsertDeliveryEvent(input: {
 		ownerId: string
 		event: MailboxDeliveryEventInput
@@ -269,6 +260,13 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		let updatedLatestStatus = false
 		this.ctx.storage.transactionSync(() => {
 			this.store.assertOwner(input.ownerId)
+			if (
+				shouldSkipMailboxDeliveryEventWrite(this.ctx.storage.sql, {
+					event: input.event,
+				})
+			) {
+				return
+			}
 			const write = this.store.writeDeliveryEventRow(input.event)
 			inserted = write.inserted
 			accepted = write.accepted
@@ -290,40 +288,36 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return { inserted, accepted, updatedLatestStatus }
 	}
 
-	/**
-	 * Upsert a bounded batch of complete immutable delivery-event snapshots in
-	 * one transaction / one DO RPC. Validates non-empty and
-	 * {@link mailboxUpsertDeliveryEventsMax}. Does not patch message latest
-	 * delivery status. Marks retention dirty once for the batch.
-	 */
 	async upsertDeliveryEvents(input: {
 		ownerId: string
 		events: Array<MailboxDeliveryEventInput>
 	}): Promise<MailboxUpsertDeliveryEventsResult> {
-		if (!Array.isArray(input.events) || input.events.length === 0) {
-			throw new Error('Mailbox upsertDeliveryEvents events must be non-empty.')
-		}
-		if (input.events.length > mailboxUpsertDeliveryEventsMax) {
-			throw new Error(
-				`Mailbox upsertDeliveryEvents events exceed max of ${mailboxUpsertDeliveryEventsMax}.`,
-			)
-		}
-		const results: Array<MailboxUpsertDeliveryEventBatchItemResult> = []
+		let result: MailboxUpsertDeliveryEventsResult | undefined
 		this.ctx.storage.transactionSync(() => {
 			this.store.assertOwner(input.ownerId)
-			for (const event of input.events) {
-				const eventId = assertMailboxNonEmptyString(event.id, 'event.id')
-				const write = this.store.writeDeliveryEventRow(event)
-				results.push({
-					eventId,
-					inserted: write.inserted,
-					accepted: write.accepted,
-				})
-			}
+			result = upsertMailboxDeliveryEvents(this.ctx.storage.sql, input.events)
 		})
+		if (!result) throw new Error('Mailbox upsert transaction did not run.')
 		this.markRetentionDirty()
 		await this.ensureRetentionAlarm()
-		return { results }
+		return result
+	}
+
+	async bootstrapDeliveryEvents(input: {
+		ownerId: string
+		events: Array<MailboxDeliveryEventInput>
+	}): Promise<MailboxBootstrapDeliveryEventsResult> {
+		let result: MailboxBootstrapDeliveryEventsResult | undefined
+		this.ctx.storage.transactionSync(() => {
+			this.store.assertOwner(input.ownerId)
+			result = bootstrapMailboxDeliveryEvents(this.ctx.storage.sql, input)
+		})
+		if (!result) throw new Error('Mailbox bootstrap transaction did not run.')
+		if (result.inserted > 0) {
+			this.markRetentionDirty()
+			await this.ensureRetentionAlarm()
+		}
+		return result
 	}
 
 	/**
@@ -507,11 +501,6 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return this.store.listBlobReferences(input)
 	}
 
-	/**
-	 * Additive step 2a inbound ledger CAS RPCs. Not live-wired — D1 remains
-	 * authority. Mirror `upsertDeliveryEvent(s)` stay the compatibility path.
-	 */
-
 	async getInboundDelivery(input: {
 		ownerId: string
 		deliveryId: string
@@ -688,6 +677,58 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return result
 	}
 
+	async claimInboundDeliveryCleanup(input: {
+		ownerId: string
+		deliveryId: string
+		expectedState: MailboxInboundDeliveryState
+		expectedUpdatedAt: string
+		staleBefore: string
+		now?: string
+	}) {
+		let result!: Awaited<ReturnType<MailboxRpc['claimInboundDeliveryCleanup']>>
+		this.ctx.storage.transactionSync(() => {
+			this.store.assertOwner(input.ownerId)
+			result = claimMailboxInboundDeliveryCleanup(this.ctx.storage.sql, input)
+		})
+		return result
+	}
+
+	async releaseInboundDeliveryCleanup(input: {
+		ownerId: string
+		deliveryId: string
+		cleanupLease: string
+		now?: string
+	}) {
+		let result!: Awaited<
+			ReturnType<MailboxRpc['releaseInboundDeliveryCleanup']>
+		>
+		this.ctx.storage.transactionSync(() => {
+			this.store.assertOwner(input.ownerId)
+			result = releaseMailboxInboundDeliveryCleanup(this.ctx.storage.sql, input)
+		})
+		return result
+	}
+
+	async markInboundDeliveryOrphanCleaned(input: {
+		ownerId: string
+		deliveryId: string
+		cleanupLease: string
+		outcome: 'deleted' | 'delete-failed'
+		now?: string
+	}) {
+		let result!: Awaited<
+			ReturnType<MailboxRpc['markInboundDeliveryOrphanCleaned']>
+		>
+		this.ctx.storage.transactionSync(() => {
+			this.store.assertOwner(input.ownerId)
+			result = markMailboxInboundDeliveryOrphanCleaned(
+				this.ctx.storage.sql,
+				input,
+			)
+		})
+		return result
+	}
+
 	async claimInboundUsageEffect(input: {
 		ownerId: string
 		deliveryId: string
@@ -798,15 +839,9 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return listMailboxDueInboundEffectWork(this.ctx.storage.sql, input)
 	}
 
-	/**
-	 * Clear SQLite state only. During expand, D1 deletion remains authoritative
-	 * for R2 objects.
-	 */
 	async purge(): Promise<{ ok: true }> {
 		await this.ctx.blockConcurrencyWhile(async () => {
-			await this.ctx.storage.deleteAlarm().catch(() => {
-				// Best effort: deleteAll below still clears persisted alarm state.
-			})
+			await this.ctx.storage.deleteAlarm().catch(() => undefined)
 			await this.ctx.storage.deleteAll()
 			this.retentionAlarmArmed = false
 			this.retentionIdleConfirmed = true

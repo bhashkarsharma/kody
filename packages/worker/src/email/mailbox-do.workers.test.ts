@@ -496,55 +496,6 @@ test('Mailbox delivery status, promoted inbound fields, export paging, and curso
 		updatedLatestStatus: true,
 	})
 
-	const inbound = await mailbox.upsertDeliveryEvent({
-		ownerId: userId,
-		event: baseDeliveryEvent({
-			id: 'inbound-delivery-1',
-			messageId: 'inbound-msg-1',
-			inboxId: 'inbox-1',
-			eventType: 'received',
-			provider: 'cloudflare-email-routing',
-			createdAt: '2026-07-02T11:00:00.000Z',
-			updatedAt: '2026-07-02T11:00:00.000Z',
-			needsEffectReconcile: true,
-			state: 'received',
-			fingerprint: 'fp-abc',
-			expectedAttachmentCount: 2,
-			finalizationToken: 'lease-token-1',
-			usageStartedAt: '2026-07-02T10:59:00.000Z',
-			usageMonth: '2026-07',
-			usageBytes: 2048,
-			usageDurationMs: 120,
-			subscriptionEffectState: 'pending',
-			subscriptionEffectRetryAt: '2026-07-02T12:00:00.000Z',
-			detailJson: JSON.stringify({ recipient: 'owner@example.com' }),
-		}),
-	})
-	expect(inbound.inserted).toBe(true)
-	const inboundRow = (
-		await mailbox.listDeliveryEvents({
-			messageId: 'inbound-msg-1',
-			limit: 1,
-		})
-	)[0]
-	expect(inboundRow).toMatchObject({
-		id: 'inbound-delivery-1',
-		needsEffectReconcile: true,
-		state: 'received',
-		fingerprint: 'fp-abc',
-		expectedAttachmentCount: 2,
-		finalizationToken: 'lease-token-1',
-		usageStartedAt: '2026-07-02T10:59:00.000Z',
-		usageMonth: '2026-07',
-		usageBytes: 2048,
-		subscriptionEffectState: 'pending',
-		subscriptionEffectRetryAt: '2026-07-02T12:00:00.000Z',
-		updatedAt: '2026-07-02T11:00:00.000Z',
-	})
-	expect(JSON.parse(inboundRow!.detailJson)).toMatchObject({
-		recipient: 'owner@example.com',
-	})
-
 	// Explicit needsEffectReconcile: false is stored as false.
 	await mailbox.upsertDeliveryEvent({
 		ownerId: userId,

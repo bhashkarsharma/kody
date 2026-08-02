@@ -17,13 +17,19 @@ import {
 	listEmailAttachmentsForMessage,
 } from './repo.ts'
 import { type EmailThreadRecord } from './types.ts'
+import {
+	mailboxInboundDedupeProvider,
+	mailboxInboundProvider,
+} from './mailbox-inbound-ledger.ts'
 
 /**
  * High-level D1 → Mailbox live-mirror orchestration.
  *
- * D1 remains authoritative. These helpers load cohesive snapshots from D1 and
- * call best-effort mirror RPCs; they never throw into caller paths and do not
- * perform deletes or inbound-lifecycle special cases.
+ * D1 remains authoritative for the message graph and non-USER-inbound events.
+ * These helpers load cohesive snapshots from D1 and call best-effort mirror
+ * RPCs; they never throw into caller paths and do not perform deletes or
+ * inbound-lifecycle special cases. USER inbound terminal work explicitly omits
+ * delivery events because those snapshots flow Mailbox → D1.
  *
  * Callers that just created a thread may pass it via `thread` to avoid a
  * round-trip; otherwise the graph helper loads it with `getEmailThreadById`.
@@ -43,6 +49,13 @@ export const mailboxLiveMirrorMaxEvents = mailboxUpsertDeliveryEventsMax
 export const mailboxLiveMirrorMaxAnalyticsWrites = 2
 
 export type MailboxLiveMirrorEnv = MailboxMirrorEnv
+
+function isUserInboundAuthorityProvider(provider: string | null) {
+	return (
+		provider === mailboxInboundProvider ||
+		provider === mailboxInboundDedupeProvider
+	)
+}
 
 export type MailboxLiveMirrorEventResult = {
 	eventId: string
@@ -94,6 +107,9 @@ export async function mirrorMailboxDeliveryEventFromD1(input: {
 			eventId: input.eventId,
 		})
 		if (!projection) return { status: 'missing' }
+		if (isUserInboundAuthorityProvider(projection.provider)) {
+			return { status: 'skipped', reason: 'user-inbound-authority' }
+		}
 		const sourceMutationAt =
 			input.sourceMutationAt != null && input.sourceMutationAt.length > 0
 				? input.sourceMutationAt
@@ -132,6 +148,8 @@ export async function mirrorMailboxMessageGraphFromD1(input: {
 	userId: string
 	messageId: string
 	thread?: EmailThreadRecord | null
+	/** USER inbound terminal work keeps its DO-authoritative event untouched. */
+	includeDeliveryEvents?: boolean
 }): Promise<MailboxLiveMirrorGraphSummary> {
 	try {
 		const message = await getEmailMessageById({
@@ -168,6 +186,9 @@ export async function mirrorMailboxMessageGraphFromD1(input: {
 			message,
 			attachments,
 		})
+		if (input.includeDeliveryEvents === false) {
+			return emptyGraphSummary(input.messageId, messageResult)
+		}
 
 		// Newest max+1 from D1 (chrono-restored). When truncated, keep the
 		// trailing newest max — drop the oldest overflow row at index 0.
@@ -186,9 +207,11 @@ export async function mirrorMailboxMessageGraphFromD1(input: {
 				max: mailboxLiveMirrorMaxEvents,
 			})
 		}
-		const eventInputs = eventsTruncated
-			? loadedEvents.slice(-mailboxLiveMirrorMaxEvents)
-			: loadedEvents
+		const eventInputs = (
+			eventsTruncated
+				? loadedEvents.slice(-mailboxLiveMirrorMaxEvents)
+				: loadedEvents
+		).filter((event) => !isUserInboundAuthorityProvider(event.provider))
 
 		const events =
 			eventInputs.length === 0

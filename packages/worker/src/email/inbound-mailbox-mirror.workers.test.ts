@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { expect, test, vi } from 'vitest'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
+import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { ensureUsageRollupsTestSchema } from '#worker/usage/test-schema.ts'
@@ -88,9 +89,140 @@ function createFailingEmailBlobs() {
 	})
 }
 
+function createRejectProjectionFailingDb(db: D1Database) {
+	let failed = false
+	const failingDb = new Proxy(db, {
+		get(target, property) {
+			if (property === 'prepare') {
+				return (query: string) => {
+					const statement = target.prepare(query)
+					if (!query.includes('INSERT INTO email_delivery_events')) {
+						return statement
+					}
+					return new Proxy(statement, {
+						get(statementTarget, statementProperty) {
+							if (statementProperty === 'bind') {
+								return (...values: Array<unknown>) => {
+									const bound = statementTarget.bind(...values)
+									if (failed || values[4] !== 'rejected') return bound
+									return new Proxy(bound, {
+										get(boundTarget, boundProperty) {
+											if (boundProperty === 'run') {
+												return async () => {
+													failed = true
+													throw new Error(
+														'simulated rejected projection failure',
+													)
+												}
+											}
+											const value = Reflect.get(boundTarget, boundProperty)
+											return typeof value === 'function'
+												? value.bind(boundTarget)
+												: value
+										},
+									})
+								}
+							}
+							const value = Reflect.get(statementTarget, statementProperty)
+							return typeof value === 'function'
+								? value.bind(statementTarget)
+								: value
+						},
+					})
+				}
+			}
+			const value = Reflect.get(target, property)
+			return typeof value === 'function' ? value.bind(target) : value
+		},
+	})
+	return { db: failingDb, didFail: () => failed }
+}
+
 const inboundMailboxMirrorTimeoutMs = 30_000
 
-/** MAILBOX stub that fails or hangs every mirror RPC without touching the real DO. */
+function createLedgerBackedMailboxStub(
+	mailbox: ReturnType<typeof env.MAILBOX.get>,
+) {
+	return {
+		async getInboundDelivery(
+			...args: Parameters<typeof mailbox.getInboundDelivery>
+		) {
+			return await mailbox.getInboundDelivery(...args)
+		},
+		async getInboundDeliveryWindow(
+			...args: Parameters<typeof mailbox.getInboundDeliveryWindow>
+		) {
+			return await mailbox.getInboundDeliveryWindow(...args)
+		},
+		async claimInboundDeliveryWindow(
+			...args: Parameters<typeof mailbox.claimInboundDeliveryWindow>
+		) {
+			return await mailbox.claimInboundDeliveryWindow(...args)
+		},
+		async insertChargedPendingInboundDelivery(
+			...args: Parameters<typeof mailbox.insertChargedPendingInboundDelivery>
+		) {
+			return await mailbox.insertChargedPendingInboundDelivery(...args)
+		},
+		async claimInboundDeliveryStorage(
+			...args: Parameters<typeof mailbox.claimInboundDeliveryStorage>
+		) {
+			return await mailbox.claimInboundDeliveryStorage(...args)
+		},
+		async releaseInboundDeliveryStorage(
+			...args: Parameters<typeof mailbox.releaseInboundDeliveryStorage>
+		) {
+			return await mailbox.releaseInboundDeliveryStorage(...args)
+		},
+		async markInboundDeliveryRejected(
+			...args: Parameters<typeof mailbox.markInboundDeliveryRejected>
+		) {
+			return await mailbox.markInboundDeliveryRejected(...args)
+		},
+		async markInboundDeliveryReceived(
+			...args: Parameters<typeof mailbox.markInboundDeliveryReceived>
+		) {
+			return await mailbox.markInboundDeliveryReceived(...args)
+		},
+		async pruneExpiredInboundDedupePointers(
+			...args: Parameters<typeof mailbox.pruneExpiredInboundDedupePointers>
+		) {
+			return await mailbox.pruneExpiredInboundDedupePointers(...args)
+		},
+		async listDueStaleInboundDeliveries(
+			...args: Parameters<typeof mailbox.listDueStaleInboundDeliveries>
+		) {
+			return await mailbox.listDueStaleInboundDeliveries(...args)
+		},
+		async claimInboundUsageEffect(
+			...args: Parameters<typeof mailbox.claimInboundUsageEffect>
+		) {
+			return await mailbox.claimInboundUsageEffect(...args)
+		},
+		async completeInboundUsageEffect(
+			...args: Parameters<typeof mailbox.completeInboundUsageEffect>
+		) {
+			return await mailbox.completeInboundUsageEffect(...args)
+		},
+		async claimInboundSubscriptionEffect(
+			...args: Parameters<typeof mailbox.claimInboundSubscriptionEffect>
+		) {
+			return await mailbox.claimInboundSubscriptionEffect(...args)
+		},
+		async completeInboundSubscriptionEffect(
+			...args: Parameters<typeof mailbox.completeInboundSubscriptionEffect>
+		) {
+			return await mailbox.completeInboundSubscriptionEffect(...args)
+		},
+		async failInboundSubscriptionEffect(
+			...args: Parameters<typeof mailbox.failInboundSubscriptionEffect>
+		) {
+			return await mailbox.failInboundSubscriptionEffect(...args)
+		},
+	}
+}
+
+/** MAILBOX namespace that fails graph-mirror RPCs but keeps ledger CAS real. */
 function createInboundMailboxStubEnv(input: {
 	mode: 'throw' | 'hang'
 	base?: typeof env
@@ -101,23 +233,26 @@ function createInboundMailboxStubEnv(input: {
 		throw new Error('simulated mailbox failure')
 	}
 	const method = input.mode === 'hang' ? hang : fail
-	const stub = {
-		mirrorMessage: method,
-		upsertDeliveryEvent: method,
-		upsertDeliveryEvents: method,
-		touchThread: method,
-		updateMessageDelivery: method,
-		setMessageClassification: method,
-		deleteMessageMetadata: method,
-		deleteDeliveryEvent: method,
-		deleteThreadIfEmpty: method,
-	}
 	return {
 		...base,
 		APP_BASE_URL: platformBaseUrl,
 		MAILBOX: {
 			idFromName: (name: string) => base.MAILBOX.idFromName(name),
-			get: () => stub,
+			get: (id: DurableObjectId) => {
+				const mailbox = base.MAILBOX.get(id)
+				return {
+					...createLedgerBackedMailboxStub(mailbox),
+					mirrorMessage: method,
+					upsertDeliveryEvent: method,
+					upsertDeliveryEvents: method,
+					touchThread: method,
+					updateMessageDelivery: method,
+					setMessageClassification: method,
+					deleteMessageMetadata: method,
+					deleteDeliveryEvent: method,
+					deleteThreadIfEmpty: method,
+				}
+			},
 		} as unknown as DurableObjectNamespace,
 	}
 }
@@ -257,23 +392,11 @@ test(
 		})
 		const order: Array<string> = []
 		const delayedStub = {
+			...createLedgerBackedMailboxStub(real),
 			async mirrorMessage(...args: Parameters<typeof real.mirrorMessage>) {
 				order.push('graph-message')
 				await graphGate
 				return await real.mirrorMessage(...args)
-			},
-			async upsertDeliveryEvents(
-				...args: Parameters<typeof real.upsertDeliveryEvents>
-			) {
-				order.push('graph-batch')
-				await graphGate
-				return await real.upsertDeliveryEvents(...args)
-			},
-			async upsertDeliveryEvent(
-				...args: Parameters<typeof real.upsertDeliveryEvent>
-			) {
-				order.push('post-effects-event')
-				return await real.upsertDeliveryEvent(...args)
 			},
 		}
 
@@ -334,11 +457,7 @@ test(
 		releaseGraph()
 		await drainWaitUntil(waitUntilPromises)
 
-		expect(order).toEqual([
-			'graph-message',
-			'graph-batch',
-			'post-effects-event',
-		])
+		expect(order).toEqual(['graph-message'])
 
 		const mailbox = rpcFor(userId)
 		const mirroredEvents = await mailbox.listDeliveryEvents({
@@ -459,8 +578,8 @@ test(
 			handleInboundEmail(first, failingEnv, failCtx.ctx),
 		).rejects.toBeInstanceOf(RetryableInboundStorageError)
 		expect(first.rejectedReason).toBeNull()
-		// Charge may schedule UserMeter D1 mirror via waitUntil; no Mailbox
-		// terminal work should have produced a message below.
+		// The charged Mailbox delivery survives this retryable graph-storage
+		// failure; no terminal work should have produced a message below.
 		await drainWaitUntil(failCtx.waitUntilPromises)
 		expect(await readUserDailyReceiveCount(userId)).toBe(1)
 		expect(
@@ -790,6 +909,85 @@ test(
 				afterReplay.filter((event) => event.id === delivery.id),
 			).toHaveLength(1)
 			expect(await readUserDailyReceiveCount(userId)).toBe(1)
+		} finally {
+			parseSpy.mockRestore()
+		}
+	},
+	inboundMailboxMirrorTimeoutMs,
+)
+
+test.each([
+	{ label: 'without an execution context', withContext: false },
+	{ label: 'with an execution context', withContext: true },
+])(
+	'SMTP rejection survives a rejected D1 projection failure $label',
+	async ({ withContext }) => {
+		silenceIncidentalRuntimeWarnings([
+			'inbound-email-rejected-projection-failed',
+		])
+		await ensureEmailTestSchema(env.APP_DB)
+		const username = `mbx-rej-fail-${crypto.randomUUID().slice(0, 8)}`
+		const accountEmail = `mbx-rej-fail-${crypto.randomUUID()}@example.com`
+		const userId = await createStableUserIdFromEmail(accountEmail)
+		const address = `${username}@${platformDomain}`
+		await seedVerifiedAccount({
+			db: env.APP_DB,
+			email: accountEmail,
+			username,
+		})
+		const mailbox = rpcFor(userId)
+		await mailbox.getMessage({ messageId: 'warmup-nonexistent' })
+		const raw = [
+			'From: Sender <sender@example.net>',
+			`To: ${address}`,
+			'Subject: Permanent reject despite projection failure',
+			`Message-ID: <mailbox-reject-failure-${crypto.randomUUID()}@example.net>`,
+			'',
+			'Body',
+		].join('\r\n')
+		const projection = createRejectProjectionFailingDb(env.APP_DB)
+		const inboundEnv = {
+			...createInboundEnv(),
+			APP_DB: projection.db,
+		}
+		const captured = withContext ? createCapturedWaitUntilContext() : null
+		const parseSpy = vi
+			.spyOn(parser, 'parseForwardableEmailRawMime')
+			.mockRejectedValueOnce(new Error('permanent parse rejection'))
+		try {
+			const message = createForwardableEmailMessage({
+				from: 'sender@example.net',
+				to: address,
+				raw,
+			})
+			await handleInboundEmail(message, inboundEnv, captured?.ctx)
+
+			expect(projection.didFail()).toBe(true)
+			expect(message.rejectedReason).toBe('permanent parse rejection')
+			expect(consoleWarn).toHaveBeenCalledWith(
+				'inbound-email-rejected-projection-failed',
+				userId,
+				expect.any(String),
+				expect.any(Error),
+			)
+			if (captured) await drainWaitUntil(captured.waitUntilPromises)
+
+			const rejected = (
+				await mailbox.listDeliveryEvents({ messageId: null, limit: 20 })
+			).find((event) => event.eventType === 'rejected')
+			expect(rejected).toMatchObject({
+				eventType: 'rejected',
+				provider: 'cloudflare-email-routing',
+			})
+			if (!rejected) throw new Error('Expected authoritative Mailbox rejection')
+			expect(
+				await env.APP_DB.prepare(
+					`SELECT event_type FROM email_delivery_events
+					WHERE id = ? AND user_id = ?`,
+				)
+					.bind(rejected.id, userId)
+					.first<{ event_type: string }>(),
+			).toEqual({ event_type: 'rejected' })
 		} finally {
 			parseSpy.mockRestore()
 		}
