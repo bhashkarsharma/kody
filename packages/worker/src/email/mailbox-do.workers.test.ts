@@ -33,6 +33,8 @@ test('Mailbox mirrors, reads, searches, isolates owners, and stays idempotent', 
 					AND name IN (
 						'email_threads', 'email_messages',
 						'email_attachments', 'email_delivery_events',
+						'email_message_deletion_tombstones',
+						'email_message_retention_retries',
 						'mailbox_owner_identity'
 					)
 				ORDER BY name ASC`,
@@ -42,6 +44,8 @@ test('Mailbox mirrors, reads, searches, isolates owners, and stays idempotent', 
 		expect(tables).toEqual([
 			'email_attachments',
 			'email_delivery_events',
+			'email_message_deletion_tombstones',
+			'email_message_retention_retries',
 			'email_messages',
 			'email_threads',
 			'mailbox_owner_identity',
@@ -825,4 +829,54 @@ test('Mailbox upsertDeliveryEvents validates bounds, owns batch, and arms retent
 			await mailbox.listDeliveryEvents({ messageId: message.id, limit: 20 })
 		).some((event) => event.id === 'batch-txn-ok'),
 	).toBe(false)
+})
+
+test('Mailbox direct and batch delivery-event writes detach tombstoned messages', async () => {
+	silenceIncidentalRuntimeWarnings()
+	const userId = uniqueUserId('event-tombstone')
+	const mailbox = rpcFor(userId)
+	const messageId = 'event-tombstoned-message'
+	await mailbox.tombstoneMissingMessage({
+		ownerId: userId,
+		messageId,
+		deletedAt: '2026-08-02T20:00:00.000Z',
+	})
+
+	await expect(
+		mailbox.upsertDeliveryEvent({
+			ownerId: userId,
+			event: baseDeliveryEvent({
+				id: 'event-tombstone-direct',
+				messageId,
+			}),
+		}),
+	).resolves.toMatchObject({ inserted: true, accepted: true })
+	await expect(
+		mailbox.upsertDeliveryEvents({
+			ownerId: userId,
+			events: [
+				baseDeliveryEvent({
+					id: 'event-tombstone-batch',
+					messageId,
+					updatedAt: '2026-07-02T10:00:01.000Z',
+				}),
+			],
+		}),
+	).resolves.toMatchObject({
+		results: [
+			{ eventId: 'event-tombstone-batch', inserted: true, accepted: true },
+		],
+	})
+
+	const events = await mailbox.listDeliveryEvents({ limit: 10 })
+	expect(
+		events
+			.filter((event) => event.id.startsWith('event-tombstone-'))
+			.map((event) => ({ id: event.id, messageId: event.messageId })),
+	).toEqual(
+		expect.arrayContaining([
+			{ id: 'event-tombstone-batch', messageId: null },
+			{ id: 'event-tombstone-direct', messageId: null },
+		]),
+	)
 })

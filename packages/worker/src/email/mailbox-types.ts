@@ -24,7 +24,10 @@ export const mailboxDefaultPageSize = 100
 export const mailboxMaxPageSize = 500
 /** Max complete delivery-event snapshots per `upsertDeliveryEvents` RPC. */
 export const mailboxUpsertDeliveryEventsMax = 100
-export const mailboxRetentionBatchSize = 100
+/** At most one R2-backed message is processed in each DO event/invocation. */
+export const mailboxRetentionMessageCandidatesPerTurn = 1
+/** SQLite-only delivery-event/thread retention batch size. */
+export const mailboxRetentionMetadataBatchSize = 100
 export const mailboxRetentionAlarmSkewMs = 60_000
 /** Bound retry delay when overdue retention work cannot finish (e.g. R2 errors). */
 export const mailboxRetentionRetryDelayMs = 60 * 60 * 1000
@@ -36,7 +39,7 @@ export const mailboxBlobDeleteMaxKeys = 1000
  * Bump when initializeSchema's DDL set changes. Warm objects run additive
  * migrations (CREATE INDEX IF NOT EXISTS / guarded ALTER) until they match.
  */
-export const mailboxSchemaVersion = 2
+export const mailboxSchemaVersion = 4
 export const mailboxMetaSchemaVersionKey = 'schema_version'
 
 export const mailboxExportThreadCursorPrefix = 'thread:'
@@ -323,6 +326,23 @@ export type MailboxBlobReferencePage = {
 	truncated: boolean
 }
 
+/**
+ * Owner-bound single-message delete result. Blob references are returned only
+ * to trusted internal callers for exact post-delete verification.
+ */
+export type MailboxDeleteMessageWithBlobsResult =
+	| { status: 'missing'; tombstoned: boolean }
+	| {
+			status: 'deleted'
+			attachmentsSeen: number
+			externalAttachmentsSeen: number
+			blobReferences: Array<MailboxBlobReference>
+	  }
+
+export type MailboxTombstoneMissingMessageResult =
+	| { status: 'message-present' }
+	| { status: 'tombstoned'; created: boolean }
+
 export type MailboxCountResult = {
 	threads: number
 	messages: number
@@ -332,7 +352,8 @@ export type MailboxCountResult = {
 
 /**
  * Aggregate result from {@link MailboxRpc.runRetentionNow} (and the shared
- * private retention pass used by `alarm`). Counts only — no row ids or content.
+ * private retention turn used by `alarm`). Each invocation processes at most
+ * one R2-backed message; counts only — no row ids or content.
  */
 export type MailboxRunRetentionNowResult = {
 	before: MailboxCountResult
@@ -556,6 +577,23 @@ type MailboxCoreRpc = {
 	deleteMessageMetadata: (
 		input: MailboxDeleteMessageMetadataInput,
 	) => Promise<MailboxDeleteResult>
+	/**
+	 * Authoritative USER delete. Canonical owner-safe R2 objects are deleted
+	 * before message metadata in one owner-bound DO orchestration.
+	 */
+	deleteMessageWithBlobs: (input: {
+		ownerId: string
+		messageId: string
+	}) => Promise<MailboxDeleteMessageWithBlobsResult>
+	/**
+	 * Fence an already-missing USER message before compatibility R2/D1 cleanup.
+	 * Refuses to tombstone when Mailbox metadata became present concurrently.
+	 */
+	tombstoneMissingMessage: (input: {
+		ownerId: string
+		messageId: string
+		deletedAt: string
+	}) => Promise<MailboxTombstoneMissingMessageResult>
 	deleteDeliveryEvent: (
 		input: MailboxDeleteDeliveryEventInput,
 	) => Promise<MailboxDeleteResult>
@@ -611,6 +649,8 @@ type MailboxCoreRpc = {
 	runRetentionNow: (input: {
 		ownerId: string
 	}) => Promise<MailboxRunRetentionNowResult>
+	/** Parity rebuild only: clear graph metadata while retaining delete fences. */
+	purgeForParityRebuild: (input: { ownerId: string }) => Promise<{ ok: true }>
 	purge: () => Promise<{ ok: true }>
 }
 

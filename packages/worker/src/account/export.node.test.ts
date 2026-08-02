@@ -3,13 +3,18 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import {
+	mailboxBlobRefAttachmentCursorPrefix,
+	mailboxBlobRefRawMimeCursorPrefix,
+	parseMailboxBlobRefCursor,
+} from '#worker/email/mailbox-types.ts'
+import { consoleWarn } from '#worker/test-support/console-spies.ts'
+import {
 	createAccountExport,
 	createAccountExportManifest,
 	getAccountExportD1UserColumnCoverage,
 	readAccountExportSection,
 } from './export.ts'
 import { accountUserOwnedDurableObjectSurfaces } from './user-owned-surfaces.ts'
-import { consoleWarn } from '#worker/test-support/console-spies.ts'
 
 function applyMigrations(db: DatabaseSync) {
 	const migrationsDir = new URL('../../migrations/', import.meta.url)
@@ -85,6 +90,106 @@ function createMigratedDb(options?: {
 	}
 }
 
+type TestMailboxBlobReference = {
+	kind: 'raw_mime' | 'attachment'
+	key: string
+	messageId: string
+	attachmentId: string | null
+}
+
+function createMailboxBinding(input?: {
+	blobReferences?: () => Array<TestMailboxBlobReference>
+}) {
+	const cursorAfter = (reference: TestMailboxBlobReference) =>
+		reference.kind === 'raw_mime'
+			? `${mailboxBlobRefRawMimeCursorPrefix}${reference.messageId}`
+			: `${mailboxBlobRefAttachmentCursorPrefix}${reference.attachmentId}`
+	const listBlobReferences = async ({
+		pageSize = 100,
+		startAfter,
+	}: {
+		pageSize?: number
+		startAfter?: string | null
+	}) => {
+		const cursor = parseMailboxBlobRefCursor(startAfter ?? null)
+		const references = (input?.blobReferences?.() ?? [])
+			.filter((reference) => {
+				if (cursor.phase === 'raw_mime') {
+					return (
+						reference.kind === 'attachment' ||
+						reference.messageId > cursor.startAfterId
+					)
+				}
+				return (
+					reference.kind === 'attachment' &&
+					(reference.attachmentId ?? '') > cursor.startAfterId
+				)
+			})
+			.sort((left, right) => {
+				if (left.kind !== right.kind) return left.kind === 'raw_mime' ? -1 : 1
+				return cursorAfter(left).localeCompare(cursorAfter(right))
+			})
+		const page = references.slice(0, pageSize)
+		const truncated = references.length > page.length
+		return {
+			references: page,
+			nextStartAfter: truncated ? cursorAfter(page.at(-1)!) : null,
+			truncated,
+		}
+	}
+	return {
+		idFromName: (name: string) => name as unknown as DurableObjectId,
+		get: () => ({
+			countMailbox: async () => ({
+				threads: 0,
+				messages: 0,
+				attachments: 0,
+				deliveryEvents: 0,
+			}),
+			exportMailbox: async () => ({
+				rows: [],
+				nextStartAfter: null,
+				truncated: false,
+			}),
+			listBlobReferences,
+		}),
+	} as unknown as DurableObjectNamespace
+}
+
+function encodeTestBase64Url(bytes: Uint8Array) {
+	let binary = ''
+	for (const byte of bytes) binary += String.fromCharCode(byte)
+	return btoa(binary)
+		.replaceAll('+', '-')
+		.replaceAll('/', '_')
+		.replace(/=+$/u, '')
+}
+
+async function createSignedR2Cursor(input: {
+	secret: string
+	userId: string
+	cursor: unknown
+}) {
+	const payload = encodeTestBase64Url(
+		new TextEncoder().encode(
+			JSON.stringify({ userId: input.userId, cursor: input.cursor }),
+		),
+	)
+	const key = await crypto.subtle.importKey(
+		'raw',
+		new TextEncoder().encode(input.secret),
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign'],
+	)
+	const signature = await crypto.subtle.sign(
+		'HMAC',
+		key,
+		new TextEncoder().encode(payload),
+	)
+	return `${payload}.${encodeTestBase64Url(new Uint8Array(signature))}`
+}
+
 test('account export D1 coverage includes every live user-owned schema column', () => {
 	const db = new DatabaseSync(':memory:')
 	applyMigrations(db)
@@ -140,21 +245,38 @@ test('account export documents and excludes operator-owned system email rows', a
 	`)
 
 	const accountExport = await createAccountExport({
-		env: { APP_DB: db } as Env,
+		env: {
+			APP_DB: db,
+			MAILBOX: createMailboxBinding({
+				blobReferences: () => [
+					{
+						kind: 'raw_mime',
+						key: 'email-raw:v1:user-aaa/user-message',
+						messageId: 'user-message',
+						attachmentId: null,
+					},
+				],
+			}),
+		} as Env,
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 		generatedAt: '2026-07-05T00:00:00.000Z',
 	})
 
-	expect(accountExport.d1.email_messages.rows).toEqual([
-		expect.objectContaining({ id: 'user-message', user_id: 'user-aaa' }),
-	])
+	expect(accountExport.d1).not.toHaveProperty('email_messages')
+	expect(accountExport.d1).not.toHaveProperty('email_threads')
+	expect(accountExport.d1).not.toHaveProperty('email_attachments')
+	expect(accountExport.d1).not.toHaveProperty('email_delivery_events')
 	expect(accountExport.manifest.sections.r2_object?.count).toBe(1)
 	expect(accountExport.manifest.excludedD1Surfaces).toEqual(
 		expect.arrayContaining([
 			expect.objectContaining({
 				name: 'system_email_inboxes',
 				reason: expect.stringContaining('Operator-owned inbound mail'),
+			}),
+			expect.objectContaining({
+				name: 'user_email_messages_projection',
+				reason: expect.stringContaining('authoritative Mailbox section'),
 			}),
 		]),
 	)
@@ -518,6 +640,22 @@ test('R2 export pages owned payloads in bounded chunks and reports missing objec
 		COOKIE_SECRET: 'test-cookie-secret',
 		EMAIL_BLOBS: { get: getEmailBlob },
 		COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
+		MAILBOX: createMailboxBinding({
+			blobReferences: () => [
+				{
+					kind: 'raw_mime',
+					key: 'email-raw:v1:user-aaa/mail-a',
+					messageId: 'mail-a',
+					attachmentId: null,
+				},
+				{
+					kind: 'raw_mime',
+					key: 'email-raw:v1:user-aaa/mail-z',
+					messageId: 'mail-z',
+					attachmentId: null,
+				},
+			],
+		}),
 	} as unknown as Env
 
 	const first = await readAccountExportSection({
@@ -543,7 +681,24 @@ test('R2 export pages owned payloads in bounded chunks and reports missing objec
 			section: 'r2_object',
 			startAfter: tamperedCursor,
 		}),
-	).rejects.toThrow('Invalid r2_object cursor.')
+	).rejects.toThrow('Invalid or unsupported r2_object cursor')
+	const legacyCursor = await createSignedR2Cursor({
+		secret: 'test-cookie-secret',
+		userId: 'user-aaa',
+		cursor: {
+			v: 1,
+			state: { stage: 'email_raw_mime', afterRowid: 1 },
+		},
+	})
+	await expect(
+		readAccountExportSection({
+			env,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+			section: 'r2_object',
+			startAfter: legacyCursor,
+		}),
+	).rejects.toThrow('restart without startAfter')
 	const second = await readAccountExportSection({
 		env,
 		dbUserId: 1,
@@ -621,6 +776,18 @@ test('R2 export performs bounded keyset work independent of mailbox size', async
 			COOKIE_SECRET: 'test-cookie-secret',
 			EMAIL_BLOBS: { get: vi.fn(async () => null) },
 			COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
+			MAILBOX: createMailboxBinding({
+				blobReferences: () =>
+					Array.from({ length: 1201 }, (_, index) => {
+						const messageId = `mail-${String(index).padStart(4, '0')}`
+						return {
+							kind: 'raw_mime' as const,
+							key: `email-raw:v1:user-aaa/${messageId}`,
+							messageId,
+							attachmentId: null,
+						}
+					}),
+			}),
 		} as unknown as Env,
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
@@ -743,6 +910,22 @@ test('R2 export cursor keeps stable row identity when inventory mutates', async 
 		COOKIE_SECRET: 'test-cookie-secret',
 		EMAIL_BLOBS: { get },
 		COMMUNITY_ASSETS: { get: vi.fn(async () => null) },
+		MAILBOX: createMailboxBinding({
+			blobReferences: () => [
+				{
+					kind: 'raw_mime',
+					key: 'email-raw:v1:user-aaa/mail-a',
+					messageId: 'mail-a',
+					attachmentId: null,
+				},
+				{
+					kind: 'raw_mime',
+					key: 'email-raw:v1:user-aaa/mail-b',
+					messageId: 'mail-b',
+					attachmentId: null,
+				},
+			],
+		}),
 	} as unknown as Env
 	const first = await readAccountExportSection({
 		env,
@@ -1252,15 +1435,38 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
 			'2026-07-05', '2026-07-05', 'user-aaa'
 		);
+		INSERT INTO email_threads (
+			id, user_id, subject_normalized, last_message_at, created_at, updated_at
+		) VALUES (
+			'thread-1', 'user-aaa', 'hello', '2026-07-30', '2026-07-30', '2026-07-30'
+		);
+		INSERT INTO email_messages (
+			id, direction, user_id, thread_id, from_address, subject,
+			processing_status, created_at, updated_at
+		) VALUES (
+			'message-1', 'inbound', 'user-aaa', 'thread-1', 'a@example.com',
+			'hello', 'stored', '2026-07-30', '2026-07-30'
+		);
+		INSERT INTO email_attachments (
+			id, message_id, filename, content_type, storage_kind, created_at
+		) VALUES (
+			'attachment-1', 'message-1', 'file.txt', 'text/plain', 'unavailable',
+			'2026-07-30'
+		);
+		INSERT INTO email_delivery_events (
+			id, message_id, user_id, event_type, created_at
+		) VALUES (
+			'event-1', 'message-1', 'user-aaa', 'received', '2026-07-30'
+		);
 	`)
-	const totalMessages = 1201
+	const totalRows = 1201
 	const insert = sqlite.prepare(
-		`INSERT INTO email_messages (
-			id, direction, user_id, from_address, subject, processing_status, created_at, updated_at
-		) VALUES (?, 'inbound', 'user-aaa', 'sender@example.net', ?, 'stored', '2026-07-05', '2026-07-05')`,
+		`INSERT INTO mcp_memories (
+			id, user_id, subject, summary, details, created_at, updated_at
+		) VALUES (?, 'user-aaa', ?, 'Summary', '', '2026-07-05', '2026-07-05')`,
 	)
-	for (let index = 0; index < totalMessages; index += 1) {
-		insert.run(`message-${String(index).padStart(4, '0')}`, `Mail ${index}`)
+	for (let index = 0; index < totalRows; index += 1) {
+		insert.run(`memory-${String(index).padStart(4, '0')}`, `Memory ${index}`)
 	}
 	sqlite.exec(`
 		INSERT INTO user_storage_buckets (
@@ -1271,15 +1477,19 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 		);
 	`)
 
+	const env = {
+		APP_DB: db,
+		MAILBOX: createMailboxBinding(),
+	} as Env
 	const accountExport = await createAccountExport({
-		env: { APP_DB: db } as Env,
+		env,
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 		generatedAt: '2026-07-05T00:00:00.000Z',
 	})
-	expect(accountExport.d1.email_messages.rows).toHaveLength(totalMessages)
-	expect(accountExport.manifest.sections['d1.email_messages']?.count).toBe(
-		totalMessages,
+	expect(accountExport.d1.mcp_memories.rows).toHaveLength(totalRows)
+	expect(accountExport.manifest.sections['d1.mcp_memories']?.count).toBe(
+		totalRows,
 	)
 	// The keyset page size is 500 (+1 lookahead row), so no single query may
 	// return the whole table.
@@ -1291,11 +1501,11 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 	let pages = 0
 	while (true) {
 		const page = await readAccountExportSection({
-			env: { APP_DB: db } as Env,
+			env,
 			dbUserId: 1,
 			mcpUserId: 'user-aaa',
 			section: 'd1_table',
-			table: 'email_messages',
+			table: 'mcp_memories',
 			pageSize: 500,
 			startAfter,
 		})
@@ -1307,7 +1517,7 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 		startAfter = page.nextStartAfter ?? undefined
 	}
 	expect(pages).toBe(3)
-	expect(seenIds.size).toBe(totalMessages)
+	expect(seenIds.size).toBe(totalRows)
 	expect(Math.max(...rowCounts)).toBeLessThanOrEqual(501)
 
 	rowCounts.length = 0
@@ -1316,6 +1526,7 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 	const manifest = await createAccountExportManifest({
 		env: {
 			APP_DB: db,
+			MAILBOX: createMailboxBinding(),
 			OAUTH_PROVIDER: {
 				async listUserGrants() {
 					oauthPage += 1
@@ -1329,7 +1540,8 @@ test('D1 export reads large tables in bounded keyset pages', async () => {
 		dbUserId: 1,
 		mcpUserId: 'user-aaa',
 	})
-	expect(manifest.sections['d1.email_messages']?.count).toBe(totalMessages)
+	expect(manifest.sections['d1.mcp_memories']?.count).toBe(totalRows)
+	expect(manifest.sections).not.toHaveProperty('d1.email_messages')
 	expect(manifest.sections.oauth_grants?.count).toBe(100)
 	expect(manifest.sections.storage_runners?.count).toBe(1)
 	expect(Math.max(...rowCounts)).toBeLessThanOrEqual(1)
@@ -1728,6 +1940,29 @@ test('account export includes mailbox rows, pages them, and warns on truncation'
 			1, 'user-a', 'a@example.com', 'password-hash-a', '2026-07-05',
 			'2026-07-05', '2026-07-05', 'user-aaa'
 		);
+		INSERT INTO email_threads (
+			id, user_id, subject_normalized, last_message_at, created_at, updated_at
+		) VALUES (
+			'thread-1', 'user-aaa', 'hello', '2026-07-30', '2026-07-30', '2026-07-30'
+		);
+		INSERT INTO email_messages (
+			id, direction, user_id, thread_id, from_address, subject,
+			processing_status, created_at, updated_at
+		) VALUES (
+			'message-1', 'inbound', 'user-aaa', 'thread-1', 'a@example.com',
+			'hello', 'stored', '2026-07-30', '2026-07-30'
+		);
+		INSERT INTO email_attachments (
+			id, message_id, filename, content_type, storage_kind, created_at
+		) VALUES (
+			'attachment-1', 'message-1', 'file.txt', 'text/plain', 'unavailable',
+			'2026-07-30'
+		);
+		INSERT INTO email_delivery_events (
+			id, message_id, user_id, event_type, created_at
+		) VALUES (
+			'event-1', 'message-1', 'user-aaa', 'received', '2026-07-30'
+		);
 	`)
 	const rows = [
 		{
@@ -1831,6 +2066,15 @@ test('account export includes mailbox rows, pages them, and warns on truncation'
 		nextStartAfter: null,
 		truncated: false,
 	})
+	for (const table of [
+		'email_threads',
+		'email_messages',
+		'email_attachments',
+		'email_delivery_events',
+	]) {
+		expect(accountExport.d1).not.toHaveProperty(table)
+		expect(accountExport.manifest.sections).not.toHaveProperty(`d1.${table}`)
+	}
 
 	const first = await readAccountExportSection({
 		env,

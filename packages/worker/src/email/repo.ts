@@ -883,6 +883,18 @@ export async function getEmailMessageById(input: {
 	return row ? mapMessageRow(row) : null
 }
 
+/** Explicit D1 compatibility count, including the `system:email` owner. */
+export async function countEmailMessagesForUser(input: {
+	db: D1Database
+	userId: string
+}) {
+	const row = await input.db
+		.prepare(`SELECT COUNT(*) AS count FROM email_messages WHERE user_id = ?`)
+		.bind(input.userId)
+		.first<{ count: number }>()
+	return Number(row?.count ?? 0)
+}
+
 /**
  * D1-only inbound classification update. Prefer
  * `setEmailMessageClassification` in `service.ts`, which dual-writes the
@@ -1225,6 +1237,14 @@ export async function deleteEmailMessageById(input: {
 	 * `email_messages.user_id` matches (missing/foreign → throw).
 	 */
 	expectedUserId?: string
+	/**
+	 * Optional authoritative owner-safe inventory supplied by a Mailbox reader.
+	 * D1 rows are still deleted, but only these keys are sent to R2.
+	 */
+	blobDeletionInventory?: ReadonlyArray<{
+		key: string
+		role: 'raw_mime' | 'attachment'
+	}>
 }): Promise<DeleteEmailMessageByIdResult> {
 	// Capture ownership and blob keys before D1 delete. A failed read must
 	// abort the delete (and be retried) rather than orphan the R2 blobs; only
@@ -1249,7 +1269,7 @@ export async function deleteEmailMessageById(input: {
 		.bind(input.messageId)
 		.all<{ storage_kind: string; storage_key: string | null }>()
 	const attachments = attachmentRows.results ?? []
-	const capturedBlobs: Array<{
+	const d1CapturedBlobs: Array<{
 		key: string
 		role: 'raw_mime' | 'attachment'
 	}> = [
@@ -1272,6 +1292,9 @@ export async function deleteEmailMessageById(input: {
 					],
 		),
 	]
+	const capturedBlobs = input.blobDeletionInventory
+		? [...input.blobDeletionInventory]
+		: d1CapturedBlobs
 	// Atomic batch: a partial delete (attachments gone, message left) would
 	// lose the storage_key values needed to delete the R2 blobs on retry.
 	// Provider-index rows cascade via FK ON DELETE CASCADE from email_messages.
@@ -1302,6 +1325,35 @@ export async function deleteEmailMessageById(input: {
 		).length,
 		blobDeletions,
 	}
+}
+
+/**
+ * Remove a USER Mailbox message's D1 compatibility projection after the
+ * authoritative Mailbox/R2 delete has succeeded. This never touches R2 and is
+ * idempotent when the projection is already absent.
+ */
+export async function deleteEmailMessageProjectionById(input: {
+	db: D1Database
+	messageId: string
+	expectedUserId: string
+}): Promise<{ messageDeleted: boolean }> {
+	const row = await input.db
+		.prepare(`SELECT user_id FROM email_messages WHERE id = ?`)
+		.bind(input.messageId)
+		.first<{ user_id: string }>()
+	if (row == null) return { messageDeleted: false }
+	if (row.user_id !== input.expectedUserId) {
+		return { messageDeleted: false }
+	}
+	await input.db.batch([
+		input.db
+			.prepare(`DELETE FROM email_attachments WHERE message_id = ?`)
+			.bind(input.messageId),
+		input.db
+			.prepare(`DELETE FROM email_messages WHERE id = ? AND user_id = ?`)
+			.bind(input.messageId, input.expectedUserId),
+	])
+	return { messageDeleted: true }
 }
 
 /** Rows per D1 batch when inserting attachment metadata. */

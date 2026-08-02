@@ -32,11 +32,11 @@ test('Mailbox inbound ledger CAS covers USER authority transition matrix', async
 	const mailboxB = rpcFor(ownerB)
 	const now = '2026-07-22T00:00:00.000Z'
 
-	// Schema v2 indexes present after cold init.
+	// Current schema indexes and deletion-tombstone table exist after cold init.
 	await runInDurableObject(
 		stubFor(ownerA),
 		async (_instance: Mailbox, state) => {
-			expect(mailboxSchemaVersion).toBe(2)
+			expect(mailboxSchemaVersion).toBe(4)
 			const version = state.storage.sql
 				.exec<{ value: number }>(
 					`SELECT value FROM mailbox_meta WHERE key = ?`,
@@ -70,6 +70,15 @@ test('Mailbox inbound ledger CAS covers USER authority transition matrix', async
 			for (const name of schemaV2Indexes) {
 				expect(indexes.filter((entry) => entry === name)).toHaveLength(1)
 			}
+			expect(
+				state.storage.sql
+					.exec<{ name: string }>(
+						`SELECT name FROM sqlite_master
+						WHERE type = 'table'
+							AND name = 'email_message_deletion_tombstones'`,
+					)
+					.toArray(),
+			).toEqual([{ name: 'email_message_deletion_tombstones' }])
 		},
 	)
 
@@ -525,7 +534,7 @@ test('Mailbox inbound ledger CAS covers USER authority transition matrix', async
 			deliveryId: delivery.deliveryId,
 		}),
 	).toBeNull()
-	// Re-init after purge still at schema v2.
+	// Re-init after purge still at the current schema.
 	await runInDurableObject(stubFor(ownerA), async (_instance, state) => {
 		const version = state.storage.sql
 			.exec<{ value: number }>(
@@ -537,7 +546,7 @@ test('Mailbox inbound ledger CAS covers USER authority transition matrix', async
 	})
 })
 
-test('Mailbox inbound ledger warm-migrates v1 schema indexes to v2', async () => {
+test('Mailbox warm-migrates v1 indexes, tombstones, and retention retries', async () => {
 	silenceIncidentalRuntimeWarnings()
 	const ownerId = uniqueUserId('warm-v2')
 	const stub = stubFor(ownerId)
@@ -562,6 +571,12 @@ test('Mailbox inbound ledger warm-migrates v1 schema indexes to v2', async () =>
 		)
 		state.storage.sql.exec(
 			`DROP INDEX IF EXISTS idx_email_delivery_events_dedupe_provider_expires`,
+		)
+		state.storage.sql.exec(
+			`DROP TABLE IF EXISTS email_message_deletion_tombstones`,
+		)
+		state.storage.sql.exec(
+			`DROP TABLE IF EXISTS email_message_retention_retries`,
 		)
 		// Re-run schema init (same path as constructor / purge).
 		initializeMailboxSchema(state.storage)
@@ -598,6 +613,33 @@ test('Mailbox inbound ledger warm-migrates v1 schema indexes to v2', async () =>
 		for (const name of schemaV2Indexes) {
 			expect(indexes.filter((entry) => entry === name)).toHaveLength(1)
 		}
+		expect(
+			state.storage.sql
+				.exec<{ name: string }>(
+					`SELECT name FROM sqlite_master
+					WHERE type = 'table'
+						AND name = 'email_message_deletion_tombstones'`,
+				)
+				.toArray(),
+		).toEqual([{ name: 'email_message_deletion_tombstones' }])
+		expect(
+			state.storage.sql
+				.exec<{ name: string }>(
+					`SELECT name FROM sqlite_master
+					WHERE type = 'table'
+						AND name = 'email_message_retention_retries'`,
+				)
+				.toArray(),
+		).toEqual([{ name: 'email_message_retention_retries' }])
+		expect(
+			state.storage.sql
+				.exec<{ name: string }>(
+					`SELECT name FROM sqlite_master
+					WHERE type = 'index'
+						AND name = 'idx_email_message_retention_retries_retry_at'`,
+				)
+				.toArray(),
+		).toEqual([{ name: 'idx_email_message_retention_retries_retry_at' }])
 	})
 })
 
@@ -681,4 +723,50 @@ test('inbound ledger rejects non-finite expectedAttachmentCount, usageDurationMs
 			)
 		}
 	})
+})
+
+test('Mailbox inbound finalization never attaches a tombstoned message', async () => {
+	silenceIncidentalRuntimeWarnings()
+	const ownerId = uniqueUserId('ledger-tombstone')
+	const mailbox = rpcFor(ownerId)
+	const now = '2026-08-02T20:00:00.000Z'
+	const delivery = insertInput(ownerId, {
+		deliveryId: 'email-inbound-delivery:ledger-tombstone',
+		messageId: 'email-inbound-message:ledger-tombstone',
+	})
+	await mailbox.tombstoneMissingMessage({
+		ownerId,
+		messageId: delivery.messageId,
+		deletedAt: now,
+	})
+	await mailbox.insertChargedPendingInboundDelivery({
+		ownerId,
+		delivery,
+		now,
+	})
+	const claim = await mailbox.claimInboundDeliveryStorage({
+		ownerId,
+		deliveryId: delivery.deliveryId,
+		expectedAttachmentCount: 0,
+		now,
+	})
+	expect(claim.status).toBe('claimed')
+	if (claim.status !== 'claimed') throw new Error('expected claim')
+
+	await expect(
+		mailbox.markInboundDeliveryReceived({
+			ownerId,
+			deliveryId: delivery.deliveryId,
+			storageLease: claim.delivery.storageLease!,
+			usageDurationMs: 1,
+			usageMonth: '2026-08',
+			usageBytes: 1,
+			now: '2026-08-02T20:00:01.000Z',
+		}),
+	).resolves.toMatchObject({ status: 'received' })
+	expect(
+		(await mailbox.listDeliveryEvents({ limit: 10 })).find(
+			(event) => event.id === delivery.deliveryId,
+		),
+	).toMatchObject({ messageId: null, state: 'received' })
 })

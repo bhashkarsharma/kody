@@ -1,6 +1,6 @@
 import { accountUserOwnedR2Surfaces } from '#worker/account/user-owned-surfaces.ts'
 import { buildCommunityIconR2Key } from '#worker/community/community-icon.ts'
-import { emailRawMimeKey } from '#worker/email/repo.ts'
+import { listAllMailboxEmailObjectRefs } from './mailbox-r2-references.ts'
 
 export type AccountR2Binding = 'EMAIL_BLOBS' | 'COMMUNITY_ASSETS'
 
@@ -38,55 +38,6 @@ function bindingFor(
 		throw new Error(`Missing chunked R2 export disposition for ${surfaceId}.`)
 	}
 	return surface.binding
-}
-
-async function listUserEmailMessageIds(env: Env, userId: string) {
-	const ids: Array<string> = []
-	let afterRowid = 0
-	const pageSize = 500
-	while (true) {
-		const rows = await env.APP_DB.prepare(
-			`SELECT rowid AS account_r2_rowid, id
-			FROM email_messages
-			WHERE user_id = ? AND rowid > ?
-			ORDER BY rowid
-			LIMIT ?`,
-		)
-			.bind(userId, afterRowid, pageSize + 1)
-			.all<{ account_r2_rowid: number; id: string }>()
-		const page = rows.results ?? []
-		const truncated = page.length > pageSize
-		const included = truncated ? page.slice(0, pageSize) : page
-		ids.push(...included.map((row) => row.id))
-		if (!truncated) return ids
-		afterRowid = included.at(-1)?.account_r2_rowid ?? afterRowid
-	}
-}
-
-async function listUserAttachmentKeys(env: Env, userId: string) {
-	const keys: Array<string> = []
-	let afterRowid = 0
-	const pageSize = 500
-	while (true) {
-		const rows = await env.APP_DB.prepare(
-			`SELECT attachment.rowid AS account_r2_rowid,
-				attachment.storage_key
-			FROM email_attachments AS attachment
-			JOIN email_messages AS message ON message.id = attachment.message_id
-			WHERE message.user_id = ? AND attachment.storage_key IS NOT NULL
-				AND attachment.rowid > ?
-			ORDER BY attachment.rowid
-			LIMIT ?`,
-		)
-			.bind(userId, afterRowid, pageSize + 1)
-			.all<{ account_r2_rowid: number; storage_key: string }>()
-		const page = rows.results ?? []
-		const truncated = page.length > pageSize
-		const included = truncated ? page.slice(0, pageSize) : page
-		keys.push(...included.map((row) => row.storage_key))
-		if (!truncated) return keys
-		afterRowid = included.at(-1)?.account_r2_rowid ?? afterRowid
-	}
 }
 
 async function listUserCommunityListings(env: Env, userId: string) {
@@ -139,27 +90,21 @@ export async function collectAccountR2Inventory(input: {
 	objects: Array<AccountR2ObjectRef>
 	communityListings: Array<AccountCommunityListingSnapshot>
 }> {
-	const [rawMimeRows, attachmentKeys, communityListings, avatarRow] =
-		await Promise.all([
-			listUserEmailMessageIds(input.env, input.userId),
-			listUserAttachmentKeys(input.env, input.userId),
+	const [emailBlobReferences, communityListings, avatarRow] = await Promise.all(
+		[
+			listAllMailboxEmailObjectRefs({
+				env: input.env,
+				ownerId: input.userId,
+			}),
 			listUserCommunityListings(input.env, input.userId),
 			input.env.APP_DB.prepare(`SELECT avatar_key FROM users WHERE id = ?`)
 				.bind(input.dbUserId)
 				.first<{ avatar_key: string | null }>(),
-		])
+		],
+	)
 
 	const objects: Array<AccountR2ObjectRef> = [
-		...rawMimeRows.map((messageId) => ({
-			surfaceId: 'email_raw_mime' as const,
-			binding: bindingFor('email_raw_mime'),
-			key: emailRawMimeKey(input.userId, messageId),
-		})),
-		...attachmentKeys.map((key) => ({
-			surfaceId: 'email_attachment_storage_key' as const,
-			binding: bindingFor('email_attachment_storage_key'),
-			key,
-		})),
+		...emailBlobReferences,
 		...communityListings.flatMap((listing) =>
 			[listing.pinnedCommit, listing.iconCommit].map((commit) => ({
 				surfaceId: 'community_icon' as const,

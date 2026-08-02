@@ -33,6 +33,8 @@ export function setMailboxMeta(
  * Schema bootstrap + warm migrations.
  * - v1: base tables/indexes (deployed).
  * - v2: additive inbound ledger query indexes (state/reconcile/retry/dedupe).
+ * - v3: durable message deletion tombstones for delayed-writer fencing.
+ * - v4: durable per-message retention retry eligibility and diagnostics.
  * Warm objects re-run CREATE IF NOT EXISTS then apply any version-gated
  * index additions; never destructive.
  */
@@ -58,6 +60,12 @@ export function initializeMailboxSchema(storage: DurableObjectStorage) {
 		CREATE TABLE IF NOT EXISTS mailbox_owner_identity (
 			singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
 			owner_id TEXT NOT NULL
+		)
+	`)
+	sql.exec(`
+		CREATE TABLE IF NOT EXISTS email_message_deletion_tombstones (
+			message_id TEXT PRIMARY KEY NOT NULL,
+			deleted_at TEXT NOT NULL
 		)
 	`)
 
@@ -173,6 +181,20 @@ export function initializeMailboxSchema(storage: DurableObjectStorage) {
 		`CREATE INDEX IF NOT EXISTS idx_email_messages_raw_mime_key
 		ON email_messages(id ASC)
 		WHERE raw_mime_key IS NOT NULL`,
+	)
+	sql.exec(`
+		CREATE TABLE IF NOT EXISTS email_message_retention_retries (
+			message_id TEXT PRIMARY KEY NOT NULL,
+			retry_at TEXT NOT NULL,
+			attempt_count INTEGER NOT NULL DEFAULT 1,
+			last_error TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY (message_id) REFERENCES email_messages(id) ON DELETE CASCADE
+		)
+	`)
+	sql.exec(
+		`CREATE INDEX IF NOT EXISTS idx_email_message_retention_retries_retry_at
+		ON email_message_retention_retries(retry_at ASC, message_id ASC)`,
 	)
 
 	sql.exec(`

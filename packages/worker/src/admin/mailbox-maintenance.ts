@@ -16,15 +16,24 @@ import {
 	mailboxReadCutoverCheckedAtMaxAgeMs,
 	mailboxReadCutoverSoakMs,
 } from '#worker/email/mailbox-read-cutover.ts'
-import { type MailboxCountResult } from '#worker/email/mailbox-types.ts'
+import {
+	type MailboxBlobReference,
+	type MailboxCountResult,
+} from '#worker/email/mailbox-types.ts'
 import {
 	loadOutboundProviderIndexParityReport,
 	type OutboundProviderIndexParityReport,
 } from '#worker/email/outbound-provider-index.ts'
 import {
 	deleteEmailMessageById,
+	deleteEmailMessageProjectionById,
 	getEmailMessageById,
+	listEmailAttachmentsForUserMessage,
 } from '#worker/email/repo.ts'
+import {
+	canonicalMailboxMessageBlobReferences,
+	deleteMailboxBlobKeys,
+} from '#worker/email/mailbox-retention.ts'
 
 /** Cap for admin reconcile batch discovery (hard max). */
 export const adminMailboxMaintenanceMaxBatchSize = 100
@@ -106,7 +115,7 @@ export type AdminMailboxMaintenanceDeleteMessageResult = {
 	externalAttachmentsSeen: number
 	rawMimeBlobAbsent: boolean
 	externalAttachmentBlobsAbsent: number
-	/** True when every blob key captured by deleteEmailMessageById is absent. */
+	/** True when every key captured by the authoritative delete is absent. */
 	allCapturedBlobsAbsent: boolean
 }
 
@@ -662,12 +671,49 @@ export class AdminMailboxMessageNotFoundError extends Error {
 	}
 }
 
+async function loadD1MessageDeletionInventory(input: {
+	db: D1Database
+	ownerId: string
+	messageId: string
+}): Promise<{
+	attachmentsSeen: number
+	externalAttachmentsSeen: number
+	blobReferences: Array<MailboxBlobReference>
+} | null> {
+	const message = await getEmailMessageById({
+		db: input.db,
+		userId: input.ownerId,
+		messageId: input.messageId,
+	})
+	if (!message) return null
+	const attachments = await listEmailAttachmentsForUserMessage({
+		db: input.db,
+		userId: input.ownerId,
+		messageId: input.messageId,
+	})
+	return {
+		attachmentsSeen: attachments.length,
+		externalAttachmentsSeen: attachments.filter(
+			(attachment) => attachment.storageKind === 'external',
+		).length,
+		blobReferences: canonicalMailboxMessageBlobReferences({
+			ownerId: input.ownerId,
+			messageId: input.messageId,
+			direction: message.direction,
+			attachments: attachments.map((attachment) => ({
+				id: attachment.id,
+				storage_key: attachment.storageKey,
+			})),
+		}),
+	}
+}
+
 /**
  * Owner-scoped single-message delete for accelerated Mailbox coverage canaries.
- * Verifies ownership via getEmailMessageById, deletes through
- * deleteEmailMessageById with an expectedUserId fence, then confirms D1
- * absence plus every exact captured blob key absent via head. Rejects missing
- * or foreign messages.
+ * USER mail is deleted by the owner-bound Mailbox R2-before-metadata RPC, then
+ * its D1 compatibility projection is removed. `system:email` stays on the
+ * existing D1 path. Exact authoritative keys are head-verified without being
+ * returned to the caller.
  */
 export async function runAdminMailboxMaintenanceDeleteMessage(input: {
 	env: AdminMailboxMaintenanceEnv
@@ -676,58 +722,131 @@ export async function runAdminMailboxMaintenanceDeleteMessage(input: {
 }): Promise<AdminMailboxMaintenanceDeleteMessageResult> {
 	const db = input.env.APP_DB
 	const blobs = input.env.EMAIL_BLOBS
-	const message = await getEmailMessageById({
+	let attachmentsSeen: number
+	let externalAttachmentsSeen: number
+	let blobReferences: Array<MailboxBlobReference>
+	if (input.stableUserId === systemEmailOwnerId) {
+		const message = await getEmailMessageById({
+			db,
+			userId: input.stableUserId,
+			messageId: input.messageId,
+		})
+		if (!message) {
+			throw new AdminMailboxMessageNotFoundError({
+				stableUserId: input.stableUserId,
+				messageId: input.messageId,
+			})
+		}
+		const deletion = await deleteEmailMessageById({
+			db,
+			blobs: blobs as R2Bucket,
+			messageId: input.messageId,
+			expectedUserId: input.stableUserId,
+		})
+		attachmentsSeen = deletion.attachmentsSeen
+		externalAttachmentsSeen = deletion.externalAttachmentsSeen
+		blobReferences = deletion.blobDeletions.map((entry) => ({
+			kind: entry.role === 'raw_mime' ? 'raw_mime' : 'attachment',
+			key: entry.key,
+			messageId: input.messageId,
+			attachmentId: null,
+		}))
+	} else {
+		const mailbox = mailboxRpc({
+			env: input.env,
+			userId: input.stableUserId,
+		})
+		const mailboxDeletion = await mailbox.deleteMessageWithBlobs({
+			ownerId: input.stableUserId,
+			messageId: input.messageId,
+		})
+		if (mailboxDeletion.status === 'missing') {
+			const d1Inventory = await loadD1MessageDeletionInventory({
+				db,
+				ownerId: input.stableUserId,
+				messageId: input.messageId,
+			})
+			if (d1Inventory) {
+				if (!mailboxDeletion.tombstoned) {
+					const tombstone = await mailbox.tombstoneMissingMessage({
+						ownerId: input.stableUserId,
+						messageId: input.messageId,
+						deletedAt: new Date().toISOString(),
+					})
+					if (tombstone.status === 'message-present') {
+						throw new Error(
+							'Mailbox message became present before compatibility cleanup.',
+						)
+					}
+				}
+				await deleteMailboxBlobKeys(
+					blobs,
+					d1Inventory.blobReferences.map((reference) => reference.key),
+				)
+				attachmentsSeen = d1Inventory.attachmentsSeen
+				externalAttachmentsSeen = d1Inventory.externalAttachmentsSeen
+				blobReferences = d1Inventory.blobReferences
+			} else {
+				attachmentsSeen = 0
+				externalAttachmentsSeen = 0
+				blobReferences = []
+			}
+			await deleteEmailMessageProjectionById({
+				db,
+				messageId: input.messageId,
+				expectedUserId: input.stableUserId,
+			})
+			if (!mailboxDeletion.tombstoned && d1Inventory == null) {
+				throw new AdminMailboxMessageNotFoundError({
+					stableUserId: input.stableUserId,
+					messageId: input.messageId,
+				})
+			}
+		} else {
+			attachmentsSeen = mailboxDeletion.attachmentsSeen
+			externalAttachmentsSeen = mailboxDeletion.externalAttachmentsSeen
+			blobReferences = mailboxDeletion.blobReferences
+			await deleteEmailMessageProjectionById({
+				db,
+				messageId: input.messageId,
+				expectedUserId: input.stableUserId,
+			})
+		}
+	}
+
+	const remainingD1 = await getEmailMessageById({
 		db,
 		userId: input.stableUserId,
 		messageId: input.messageId,
 	})
-	if (!message) {
-		throw new AdminMailboxMessageNotFoundError({
-			stableUserId: input.stableUserId,
-			messageId: input.messageId,
-		})
-	}
+	const d1MessageAbsent = remainingD1 == null
 
-	const deletion = await deleteEmailMessageById({
-		db,
-		blobs: blobs as R2Bucket,
-		messageId: message.id,
-		expectedUserId: input.stableUserId,
-	})
-
-	const remaining = await getEmailMessageById({
-		db,
-		userId: input.stableUserId,
-		messageId: message.id,
-	})
-	const d1MessageAbsent = remaining == null
-
-	const rawMimeEntries = deletion.blobDeletions.filter(
-		(entry) => entry.role === 'raw_mime',
+	const rawMimeReferences = blobReferences.filter(
+		(reference) => reference.kind === 'raw_mime',
 	)
-	const attachmentEntries = deletion.blobDeletions.filter(
-		(entry) => entry.role === 'attachment',
+	const attachmentReferences = blobReferences.filter(
+		(reference) => reference.kind === 'attachment',
 	)
 	let rawMimeBlobAbsent = true
-	for (const entry of rawMimeEntries) {
-		if ((await blobs.head(entry.key)) != null) {
+	for (const reference of rawMimeReferences) {
+		if ((await blobs.head(reference.key)) != null) {
 			rawMimeBlobAbsent = false
 		}
 	}
 	let externalAttachmentBlobsAbsent = 0
-	for (const entry of attachmentEntries) {
-		if ((await blobs.head(entry.key)) == null) {
+	for (const reference of attachmentReferences) {
+		if ((await blobs.head(reference.key)) == null) {
 			externalAttachmentBlobsAbsent += 1
 		}
 	}
 	const allCapturedBlobsAbsent =
 		rawMimeBlobAbsent &&
-		externalAttachmentBlobsAbsent === attachmentEntries.length
+		externalAttachmentBlobsAbsent === attachmentReferences.length
 
 	return {
 		d1MessageAbsent,
-		attachmentsSeen: deletion.attachmentsSeen,
-		externalAttachmentsSeen: deletion.externalAttachmentsSeen,
+		attachmentsSeen,
+		externalAttachmentsSeen,
 		rawMimeBlobAbsent,
 		externalAttachmentBlobsAbsent,
 		allCapturedBlobsAbsent,

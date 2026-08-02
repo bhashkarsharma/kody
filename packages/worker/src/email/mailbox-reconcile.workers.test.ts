@@ -4,7 +4,11 @@ import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidenta
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { ensureUsersTestSchema } from '#worker/users-test-schema.ts'
 import { emailRawMimeKey } from './blob-keys.ts'
-import { mailboxLiveMirrorMaxEvents } from './mailbox-live-mirror.ts'
+import {
+	mailboxLiveMirrorMaxEvents,
+	mirrorMailboxMessageGraphFromD1,
+} from './mailbox-live-mirror.ts'
+import { mirrorMailboxParityDeliveryEventFromD1 } from './mailbox-parity-phases.ts'
 import {
 	countD1MailboxParity,
 	listUsersForMailboxParity,
@@ -894,3 +898,57 @@ test('reconcileMailboxParity bootstraps production legacy USER inbound shapes wi
 		lastError: null,
 	})
 }, 30_000)
+
+test('parity message graph replay cannot recreate a tombstoned message', async () => {
+	silenceIncidentalRuntimeWarnings()
+	await ensureUsersTestSchema({ db: env.APP_DB })
+	await ensureEmailTestSchema(env.APP_DB)
+	const userId = await seedParityUser({
+		email: `tombstone-parity-${crypto.randomUUID()}@example.test`,
+	})
+	const messageId = `tombstone-message-${crypto.randomUUID()}`
+	await seedMessageGraph({
+		userId,
+		messageId,
+		threadId: `tombstone-thread-${crypto.randomUUID()}`,
+		createdAt: '2026-07-01T12:00:00.000Z',
+		withAttachment: true,
+	})
+	const mailbox = rpcFor(userId)
+	await expect(
+		mirrorMailboxMessageGraphFromD1({
+			env,
+			db: env.APP_DB,
+			userId,
+			messageId,
+		}),
+	).resolves.toMatchObject({ message: { status: 'mirrored' } })
+	await expect(
+		mailbox.deleteMessageWithBlobs({ ownerId: userId, messageId }),
+	).resolves.toMatchObject({ status: 'deleted' })
+
+	await expect(
+		mirrorMailboxMessageGraphFromD1({
+			env,
+			db: env.APP_DB,
+			userId,
+			messageId,
+		}),
+	).resolves.toMatchObject({ message: { status: 'stale' } })
+	const eventId = `evt-${messageId}-000`
+	await expect(
+		mirrorMailboxParityDeliveryEventFromD1({
+			env,
+			db: env.APP_DB,
+			userId,
+			eventId,
+		}),
+	).resolves.toMatchObject({ status: 'mirrored' })
+	expect(await mailbox.getMessage({ messageId })).toBeNull()
+	expect((await mailbox.countMailbox()).messages).toBe(0)
+	expect(
+		(await mailbox.listDeliveryEvents({ limit: 10 })).find(
+			(event) => event.id === eventId,
+		),
+	).toMatchObject({ messageId: null })
+})

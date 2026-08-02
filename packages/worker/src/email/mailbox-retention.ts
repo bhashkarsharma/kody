@@ -4,9 +4,11 @@ import {
 	mailboxDeliveryEventRetentionDays,
 	mailboxMessageRetentionDays,
 	mailboxRetentionAlarmSkewMs,
-	mailboxRetentionBatchSize,
 	mailboxRetentionContinuationDelayMs,
+	mailboxRetentionMessageCandidatesPerTurn,
+	mailboxRetentionMetadataBatchSize,
 	mailboxRetentionRetryDelayMs,
+	type MailboxBlobReference,
 } from './mailbox-types.ts'
 import { type MailboxStore } from './mailbox-store.ts'
 
@@ -15,11 +17,27 @@ const deliveryEventRetentionMs =
 	mailboxDeliveryEventRetentionDays * 24 * 60 * 60 * 1000
 
 export type MailboxRetentionPassResult = {
-	/** True when at least one message blob delete failed (row retained). */
+	/** True when this turn's single message blob delete failed (row retained). */
 	hadBlobDeleteFailures: boolean
-	/** True when expired rows remain after a successful bounded pass. */
+	/** True when expired rows remain for a later alarm/invocation. */
 	expiredWorkRemaining: boolean
+	/** True when another expired message/event can run immediately. */
+	eligibleExpiredWorkRemaining: boolean
+	/** Earliest deferred message retry, or null when no retry is pending. */
+	earliestRetryAtMs: number | null
 }
+
+export type MailboxRetentionMessageCandidate = {
+	id: string
+	direction: 'inbound' | 'outbound'
+	created_at: string
+	updated_at: string
+}
+
+export type MailboxRetentionMessageDeleteResult =
+	| 'deleted'
+	| 'skipped'
+	| 'blob-delete-failed'
 
 export type MailboxRetentionRescheduleKind =
 	| 'idle'
@@ -34,31 +52,38 @@ export type MailboxRetentionReschedule = {
 
 /**
  * Deterministic next-alarm choice after a retention pass.
- * - Blob delete failures → hourly backoff only
- * - Successful pass with expired rows remaining → near-immediate continuation
- * - Otherwise → future due-time (or idle)
+ * Select the earliest of an eligible-work continuation, a durable per-message
+ * retry, and ordinary future retention work.
  */
 export function computeMailboxRetentionReschedule(input: {
 	nowMs: number
-	hadBlobDeleteFailures: boolean
-	expiredWorkRemaining: boolean
+	eligibleExpiredWorkRemaining: boolean
+	earliestRetryAtMs: number | null
 	nextDueAtMs: number | null
 	continuationDelayMs?: number
-	backoffMs?: number
 }): MailboxRetentionReschedule {
-	const backoffMs = input.backoffMs ?? mailboxRetentionRetryDelayMs
 	const continuationDelayMs =
 		input.continuationDelayMs ?? mailboxRetentionContinuationDelayMs
-	if (input.hadBlobDeleteFailures) {
-		return { kind: 'backoff', atMs: input.nowMs + backoffMs }
+	const choices: Array<MailboxRetentionReschedule> = []
+	if (input.eligibleExpiredWorkRemaining) {
+		choices.push({ kind: 'continue', atMs: input.nowMs + continuationDelayMs })
 	}
-	if (input.expiredWorkRemaining) {
-		return { kind: 'continue', atMs: input.nowMs + continuationDelayMs }
+	if (
+		input.earliestRetryAtMs != null &&
+		input.earliestRetryAtMs > input.nowMs
+	) {
+		choices.push({ kind: 'backoff', atMs: input.earliestRetryAtMs })
 	}
-	if (input.nextDueAtMs == null) {
-		return { kind: 'idle', atMs: null }
+	if (input.nextDueAtMs != null && input.nextDueAtMs > input.nowMs) {
+		choices.push({ kind: 'next-due', atMs: input.nextDueAtMs })
 	}
-	return { kind: 'next-due', atMs: input.nextDueAtMs }
+	return (
+		choices.sort(
+			(left, right) =>
+				(left.atMs ?? Number.POSITIVE_INFINITY) -
+				(right.atMs ?? Number.POSITIVE_INFINITY),
+		)[0] ?? { kind: 'idle', atMs: null }
+	)
 }
 
 /**
@@ -68,6 +93,7 @@ export function computeMailboxRetentionReschedule(input: {
  */
 export function nextMailboxRetentionDueAtMs(
 	store: MailboxStore,
+	nowMs = Date.now(),
 ): number | null {
 	let next: number | null = null
 	const consider = (at: number) => {
@@ -75,13 +101,19 @@ export function nextMailboxRetentionDueAtMs(
 		if (next == null || at < next) next = at
 	}
 
-	const oldestMessage = store.oldestMessageCreatedAt()
+	const oldestMessage = store.oldestMessageCreatedAt(
+		new Date(nowMs).toISOString(),
+	)
 	if (oldestMessage) {
 		consider(Date.parse(oldestMessage) + messageRetentionMs)
 	}
 	const oldestEvent = store.oldestDeliveryEventCreatedAt()
 	if (oldestEvent) {
 		consider(Date.parse(oldestEvent) + deliveryEventRetentionMs)
+	}
+	const earliestRetryAt = store.earliestMessageRetentionRetryAt()
+	if (earliestRetryAt) {
+		consider(Date.parse(earliestRetryAt))
 	}
 	return next
 }
@@ -136,24 +168,14 @@ export function selectMailboxRetentionWriteAlarm(input: {
 	return { action: 'set', atMs: input.proposedAtMs }
 }
 
-async function deleteBlobKeys(
+export async function deleteMailboxBlobKeys(
 	blobs: Pick<R2Bucket, 'delete'>,
 	keys: Array<string>,
-): Promise<boolean> {
-	if (keys.length === 0) return true
-	try {
-		for (
-			let index = 0;
-			index < keys.length;
-			index += mailboxBlobDeleteMaxKeys
-		) {
-			const chunk = keys.slice(index, index + mailboxBlobDeleteMaxKeys)
-			await blobs.delete(chunk)
-		}
-		return true
-	} catch (error) {
-		console.warn('mailbox-retention-blob-delete-failed', { error })
-		return false
+): Promise<void> {
+	if (keys.length === 0) return
+	for (let index = 0; index < keys.length; index += mailboxBlobDeleteMaxKeys) {
+		const chunk = keys.slice(index, index + mailboxBlobDeleteMaxKeys)
+		await blobs.delete(chunk)
 	}
 }
 
@@ -162,15 +184,20 @@ async function deleteBlobKeys(
  * stored key strings — only canonical inbound raw MIME keys and matching
  * external attachment keys.
  */
-export function canonicalRetentionBlobKeys(input: {
+export function canonicalMailboxMessageBlobReferences(input: {
 	ownerId: string
 	messageId: string
 	direction: 'inbound' | 'outbound'
 	attachments: Array<{ id: string; storage_key: string | null }>
-}): Array<string> {
-	const keys: Array<string> = []
+}): Array<MailboxBlobReference> {
+	const references: Array<MailboxBlobReference> = []
 	if (input.direction === 'inbound') {
-		keys.push(emailRawMimeKey(input.ownerId, input.messageId))
+		references.push({
+			kind: 'raw_mime',
+			key: emailRawMimeKey(input.ownerId, input.messageId),
+			messageId: input.messageId,
+			attachmentId: null,
+		})
 	}
 	for (const attachment of input.attachments) {
 		if (attachment.storage_key == null) continue
@@ -180,85 +207,139 @@ export function canonicalRetentionBlobKeys(input: {
 			attachment.id,
 		)
 		if (attachment.storage_key === expected) {
-			keys.push(expected)
+			references.push({
+				kind: 'attachment',
+				key: expected,
+				messageId: input.messageId,
+				attachmentId: attachment.id,
+			})
 		}
 	}
-	return keys
+	return references
 }
 
-async function pruneExpiredMessages(input: {
+export function canonicalRetentionBlobKeys(
+	input: Parameters<typeof canonicalMailboxMessageBlobReferences>[0],
+): Array<string> {
+	return canonicalMailboxMessageBlobReferences(input).map(
+		(reference) => reference.key,
+	)
+}
+
+/**
+ * Revalidate one previously selected message, delete its canonical blobs in
+ * bounded R2 chunks, then tombstone/delete metadata. The DO caller must place
+ * exactly this operation inside one safe input gate.
+ */
+export async function deleteMailboxRetentionCandidate(input: {
 	store: MailboxStore
 	blobs: Pick<R2Bucket, 'delete'>
 	ownerId: string
-}): Promise<boolean> {
-	const cutoff = new Date(Date.now() - messageRetentionMs).toISOString()
-	const rows = input.store.listExpiredMessagesForRetention({
-		cutoff,
-		limit: mailboxRetentionBatchSize,
+	candidate: MailboxRetentionMessageCandidate
+	cutoff: string
+}): Promise<MailboxRetentionMessageDeleteResult> {
+	const current = input.store.getMessageForRetention(input.candidate.id)
+	if (
+		current == null ||
+		current.created_at >= input.cutoff ||
+		current.created_at !== input.candidate.created_at ||
+		current.updated_at !== input.candidate.updated_at ||
+		current.direction !== input.candidate.direction
+	) {
+		return 'skipped'
+	}
+
+	const keys = canonicalRetentionBlobKeys({
+		ownerId: input.ownerId,
+		messageId: current.id,
+		direction: current.direction,
+		attachments: input.store.listAttachmentsForRetention([current.id]),
 	})
-	if (rows.length === 0) return false
-
-	const attachmentRows = input.store.listAttachmentsForRetention(
-		rows.map((row) => row.id),
-	)
-	const attachmentsByMessageId = new Map<
-		string,
-		Array<{ id: string; storage_key: string | null }>
-	>()
-	for (const attachment of attachmentRows) {
-		const list = attachmentsByMessageId.get(attachment.message_id)
-		if (list) list.push(attachment)
-		else {
-			attachmentsByMessageId.set(attachment.message_id, [attachment])
-		}
-	}
-
-	let hadBlobDeleteFailures = false
-	for (const row of rows) {
-		const keys = canonicalRetentionBlobKeys({
-			ownerId: input.ownerId,
-			messageId: row.id,
-			direction: row.direction,
-			attachments: attachmentsByMessageId.get(row.id) ?? [],
+	try {
+		await deleteMailboxBlobKeys(input.blobs, keys)
+	} catch (error) {
+		console.warn('mailbox-retention-blob-delete-failed', { error })
+		const failedAtMs = Date.now()
+		input.store.recordMessageRetentionFailure({
+			messageId: current.id,
+			retryAt: new Date(
+				failedAtMs + mailboxRetentionRetryDelayMs,
+			).toISOString(),
+			error: String(error).slice(0, 1_000),
+			updatedAt: new Date(failedAtMs).toISOString(),
 		})
-		const blobsDeleted = await deleteBlobKeys(input.blobs, keys)
-		if (!blobsDeleted) {
-			hadBlobDeleteFailures = true
-			continue
-		}
-		input.store.deleteMessageCascade(row.id)
+		return 'blob-delete-failed'
 	}
-	return hadBlobDeleteFailures
+	input.store.tombstoneAndDeleteMessage({
+		messageId: current.id,
+		deletedAt: new Date().toISOString(),
+	})
+	return 'deleted'
+}
+
+export function selectMailboxRetentionCandidate(
+	store: MailboxStore,
+	cutoff: string,
+	now = new Date().toISOString(),
+): MailboxRetentionMessageCandidate | null {
+	return (
+		store.listExpiredMessagesForRetention({
+			cutoff,
+			now,
+			limit: mailboxRetentionMessageCandidatesPerTurn,
+		})[0] ?? null
+	)
+}
+
+async function pruneExpiredMessage(input: {
+	cutoff: string
+	deleteMessage: (
+		cutoff: string,
+	) => Promise<MailboxRetentionMessageDeleteResult | null>
+}): Promise<boolean> {
+	const result = await input.deleteMessage(input.cutoff)
+	return result === 'blob-delete-failed'
 }
 
 export async function enforceMailboxRetention(input: {
 	store: MailboxStore
-	blobs: Pick<R2Bucket, 'delete'>
+	deleteMessage: (
+		cutoff: string,
+	) => Promise<MailboxRetentionMessageDeleteResult | null>
 }): Promise<MailboxRetentionPassResult> {
 	const messageCutoff = new Date(Date.now() - messageRetentionMs).toISOString()
 	const eventCutoff = new Date(
 		Date.now() - deliveryEventRetentionMs,
 	).toISOString()
 
-	const ownerId = input.store.getOwnerId()
-	let hadBlobDeleteFailures = false
-	if (ownerId) {
-		hadBlobDeleteFailures = await pruneExpiredMessages({
-			store: input.store,
-			blobs: input.blobs,
-			ownerId,
-		})
-	}
+	const hadBlobDeleteFailures = await pruneExpiredMessage({
+		cutoff: messageCutoff,
+		deleteMessage: input.deleteMessage,
+	})
 
 	input.store.pruneExpiredDeliveryEvents({
 		cutoff: eventCutoff,
-		limit: mailboxRetentionBatchSize,
+		limit: mailboxRetentionMetadataBatchSize,
 	})
-	input.store.pruneOrphanThreads(mailboxRetentionBatchSize)
+	input.store.pruneOrphanThreads(mailboxRetentionMetadataBatchSize)
 
 	const expiredWorkRemaining =
 		input.store.hasExpiredMessages(messageCutoff) ||
 		input.store.hasExpiredDeliveryEvents(eventCutoff)
+	const now = new Date().toISOString()
+	const eligibleExpiredWorkRemaining =
+		input.store.hasEligibleExpiredMessages({ cutoff: messageCutoff, now }) ||
+		input.store.hasExpiredDeliveryEvents(eventCutoff)
+	const retryAt = input.store.earliestMessageRetentionRetryAt()
+	const earliestRetryAtMs = retryAt == null ? null : Date.parse(retryAt)
 
-	return { hadBlobDeleteFailures, expiredWorkRemaining }
+	return {
+		hadBlobDeleteFailures,
+		expiredWorkRemaining,
+		eligibleExpiredWorkRemaining,
+		earliestRetryAtMs:
+			earliestRetryAtMs != null && Number.isFinite(earliestRetryAtMs)
+				? earliestRetryAtMs
+				: null,
+	}
 }

@@ -22,7 +22,7 @@ import {
 	userMeterNamespace,
 	userMeterRpc,
 } from '#worker/entitlements/user-meter-client.ts'
-import { mailboxNamespace, mailboxRpc } from '#worker/email/mailbox-client.ts'
+import { mailboxRpc } from '#worker/email/mailbox-client.ts'
 import {
 	listAccountUserPackageServices,
 	listAccountUserStorageIds,
@@ -652,12 +652,6 @@ async function purgeMailbox(input: {
 	warnings: Array<string>
 }): Promise<number> {
 	try {
-		if (!mailboxNamespace(input.env)) {
-			input.warnings.push(
-				'MAILBOX binding was unavailable; the mailbox Durable Object was not purged.',
-			)
-			return 0
-		}
 		await mailboxRpc({ env: input.env, userId: input.userId }).purge()
 		return 1
 	} catch (error) {
@@ -931,8 +925,9 @@ async function deleteR2Objects(input: {
 	keys: ReadonlyArray<string>
 	label: string
 	warnings: Array<string>
-}): Promise<number> {
+}): Promise<{ deleted: number; complete: boolean }> {
 	let deleted = 0
+	let complete = true
 	for (const key of input.keys) {
 		try {
 			await input.blobs.delete(key)
@@ -940,9 +935,60 @@ async function deleteR2Objects(input: {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error)
 			input.warnings.push(`${input.label} delete failed for ${key}: ${message}`)
+			complete = false
 		}
 	}
-	return deleted
+	return { deleted, complete }
+}
+
+type AccountEmailCleanupOutcome = {
+	deletedEmailBlobs: number
+	emailCleanupComplete: boolean
+}
+
+async function cleanupAccountEmailBlobs(input: {
+	env: Env
+	userId: string
+	r2Objects: ReadonlyArray<AccountR2ObjectRef>
+	warnings: Array<string>
+}): Promise<AccountEmailCleanupOutcome> {
+	const emailBlobs = input.env.EMAIL_BLOBS
+	if (!emailBlobs) {
+		input.warnings.push(
+			'EMAIL_BLOBS binding was unavailable; email objects were not removed.',
+		)
+		return { deletedEmailBlobs: 0, emailCleanupComplete: false }
+	}
+
+	let deletedEmailBlobs = 0
+	let emailCleanupComplete = true
+	try {
+		deletedEmailBlobs = await deleteAccountEmailBlobPrefixes({
+			bucket: emailBlobs,
+			stableUserId: input.userId,
+		})
+	} catch (error) {
+		input.warnings.push(getErrorMessage(error))
+		emailCleanupComplete = false
+	}
+	const exactDeletes = await deleteR2Objects({
+		blobs: emailBlobs,
+		keys: input.r2Objects
+			.filter((object) => object.binding === 'EMAIL_BLOBS')
+			.filter(
+				(object) =>
+					!object.key.startsWith(`email-raw:v1:${input.userId}/`) &&
+					!object.key.startsWith(`email-attachment:v1:${input.userId}/`),
+			)
+			.map((object) => object.key),
+		label: 'Email blob',
+		warnings: input.warnings,
+	})
+	deletedEmailBlobs += exactDeletes.deleted
+	return {
+		deletedEmailBlobs,
+		emailCleanupComplete: emailCleanupComplete && exactDeletes.complete,
+	}
 }
 
 async function listKvKeysByPrefix(input: {
@@ -1175,12 +1221,6 @@ export async function deleteUserAccount(input: {
 			userId: input.mcpUserId,
 			warnings,
 		})
-	result.clearedDurableObjects.mailboxes = await purgeMailbox({
-		env: input.env,
-		userId: input.mcpUserId,
-		warnings,
-	})
-
 	if (input.env.BUNDLE_ARTIFACTS_KV) {
 		const sourceSnapshotKeys = await listKvKeysByPrefix({
 			kv: input.env.BUNDLE_ARTIFACTS_KV,
@@ -1232,34 +1272,13 @@ export async function deleteUserAccount(input: {
 	} catch (error) {
 		warnings.push(getErrorMessage(error))
 	}
-	const emailBlobs = input.env.EMAIL_BLOBS
-	if (!emailBlobs) {
-		warnings.push(
-			'EMAIL_BLOBS binding was unavailable; email objects were not removed.',
-		)
-	} else {
-		try {
-			result.deletedEmailBlobs = await deleteAccountEmailBlobPrefixes({
-				bucket: emailBlobs,
-				stableUserId: input.mcpUserId,
-			})
-		} catch (error) {
-			warnings.push(getErrorMessage(error))
-		}
-		result.deletedEmailBlobs += await deleteR2Objects({
-			blobs: emailBlobs,
-			keys: inventory.r2Objects
-				.filter((object) => object.binding === 'EMAIL_BLOBS')
-				.filter(
-					(object) =>
-						!object.key.startsWith(`email-raw:v1:${input.mcpUserId}/`) &&
-						!object.key.startsWith(`email-attachment:v1:${input.mcpUserId}/`),
-				)
-				.map((object) => object.key),
-			label: 'Email blob',
-			warnings,
-		})
-	}
+	const emailCleanup = await cleanupAccountEmailBlobs({
+		env: input.env,
+		userId: input.mcpUserId,
+		r2Objects: inventory.r2Objects,
+		warnings,
+	})
+	result.deletedEmailBlobs = emailCleanup.deletedEmailBlobs
 
 	const helpers = input.env.OAUTH_PROVIDER
 	if (helpers) {
@@ -1277,6 +1296,18 @@ export async function deleteUserAccount(input: {
 		warnings.push(
 			'OAuth provider binding was unavailable; OAuth grants were not revoked.',
 		)
+	}
+
+	// Keep Mailbox metadata while the account remains deletion-fenced so a retry
+	// can re-enumerate authoritative email keys. The typed email phase prevents
+	// an unrelated warning-list refactor from purging after incomplete email
+	// cleanup; the existing all-surfaces policy additionally requires no warning.
+	if (emailCleanup.emailCleanupComplete && warnings.length === 0) {
+		result.clearedDurableObjects.mailboxes = await purgeMailbox({
+			env: input.env,
+			userId: input.mcpUserId,
+			warnings,
+		})
 	}
 
 	if (warnings.length > 0) {
