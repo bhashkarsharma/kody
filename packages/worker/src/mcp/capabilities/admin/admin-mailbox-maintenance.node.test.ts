@@ -15,6 +15,7 @@ const mockModule = vi.hoisted(() => ({
 	logAuditEvent: vi.fn(async () => undefined),
 	loadAdminMailboxMaintenanceStatus: vi.fn(),
 	runAdminMailboxMaintenanceReconcile: vi.fn(),
+	runAdminMailboxMaintenanceSystemEmailGraphReconcile: vi.fn(),
 	runAdminMailboxMaintenanceRetention: vi.fn(),
 	runAdminMailboxMaintenanceDeleteMessage: vi.fn(),
 }))
@@ -36,6 +37,8 @@ vi.mock('#worker/admin/mailbox-maintenance.ts', async (importOriginal) => {
 			mockModule.loadAdminMailboxMaintenanceStatus,
 		runAdminMailboxMaintenanceReconcile:
 			mockModule.runAdminMailboxMaintenanceReconcile,
+		runAdminMailboxMaintenanceSystemEmailGraphReconcile:
+			mockModule.runAdminMailboxMaintenanceSystemEmailGraphReconcile,
 		runAdminMailboxMaintenanceRetention:
 			mockModule.runAdminMailboxMaintenanceRetention,
 		runAdminMailboxMaintenanceDeleteMessage:
@@ -65,6 +68,64 @@ const emptyStatus = {
 		missingFromIndexCount: 0,
 		missingFromMessagesCount: 0,
 		mismatchedCount: 0,
+		parity: true,
+	},
+	systemEmailGraph: {
+		threads: {
+			legacyCount: 0,
+			dedicatedCount: 0,
+			missingFromDedicatedCount: 0,
+			missingFromLegacyCount: 0,
+			ownershipMismatchCount: 0,
+			referencedOwnerMismatchCount: 0,
+			relationshipMismatchCount: 0,
+			keyFieldMismatchCount: 0,
+			parity: true,
+		},
+		messages: {
+			legacyCount: 0,
+			dedicatedCount: 0,
+			missingFromDedicatedCount: 0,
+			missingFromLegacyCount: 0,
+			ownershipMismatchCount: 0,
+			referencedOwnerMismatchCount: 0,
+			relationshipMismatchCount: 0,
+			keyFieldMismatchCount: 0,
+			parity: true,
+		},
+		attachments: {
+			legacyCount: 0,
+			dedicatedCount: 0,
+			missingFromDedicatedCount: 0,
+			missingFromLegacyCount: 0,
+			ownershipMismatchCount: 0,
+			referencedOwnerMismatchCount: 0,
+			relationshipMismatchCount: 0,
+			keyFieldMismatchCount: 0,
+			parity: true,
+		},
+		deliveryEvents: {
+			legacyCount: 0,
+			dedicatedCount: 0,
+			missingFromDedicatedCount: 0,
+			missingFromLegacyCount: 0,
+			ownershipMismatchCount: 0,
+			referencedOwnerMismatchCount: 0,
+			relationshipMismatchCount: 0,
+			keyFieldMismatchCount: 0,
+			parity: true,
+		},
+		outboundProviderIndex: {
+			legacyProviderLinkedMessageCount: 0,
+			dedicatedProviderLinkedMessageCount: 0,
+			legacyAuthorityIndexCount: 0,
+			missingFromLegacyAuthorityIndexCount: 0,
+			missingFromLegacyMessagesCount: 0,
+			mismatchedLegacyAuthorityIndexCount: 0,
+			classification: 'no-system-provider-links',
+			authorityDisposition: 'legacy-email-messages-until-4b-routing',
+			parity: true,
+		},
 		parity: true,
 	},
 }
@@ -104,6 +165,25 @@ const emptyRetentionResult = {
 	nextStartAfter: 'a'.repeat(64),
 	truncated: true,
 	status: emptyStatus,
+}
+
+const emptySystemEmailGraphReconcileResult = {
+	metrics: {
+		upserted: {
+			threads: 0,
+			messages: 0,
+			attachments: 0,
+			deliveryEvents: 0,
+		},
+		deleted: {
+			threads: 0,
+			messages: 0,
+			attachments: 0,
+			deliveryEvents: 0,
+		},
+		referencedOwnerMismatchCount: 0,
+	},
+	postReport: emptyStatus.systemEmailGraph,
 }
 
 const emptyDeleteResult = {
@@ -170,6 +250,9 @@ test('admin_mailbox_maintenance routes status, reconcile, retention, and delete 
 		},
 		status: emptyStatus,
 	})
+	mockModule.runAdminMailboxMaintenanceSystemEmailGraphReconcile.mockResolvedValue(
+		emptySystemEmailGraphReconcileResult,
+	)
 	mockModule.runAdminMailboxMaintenanceRetention.mockResolvedValue(
 		emptyRetentionResult,
 	)
@@ -185,6 +268,7 @@ test('admin_mailbox_maintenance routes status, reconcile, retention, and delete 
 		ctx,
 	)
 	expect(status).toEqual({ action: 'status', status: emptyStatus })
+	expect(status.status.systemEmailGraph).toEqual(emptyStatus.systemEmailGraph)
 	expect(mockModule.logAuditEvent).toHaveBeenCalledWith(
 		expect.objectContaining({
 			action: 'admin_mailbox_maintenance',
@@ -201,6 +285,25 @@ test('admin_mailbox_maintenance routes status, reconcile, retention, and delete 
 		env: ctx.env,
 		batchSize: 16,
 	})
+
+	const systemGraphReconcile = await adminMailboxMaintenanceCapability.handler(
+		{ action: 'system_email_graph_reconcile', force: true },
+		ctx,
+	)
+	expect(systemGraphReconcile).toEqual({
+		action: 'system_email_graph_reconcile',
+		...emptySystemEmailGraphReconcileResult,
+	})
+	expect(
+		mockModule.runAdminMailboxMaintenanceSystemEmailGraphReconcile,
+	).toHaveBeenCalledWith({ db: ctx.env.APP_DB })
+	expect(mockModule.logAuditEvent).toHaveBeenCalledWith(
+		expect.objectContaining({
+			action: 'admin_mailbox_maintenance',
+			result: 'success',
+			reason: expect.stringContaining('action=system_email_graph_reconcile'),
+		}),
+	)
 
 	const cursor = 'b'.repeat(64)
 	const retention = await adminMailboxMaintenanceCapability.handler(
@@ -247,6 +350,12 @@ test('admin_mailbox_maintenance routes status, reconcile, retention, and delete 
 	await expect(
 		adminMailboxMaintenanceCapability.handler(
 			{ action: 'reconcile', batch_size: 101 },
+			ctx,
+		),
+	).rejects.toThrow()
+	await expect(
+		adminMailboxMaintenanceCapability.handler(
+			{ action: 'system_email_graph_reconcile' },
 			ctx,
 		),
 	).rejects.toThrow()
