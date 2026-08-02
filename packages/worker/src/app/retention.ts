@@ -711,6 +711,7 @@ export async function pruneUserEmailMessagesForRetention(input: {
 		idColumn: 'message_id',
 		ids: messageIds,
 	})
+	// Provider-index rows cascade via FK ON DELETE CASCADE from email_messages.
 	result.deletedMessages = await deleteByIds({
 		db: input.db,
 		table: 'email_messages',

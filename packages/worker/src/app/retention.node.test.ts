@@ -96,6 +96,7 @@ function createD1FromSqlite(
 
 function createRetentionDb() {
 	const sqlite = new DatabaseSync(':memory:')
+	sqlite.exec('PRAGMA foreign_keys = ON')
 	sqlite.exec(`
 		CREATE TABLE workflow_runs (
 			id TEXT PRIMARY KEY,
@@ -188,6 +189,17 @@ function createRetentionDb() {
 			raw_mime_key TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE email_outbound_provider_index (
+			provider TEXT NOT NULL,
+			provider_message_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			inbox_id TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (provider, provider_message_id),
+			FOREIGN KEY (message_id) REFERENCES email_messages(id) ON DELETE CASCADE
 		);
 		CREATE TABLE email_attachments (
 			id TEXT PRIMARY KEY,
@@ -595,6 +607,25 @@ test('email message retention deletes old user rows, R2 blobs, attachments, and 
 			'email-attachment:v1:user-1/msg-old-plain/att-ext', ?)`,
 		)
 		.run(daysAgo(emailMessageRetentionDays + 1))
+	const indexCreatedAt = daysAgo(emailMessageRetentionDays + 1)
+	sqlite
+		.prepare(
+			`INSERT INTO email_outbound_provider_index (
+				provider, provider_message_id, user_id, message_id, inbox_id,
+				created_at, updated_at
+			) VALUES
+				('cloudflare-email', 'prov-old-blob', 'user-1', 'msg-old-blob', NULL, ?, ?),
+				('cloudflare-email', 'prov-fresh', 'user-1', 'msg-fresh', NULL, ?, ?),
+				('cloudflare-email', 'prov-system', 'system:email', 'msg-old-system', NULL, ?, ?)`,
+		)
+		.run(
+			indexCreatedAt,
+			indexCreatedAt,
+			daysAgo(1),
+			daysAgo(1),
+			indexCreatedAt,
+			indexCreatedAt,
+		)
 	const blobDelete = vi.fn(async () => undefined)
 
 	const result = await pruneUserEmailMessagesForRetention({
@@ -625,6 +656,17 @@ test('email message retention deletes old user rows, R2 blobs, attachments, and 
 	])
 	expect(idsForTable(sqlite, 'email_attachments')).toEqual([])
 	expect(idsForTable(sqlite, 'email_threads')).toEqual(['thread-mixed'])
+	expect(
+		(
+			sqlite
+				.prepare(
+					`SELECT provider_message_id
+					FROM email_outbound_provider_index
+					ORDER BY provider_message_id`,
+				)
+				.all() as Array<{ provider_message_id: string }>
+		).map((row) => row.provider_message_id),
+	).toEqual(['prov-fresh', 'prov-system'])
 })
 
 test('email message retention never deletes rows whose blob cannot be deleted first', async () => {

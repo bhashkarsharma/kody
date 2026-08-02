@@ -5,6 +5,10 @@ import {
 } from '@kody-internal/shared/backup-restore-safety.ts'
 import { parseJsonArray } from '@kody-internal/shared/json-parsing.ts'
 import {
+	getOutboundProviderIndexRow,
+	prepareOutboundProviderIndexSyncStatements,
+} from './outbound-provider-index.ts'
+import {
 	emailClassificationValues,
 	type EmailAttachmentRecord,
 	type EmailClassification,
@@ -740,7 +744,7 @@ export async function insertEmailMessage(input: {
 		updated_at: timestamp,
 	}
 	const fence = input.inboundDeliveryFence
-	const result = await input.db
+	const insertStatement = input.db
 		.prepare(
 			`INSERT INTO email_messages (
 				id, direction, user_id, inbox_id, thread_id, sender_identity_id,
@@ -798,8 +802,24 @@ export async function insertEmailMessage(input: {
 			row.updated_at,
 			...(fence ? [fence.deliveryId, fence.userId, fence.storageLease] : []),
 		)
-		.run()
-	if (fence && Number(result.meta.changes ?? 0) === 0) {
+	const shouldIndexProvider =
+		row.direction === 'outbound' &&
+		row.provider_message_id != null &&
+		row.provider_message_id !== ''
+	const insertResult = shouldIndexProvider
+		? (
+				await input.db.batch([
+					insertStatement,
+					...prepareOutboundProviderIndexSyncStatements({
+						db: input.db,
+						messageId: row.id,
+						providerMessageId: row.provider_message_id,
+						now: row.updated_at,
+					}),
+				])
+			)[0]
+		: await insertStatement.run()
+	if (fence && Number(insertResult?.meta.changes ?? 0) === 0) {
 		throw new Error(
 			'Inbound delivery storage lease was lost before message insert.',
 		)
@@ -815,25 +835,34 @@ export async function updateEmailMessageDelivery(input: {
 	error?: string | null
 	sentAt?: string | null
 }) {
-	await input.db
-		.prepare(
-			`UPDATE email_messages
-			SET processing_status = ?,
-				provider_message_id = ?,
-				error = ?,
-				sent_at = ?,
-				updated_at = ?
-			WHERE id = ?`,
-		)
-		.bind(
-			input.status,
-			input.providerMessageId ?? null,
-			input.error ?? null,
-			input.sentAt ?? null,
-			nowIso(),
-			input.messageId,
-		)
-		.run()
+	const updatedAt = nowIso()
+	const providerMessageId = input.providerMessageId ?? null
+	await input.db.batch([
+		input.db
+			.prepare(
+				`UPDATE email_messages
+				SET processing_status = ?,
+					provider_message_id = ?,
+					error = ?,
+					sent_at = ?,
+					updated_at = ?
+				WHERE id = ?`,
+			)
+			.bind(
+				input.status,
+				providerMessageId,
+				input.error ?? null,
+				input.sentAt ?? null,
+				updatedAt,
+				input.messageId,
+			),
+		...prepareOutboundProviderIndexSyncStatements({
+			db: input.db,
+			messageId: input.messageId,
+			providerMessageId,
+			now: updatedAt,
+		}),
+	])
 }
 
 export async function getEmailMessageById(input: {
@@ -888,27 +917,28 @@ export async function updateEmailMessageClassificationInD1(input: {
 	return Number(result.meta.changes ?? 0) > 0
 }
 
+/**
+ * Resolve an outbound message from the derived provider reverse index, then
+ * load the owner-scoped authoritative `email_messages` row. Does not scan the
+ * full messages table by provider_message_id.
+ */
 export async function getOutboundEmailMessageByProviderMessageId(input: {
 	db: D1Database
 	providerMessageId: string
 }) {
-	const result = await input.db
-		.prepare(
-			`SELECT *
-			FROM email_messages
-			WHERE direction = 'outbound'
-				AND provider_message_id = ?
-			LIMIT 2`,
-		)
-		.bind(input.providerMessageId)
-		.all<Record<string, unknown>>()
-	const rows = result.results ?? []
-	if (rows.length > 1) {
-		throw new Error(
-			`Multiple outbound email messages share provider id: ${input.providerMessageId}`,
-		)
-	}
-	return rows[0] ? mapMessageRow(rows[0]) : null
+	const indexRow = await getOutboundProviderIndexRow({
+		db: input.db,
+		providerMessageId: input.providerMessageId,
+	})
+	if (!indexRow) return null
+	const message = await getEmailMessageById({
+		db: input.db,
+		userId: indexRow.userId,
+		messageId: indexRow.messageId,
+	})
+	if (!message || message.direction !== 'outbound') return null
+	if (message.providerMessageId !== input.providerMessageId) return null
+	return message
 }
 
 export async function getEmailMessageByMessageIdHeader(input: {
@@ -1244,6 +1274,7 @@ export async function deleteEmailMessageById(input: {
 	]
 	// Atomic batch: a partial delete (attachments gone, message left) would
 	// lose the storage_key values needed to delete the R2 blobs on retry.
+	// Provider-index rows cascade via FK ON DELETE CASCADE from email_messages.
 	await input.db.batch([
 		input.db
 			.prepare(`DELETE FROM email_attachments WHERE message_id = ?`)

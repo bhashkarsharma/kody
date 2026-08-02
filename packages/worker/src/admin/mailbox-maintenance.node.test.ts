@@ -96,7 +96,21 @@ function createMaintenanceDb() {
 		CREATE TABLE email_messages (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
+			direction TEXT NOT NULL DEFAULT 'inbound',
+			provider_message_id TEXT,
+			inbox_id TEXT,
 			created_at TEXT NOT NULL DEFAULT '${freshCreatedAt}'
+		);
+		CREATE TABLE email_outbound_provider_index (
+			provider TEXT NOT NULL,
+			provider_message_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			inbox_id TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (provider, provider_message_id),
+			FOREIGN KEY (message_id) REFERENCES email_messages(id) ON DELETE CASCADE
 		);
 		CREATE TABLE email_delivery_events (
 			id TEXT PRIMARY KEY,
@@ -104,6 +118,7 @@ function createMaintenanceDb() {
 			created_at TEXT NOT NULL DEFAULT '${freshCreatedAt}'
 		);
 	`)
+	sqlite.exec('PRAGMA foreign_keys = ON')
 	return { sqlite, db: createD1FromSqlite(sqlite) }
 }
 
@@ -235,6 +250,17 @@ function createDeleteMessageDb() {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE email_outbound_provider_index (
+			provider TEXT NOT NULL,
+			provider_message_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			inbox_id TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (provider, provider_message_id),
+			FOREIGN KEY (message_id) REFERENCES email_messages(id) ON DELETE CASCADE
+		);
 		CREATE TABLE email_attachments (
 			id TEXT PRIMARY KEY,
 			message_id TEXT NOT NULL,
@@ -246,6 +272,7 @@ function createDeleteMessageDb() {
 			created_at TEXT NOT NULL
 		);
 	`)
+	sqlite.exec('PRAGMA foreign_keys = ON')
 	return { sqlite, db: createD1FromSqlite(sqlite) }
 }
 
@@ -349,6 +376,19 @@ test('loadAdminMailboxMaintenanceStatus aggregates buckets without owner ids', a
 		eventsCompletedAt: matchingSince,
 	})
 
+	sqlite.exec(`
+		INSERT INTO email_messages (
+			id, user_id, direction, provider_message_id, created_at
+		) VALUES
+			('linked-1', 'user-linked', 'outbound', 'prov-1', '${freshCreatedAt}');
+		INSERT INTO email_outbound_provider_index (
+			provider, provider_message_id, user_id, message_id, inbox_id,
+			created_at, updated_at
+		) VALUES
+			('cloudflare-email', 'prov-1', 'user-linked', 'linked-1', NULL,
+				'${freshCreatedAt}', '${freshCreatedAt}');
+	`)
+
 	const status = await loadAdminMailboxMaintenanceStatus({ db, now })
 	expect(status).toMatchObject({
 		generatedAt: now.toISOString(),
@@ -358,7 +398,17 @@ test('loadAdminMailboxMaintenanceStatus aggregates buckets without owner ids', a
 		error: 1,
 		incomplete: 1,
 		eligible: 1,
+		outboundProviderIndex: {
+			linkedMessageCount: 1,
+			indexCount: 1,
+			missingFromIndexCount: 0,
+			missingFromMessagesCount: 0,
+			mismatchedCount: 0,
+			parity: true,
+		},
 	})
+	expect(status).not.toHaveProperty('outboundProviderIndex.sampleMismatches')
+	expect(JSON.stringify(status.outboundProviderIndex)).not.toMatch(/@|prov-1/u)
 })
 
 test('runAdminMailboxMaintenanceReconcile clamps batch_size and returns status', async () => {
