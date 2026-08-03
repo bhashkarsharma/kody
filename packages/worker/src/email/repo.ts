@@ -1305,8 +1305,16 @@ export async function deleteEmailMessageById(input: {
 		: d1CapturedBlobs
 	// Atomic batch: a partial delete (attachments gone, message left) would
 	// lose the storage_key values needed to delete the R2 blobs on retry.
-	// Provider-index rows cascade via FK ON DELETE CASCADE from email_messages.
+	// Keep explicit provider-index cleanup in this same atomic batch for
+	// mixed-version schemas. The old FK and new compatibility trigger both
+	// tolerate the row already being absent.
 	await input.db.batch([
+		input.db
+			.prepare(
+				`DELETE FROM email_outbound_provider_index
+				WHERE message_id = ?`,
+			)
+			.bind(input.messageId),
 		input.db
 			.prepare(`DELETE FROM email_attachments WHERE message_id = ?`)
 			.bind(input.messageId),
@@ -1353,7 +1361,15 @@ export async function deleteEmailMessageProjectionById(input: {
 	if (row.user_id !== input.expectedUserId) {
 		return { messageDeleted: false }
 	}
+	// Same-batch explicit cleanup keeps this projection delete safe across the
+	// legacy-FK and compatibility-trigger schemas.
 	await input.db.batch([
+		input.db
+			.prepare(
+				`DELETE FROM email_outbound_provider_index
+				WHERE message_id = ?`,
+			)
+			.bind(input.messageId),
 		input.db
 			.prepare(`DELETE FROM email_attachments WHERE message_id = ?`)
 			.bind(input.messageId),

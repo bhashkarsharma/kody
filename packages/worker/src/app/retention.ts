@@ -711,7 +711,8 @@ export async function pruneUserEmailMessagesForRetention(input: {
 		idColumn: 'message_id',
 		ids: messageIds,
 	})
-	// Provider-index rows cascade via FK ON DELETE CASCADE from email_messages.
+	// The schema compatibility trigger atomically deletes provider-index rows
+	// with each legacy message DELETE.
 	result.deletedMessages = await deleteByIds({
 		db: input.db,
 		table: 'email_messages',

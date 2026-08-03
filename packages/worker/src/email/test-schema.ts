@@ -364,18 +364,23 @@ WHERE direction = 'outbound'
 		`CREATE TABLE IF NOT EXISTS email_outbound_provider_index (
 	provider TEXT NOT NULL,
 	provider_message_id TEXT NOT NULL,
-	user_id TEXT NOT NULL,
+	user_id TEXT NOT NULL CHECK (user_id <> 'system:email'),
 	message_id TEXT NOT NULL,
 	inbox_id TEXT,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
-	PRIMARY KEY (provider, provider_message_id),
-	FOREIGN KEY (message_id) REFERENCES email_messages(id) ON DELETE CASCADE
+	PRIMARY KEY (provider, provider_message_id)
 );`,
 		`CREATE INDEX IF NOT EXISTS idx_email_outbound_provider_index_user_id
 ON email_outbound_provider_index(user_id);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_outbound_provider_index_message_id
 ON email_outbound_provider_index(message_id);`,
+		`CREATE TRIGGER IF NOT EXISTS email_messages_delete_outbound_provider_index
+AFTER DELETE ON email_messages
+BEGIN
+	DELETE FROM email_outbound_provider_index
+	WHERE message_id = OLD.id;
+END;`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_delivery_events_provider_event_id
 ON email_delivery_events(provider_event_id)
 WHERE provider_event_id IS NOT NULL;`,
