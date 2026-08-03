@@ -9,7 +9,10 @@ import {
 	deleteUserAccount,
 	getAccountDeletionD1UserColumnCoverage,
 } from './account-deletion.ts'
-import { accountUserDataExcludedOwnerIds } from '#worker/account/data-targets.ts'
+import {
+	accountUserDataExcludedOwnerIds,
+	accountUserDataPendingDropTargets,
+} from '#worker/account/data-targets.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
 import {
 	AccountDeletionInProgressError,
@@ -682,6 +685,9 @@ test('account deletion D1 coverage includes every live user-owned schema column'
 			}
 		}
 	}
+	for (const target of accountUserDataPendingDropTargets) {
+		liveUserColumns.add(`${target.table}.${target.column}`)
+	}
 	const coveredColumns = getAccountDeletionD1UserColumnCoverage()
 	const missing = [...liveUserColumns].filter(
 		(column) => !coveredColumns.has(column),
@@ -696,7 +702,7 @@ test('account deletion D1 coverage includes every live user-owned schema column'
 	expect(stale, 'account deletion references stale D1 columns').toEqual([])
 })
 
-test('account deletion documents and preserves operator-owned system email rows', async () => {
+test('account deletion removes frozen USER graph rows and preserves system email rows', async () => {
 	const systemEmailExclusion = accountUserDataExcludedOwnerIds.find(
 		(exclusion) => exclusion.ownerId === 'system:email',
 	)
@@ -1335,7 +1341,8 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	])
 	expect(rows.repo_sessions).toEqual([])
 	expect(rows.email_attachments).toEqual([])
-	// The other user's message and its R2 raw-MIME blob are untouched.
+	// Frozen rows remain rollback data only for active owners. Privacy cleanup
+	// removes the deleted owner's snapshot after Mailbox supplies its R2 inventory.
 	expect(rows.email_messages).toEqual([
 		{
 			id: 'em-3',
@@ -1518,7 +1525,10 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	// Result accounting captures the per-table counts.
 	expect(result.deletedRowCounts.jobs).toBe(3)
 	expect(result.deletedRowCounts.users).toBe(1)
+	expect(result.deletedRowCounts.email_threads).toBe(1)
+	expect(result.deletedRowCounts.email_messages).toBe(2)
 	expect(result.deletedRowCounts.email_attachments).toBe(1)
+	expect(result.deletedRowCounts.email_delivery_events).toBe(1)
 	expect(result.deletedRowCounts.package_service_states).toBe(3)
 	expect(result.deletedRowCounts.user_storage_buckets).toBe(1)
 	expect(result.deletedRowCounts.community_listings).toBe(1)

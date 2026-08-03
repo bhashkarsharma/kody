@@ -1,34 +1,11 @@
 import { sendCloudflareEmail } from '#app/email/cloudflare-email.ts'
+import { pruneDeliveryAlertEvents } from '#worker/email/delivery-alert-events.ts'
 import { getSystemEmailDomain } from '#worker/email/platform-address.ts'
 
-/**
- * Hourly platform-wide email delivery reputation burst check. Reputation
- * outcomes (`complained`, `bounced`) are already recorded in
- * `email_delivery_events` and charted on `/admin/insights`; this lane emails
- * admins when the last hour crosses a threshold so sender-reputation trouble
- * is not only visible in charts.
- *
- * Complements the per-user outbound pause in
- * `packages/worker/src/email/outbound-abuse.ts` — that path stops one account;
- * this path pages operators when the shared domain is under platform-wide load.
- * Watched types match that outbound-abuse reputation set (`failed` /
- * `rejected` are delivery failures, not reputation signals).
- */
-
 export const emailDeliveryAlertWindowMinutes = 60
-/** Platform-wide reputation outcomes in one hour before admins are paged. */
 export const emailDeliveryAlertThreshold = 20
-/** Avoid re-paging on the same sustained spike every hour. */
 export const emailDeliveryAlertCooldownMinutes = 6 * 60
-export const emailDeliveryAlertKvKey = 'ops-alert:email-delivery-burst:v1'
-
-/**
- * Reputation-relevant Cloudflare Email Sending outcomes (same signals that
- * drive per-user outbound pause). Scoped to `provider = 'cloudflare-email'`
- * so inbound routing rejections (`cloudflare-email-routing`) do not inflate
- * the count.
- */
-const watchedEmailDeliveryEventTypes = ['complained', 'bounced'] as const
+export const emailDeliveryAlertKvKey = 'ops-alert:email-delivery-burst:v2'
 
 type EmailDeliveryAlertEnv = {
 	APP_DB: D1Database
@@ -40,7 +17,6 @@ type EmailDeliveryAlertEnv = {
 }
 
 export function shouldRunEmailDeliveryAlertCron(now: Date) {
-	// Same hourly gate as auth-denial / retention / usage aggregation (minute 0).
 	return now.getUTCMinutes() === 0
 }
 
@@ -62,31 +38,27 @@ export async function checkEmailDeliveryBurstAndNotify(input: {
 	const windowMinutes = input.windowMinutes ?? emailDeliveryAlertWindowMinutes
 	const cooldownMinutes =
 		input.cooldownMinutes ?? emailDeliveryAlertCooldownMinutes
-
 	const windowStart = new Date(
 		now.getTime() - windowMinutes * 60_000,
 	).toISOString()
-	const eventPlaceholders = watchedEmailDeliveryEventTypes
-		.map(() => '?')
-		.join(', ')
 	const row = await input.env.APP_DB.prepare(
-		`SELECT COUNT(*) AS count FROM email_delivery_events
-		 WHERE provider = 'cloudflare-email'
-			 AND event_type IN (${eventPlaceholders})
-			 AND created_at >= ?`,
+		`SELECT COUNT(*) AS count
+		FROM email_delivery_alert_events
+		WHERE provider = 'cloudflare-email'
+			AND event_type IN ('complained', 'bounced')
+			AND occurred_at >= ?`,
 	)
-		.bind(...watchedEmailDeliveryEventTypes, windowStart)
+		.bind(windowStart)
 		.first<{ count: number }>()
 	const count = Number(row?.count ?? 0)
-	if (count < threshold) {
-		return { status: 'below_threshold', count }
-	}
+	await pruneDeliveryAlertEvents({ db: input.env.APP_DB, now })
+	if (count < threshold) return { status: 'below_threshold', count }
 
 	if (input.env.BUNDLE_ARTIFACTS_KV) {
 		const lastSentRaw = await input.env.BUNDLE_ARTIFACTS_KV.get(
 			emailDeliveryAlertKvKey,
 		)
-		const lastSentMs = lastSentRaw ? Number(lastSentRaw) : NaN
+		const lastSentMs = lastSentRaw ? Number(lastSentRaw) : Number.NaN
 		if (
 			Number.isFinite(lastSentMs) &&
 			now.getTime() - lastSentMs < cooldownMinutes * 60_000
@@ -95,114 +67,54 @@ export async function checkEmailDeliveryBurstAndNotify(input: {
 		}
 	}
 
-	const notified = await notifyAdminsOfEmailDeliveryBurst({
-		env: input.env,
-		count,
-		threshold,
-		windowMinutes,
-		now,
-	})
-	if (notified.status !== 'notified') {
-		return notified
-	}
-
-	if (input.env.BUNDLE_ARTIFACTS_KV) {
-		await input.env.BUNDLE_ARTIFACTS_KV.put(
-			emailDeliveryAlertKvKey,
-			String(now.getTime()),
-			{
-				// Keep the cooldown marker a bit longer than the cooldown window.
-				expirationTtl: (cooldownMinutes + 60) * 60,
-			},
-		)
-	}
-
-	return notified
-}
-
-async function notifyAdminsOfEmailDeliveryBurst(input: {
-	env: EmailDeliveryAlertEnv
-	count: number
-	threshold: number
-	windowMinutes: number
-	now: Date
-}): Promise<
-	| { status: 'notified'; count: number; recipients: number }
-	| { status: 'skipped'; reason: 'no_system_domain' | 'no_admins' }
-> {
 	const systemDomain = getSystemEmailDomain(input.env)
 	if (!systemDomain) {
 		return { status: 'skipped', reason: 'no_system_domain' }
 	}
-
 	const admins = await input.env.APP_DB.prepare(
-		`SELECT u.email FROM users u
-		 INNER JOIN user_roles ur ON ur.user_id = u.id
-		 INNER JOIN roles r ON r.id = ur.role_id
-		 WHERE r.name = 'admin'
-		 ORDER BY u.id ASC`,
+		`SELECT user.email
+		FROM users AS user
+		INNER JOIN user_roles AS user_role ON user_role.user_id = user.id
+		INNER JOIN roles AS role ON role.id = user_role.role_id
+		WHERE role.name = 'admin'
+		ORDER BY user.id ASC`,
 	).all<{ email: string }>()
-	const recipients = (admins.results ?? []).map((row) => row.email)
+	const recipients = (admins.results ?? []).map((admin) => admin.email)
 	if (recipients.length === 0) {
 		return { status: 'skipped', reason: 'no_admins' }
 	}
-
 	const baseUrl = input.env.APP_BASE_URL?.trim() || `https://${systemDomain}`
 	const text = [
-		`Kody recorded ${input.count} reputation-relevant email delivery outcomes (complained or bounced) in the last ${input.windowMinutes} minutes (threshold ${input.threshold}).`,
-		'Per-user outbound pause already stops individual abusers; a platform-wide burst can mean the shared sending domain is under pressure.',
-		`Review the Email delivery health chart at ${baseUrl}/admin/insights.`,
-		`Checked at ${input.now.toISOString()}.`,
+		`Kody recorded ${count} bounced or complained email outcomes in the last ${windowMinutes} minutes (threshold ${threshold}).`,
+		`Review Email delivery health at ${baseUrl}/admin/insights.`,
+		`Checked at ${now.toISOString()}.`,
 	].join('\n\n')
-
-	try {
-		const sent = await sendCloudflareEmail(
-			{
-				accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
-				apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
-				apiToken: input.env.CLOUDFLARE_API_TOKEN,
-			},
-			{
-				to: recipients.length === 1 ? recipients[0]! : recipients,
-				from: `kody@${systemDomain}`,
-				subject: `Email delivery reputation burst: ${input.count} in ${input.windowMinutes}m`,
-				text,
-				html: `<!doctype html><html lang="en"><body>${text
-					.split('\n\n')
-					.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
-					.join('')}</body></html>`,
-			},
+	const sent = await sendCloudflareEmail(
+		{
+			accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
+			apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
+			apiToken: input.env.CLOUDFLARE_API_TOKEN,
+		},
+		{
+			to: recipients.length === 1 ? recipients[0]! : recipients,
+			from: `kody@${systemDomain}`,
+			subject: `Email delivery reputation burst: ${count} in ${windowMinutes}m`,
+			text,
+			html: `<p>${text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('\n\n', '</p><p>')}</p>`,
+		},
+	)
+	if (!sent.ok) throw new Error('Failed to send email delivery alert.')
+	if (input.env.BUNDLE_ARTIFACTS_KV) {
+		await input.env.BUNDLE_ARTIFACTS_KV.put(
+			emailDeliveryAlertKvKey,
+			String(now.getTime()),
+			{ expirationTtl: (cooldownMinutes + 60) * 60 },
 		)
-		if (!sent.ok) {
-			// Do not write cooldown when Cloudflare email is unconfigured.
-			throw new Error(
-				sent.skipped
-					? 'Cloudflare email sending is not configured.'
-					: 'Failed to send email delivery reputation alert.',
-			)
-		}
-	} catch (error) {
-		console.warn('email-delivery-alert-notification-failed', error)
-		throw error
 	}
-
 	console.warn('email-delivery-burst-alerted', {
-		count: input.count,
-		threshold: input.threshold,
+		count,
+		threshold,
 		recipients: recipients.length,
 	})
-
-	return {
-		status: 'notified',
-		count: input.count,
-		recipients: recipients.length,
-	}
-}
-
-function escapeHtml(value: string) {
-	return value
-		.replaceAll('&', '&amp;')
-		.replaceAll('<', '&lt;')
-		.replaceAll('>', '&gt;')
-		.replaceAll('"', '&quot;')
+	return { status: 'notified', count, recipients: recipients.length }
 }

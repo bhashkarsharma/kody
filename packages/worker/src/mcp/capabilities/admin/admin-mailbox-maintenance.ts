@@ -1,11 +1,9 @@
 import { z } from 'zod'
 import {
 	AdminMailboxMessageNotFoundError,
-	adminMailboxMaintenanceMaxBatchSize,
 	adminMailboxMaintenanceRetentionMaxLimit,
 	loadAdminMailboxMaintenanceStatus,
 	runAdminMailboxMaintenanceDeleteMessage,
-	runAdminMailboxMaintenanceReconcile,
 	runAdminMailboxMaintenanceRetention,
 	runAdminMailboxMaintenanceSystemEmailGraphReconcile,
 } from '#worker/admin/mailbox-maintenance.ts'
@@ -17,16 +15,6 @@ import {
 	auditAdminCapabilityInvocation,
 	stableUserIdSchema,
 } from './admin-shared.ts'
-
-const reconcileBatchSizeSchema = z
-	.number()
-	.int()
-	.min(1)
-	.max(adminMailboxMaintenanceMaxBatchSize)
-	.optional()
-	.describe(
-		`Optional bounded owner batch size (1–${adminMailboxMaintenanceMaxBatchSize}). Defaults to the scheduled parity lane batch size.`,
-	)
 
 const retentionLimitSchema = z
 	.number()
@@ -45,32 +33,22 @@ const mailboxCountSchema = z.object({
 	deliveryEvents: z.number().int().nonnegative(),
 })
 
-const outboundProviderIndexParitySchema = z.object({
+const outboundProviderIndexHealthSchema = z.object({
 	foreignKeyDetached: z
 		.boolean()
 		.describe(
-			'True when the deployed provider-index schema has no message_id foreign key to legacy email_messages.',
-		),
-	linkedMessageCount: z
-		.number()
-		.int()
-		.nonnegative()
-		.describe(
-			'Outbound email_messages rows with a non-null provider_message_id.',
+			'True when the deployed provider-index schema has no message_id foreign key to the legacy shared graph.',
 		),
 	indexCount: z
 		.number()
 		.int()
 		.nonnegative()
 		.describe('Rows in email_outbound_provider_index.'),
-	missingFromIndexCount: z.number().int().nonnegative(),
-	missingFromMessagesCount: z.number().int().nonnegative(),
-	mismatchedCount: z.number().int().nonnegative(),
-	parity: z
+	distinctOwnerCount: z.number().int().nonnegative(),
+	malformedCount: z.number().int().nonnegative(),
+	healthy: z
 		.boolean()
-		.describe(
-			'True when linked and index counts match and missing/mismatched counts are zero.',
-		),
+		.describe('True when every thin index row is structurally valid.'),
 })
 
 const systemEmailGraphTableParitySchema = z.object({
@@ -109,43 +87,34 @@ const systemEmailGraphParitySchema = z.object({
 
 const statusSchema = z.object({
 	generatedAt: z.string(),
-	trackedOwners: z.number().int().nonnegative(),
-	matching: z.number().int().nonnegative(),
-	mismatch: z.number().int().nonnegative(),
-	error: z.number().int().nonnegative(),
-	incomplete: z.number().int().nonnegative(),
-	eligible: z
-		.number()
-		.int()
-		.nonnegative()
-		.describe(
-			'Tracked owners meeting parity soak timing (matching_since age + fresh checked_at, zero mismatch/error). Does not require the read-cutover feature flag.',
-		),
-	oldestMatchingSince: z.string().nullable(),
-	newestMatchingSince: z.string().nullable(),
-	oldestCheckedAt: z.string().nullable(),
-	newestCheckedAt: z.string().nullable(),
-	earliestCutoverAt: z
-		.string()
-		.nullable()
-		.describe(
-			'Earliest matching_since + soak duration among matching owners, or null.',
-		),
-	outboundProviderIndex: outboundProviderIndexParitySchema.describe(
-		'Fleet-wide aggregate D1 outbound provider reverse-index parity (counts only; no owner/message content).',
+	authority: z
+		.object({
+			ownerCount: z.number().int().nonnegative(),
+			frozenAt: z.string(),
+			maxParityAgeHours: z.number().int().positive(),
+		})
+		.nullable(),
+	outboundProviderIndex: outboundProviderIndexHealthSchema.describe(
+		'Fleet-wide aggregate thin D1 outbound provider reverse-index health.',
 	),
+	providerIndexRepair: z.object({
+		pendingOwners: z.number().int().nonnegative(),
+		pendingCount: z.number().int().nonnegative(),
+		oldestPendingAt: z.string().nullable(),
+	}),
+	inboundDueOwners: z.object({
+		pendingOwners: z.number().int().nonnegative(),
+		dueOwners: z.number().int().nonnegative(),
+		oldestDueAt: z.string().nullable(),
+	}),
+	deliveryAlerts: z.object({
+		retainedEvents: z.number().int().nonnegative(),
+		lastHourEvents: z.number().int().nonnegative(),
+		oldestEventAt: z.string().nullable(),
+	}),
 	systemEmailGraph: systemEmailGraphParitySchema.describe(
 		'Dedicated system-email authority versus the legacy rollback mirror. No email content is returned.',
 	),
-})
-
-const reconcileMetricsSchema = z.object({
-	scanned: z.number().int().nonnegative(),
-	backfilled: z.number().int().nonnegative(),
-	compared: z.number().int().nonnegative(),
-	matched: z.number().int().nonnegative(),
-	mismatched: z.number().int().nonnegative(),
-	failed: z.number().int().nonnegative(),
 })
 
 const systemEmailGraphMutationCountsSchema = z.object({
@@ -162,26 +131,10 @@ const systemEmailGraphReconcileMetricsSchema = z.object({
 })
 
 const retentionMetricsSchema = z.object({
-	d1: z.object({
-		messagesDeleted: z.number().int().nonnegative(),
-		attachmentsDeleted: z.number().int().nonnegative(),
-		threadsDeleted: z.number().int().nonnegative(),
-		deliveryEventsDeleted: z.number().int().nonnegative(),
-		rawMimeBlobsDeleted: z.number().int().nonnegative(),
-		attachmentBlobsDeleted: z.number().int().nonnegative(),
-		blobDeleteErrors: z.number().int().nonnegative(),
-	}),
 	mailbox: z.object({
 		ownersAttempted: z.number().int().nonnegative(),
 		ownersSucceeded: z.number().int().nonnegative(),
 		ownersFailed: z.number().int().nonnegative(),
-		pendingD1Owners: z
-			.number()
-			.int()
-			.nonnegative()
-			.describe(
-				'Owners skipped because expired D1 email_messages (365d) or email_delivery_events (90d) remain after global prune batches. Cursor still advances.',
-			),
 		before: mailboxCountSchema,
 		after: mailboxCountSchema,
 		blobDeleteFailureOwners: z.number().int().nonnegative(),
@@ -190,9 +143,9 @@ const retentionMetricsSchema = z.object({
 })
 
 const deleteMessageResultSchema = z.object({
-	d1MessageAbsent: z
+	authoritativeMessageAbsent: z
 		.boolean()
-		.describe('True when the D1 email_messages row is gone after delete.'),
+		.describe('True when the authoritative message is gone after delete.'),
 	attachmentsSeen: z
 		.number()
 		.int()
@@ -230,12 +183,6 @@ const inputSchema = z.discriminatedUnion('action', [
 		.strict(),
 	z
 		.object({
-			action: z.literal('reconcile'),
-			batch_size: reconcileBatchSizeSchema,
-		})
-		.strict(),
-	z
-		.object({
 			action: z.literal('system_email_graph_reconcile'),
 			force: z
 				.literal(true)
@@ -269,7 +216,7 @@ const inputSchema = z.discriminatedUnion('action', [
 			message_id: z
 				.string()
 				.min(1)
-				.describe('email_messages.id to delete for the given owner.'),
+				.describe('Authoritative Mailbox message id to delete for the owner.'),
 		})
 		.strict(),
 ])
@@ -277,11 +224,6 @@ const inputSchema = z.discriminatedUnion('action', [
 const outputSchema = z.discriminatedUnion('action', [
 	z.object({
 		action: z.literal('status'),
-		status: statusSchema,
-	}),
-	z.object({
-		action: z.literal('reconcile'),
-		metrics: reconcileMetricsSchema,
 		status: statusSchema,
 	}),
 	z.object({
@@ -316,19 +258,17 @@ export const adminMailboxMaintenanceCapability = defineDomainCapability(
 		...adminMutationCapabilityAccess,
 		name: 'admin_mailbox_maintenance',
 		description:
-			'Admin-only Mailbox parity/retention/delete maintenance: aggregate status (no email content) including fleet outbound provider-index and dedicated system-email rollback-mirror parity counts, bounded reconcileMailboxParity, forced directional system_email_graph_reconcile from dedicated authority to legacy mirror, keyset-paged natural retention (D1 authoritative prune, skip DO while owner still has expired D1 rows, then Mailbox.runRetentionNow; limit≤20; concurrency≤4; ~10s budget), or owner-scoped delete_message. Never accepts arbitrary cutoffs or seed data. Audited.',
+			'Admin-only Mailbox retention/delete maintenance and structural status: authority marker, provider repair, due-owner and delivery-alert health, thin provider-index counts, dedicated system-email rollback parity, keyset-paged Mailbox retention, or owner-scoped delete_message. USER parity/rebuild is retired. Audited.',
 		keywords: [
 			'admin',
 			'mailbox',
 			'maintenance',
-			'parity',
 			'provider-index',
 			'system-email-graph',
 			'reconcile',
 			'retention',
 			'delete',
 			'cutover',
-			'soak',
 		],
 		destructive: true,
 		inputSchema,
@@ -344,17 +284,6 @@ export const adminMailboxMaintenanceCapability = defineDomainCapability(
 								db: ctx.env.APP_DB,
 							})
 							return { action: 'status' as const, status }
-						}
-						case 'reconcile': {
-							const result = await runAdminMailboxMaintenanceReconcile({
-								env: ctx.env,
-								batchSize: args.batch_size,
-							})
-							return {
-								action: 'reconcile' as const,
-								metrics: result.metrics,
-								status: result.status,
-							}
 						}
 						case 'system_email_graph_reconcile': {
 							const result =
@@ -412,9 +341,7 @@ export const adminMailboxMaintenanceCapability = defineDomainCapability(
 					successReason: (result) => {
 						switch (result.action) {
 							case 'status':
-								return `action=status;tracked=${result.status.trackedOwners};provider_index_parity=${result.status.outboundProviderIndex.parity ? 1 : 0};system_email_graph_parity=${result.status.systemEmailGraph.parity ? 1 : 0}`
-							case 'reconcile':
-								return `action=reconcile;scanned=${result.metrics.scanned};matched=${result.metrics.matched}`
+								return `action=status;cutover_owners=${result.status.authority?.ownerCount ?? -1};provider_repairs=${result.status.providerIndexRepair.pendingCount};due_owners=${result.status.inboundDueOwners.dueOwners};system_email_graph_parity=${result.status.systemEmailGraph.parity ? 1 : 0}`
 							case 'system_email_graph_reconcile':
 								return `action=system_email_graph_reconcile;upserted_messages=${result.metrics.upserted.messages};deleted_messages=${result.metrics.deleted.messages};owner_reference_mismatches=${result.metrics.referencedOwnerMismatchCount};parity=${result.postReport.parity ? 1 : 0}`
 							case 'retention':
@@ -426,7 +353,7 @@ export const adminMailboxMaintenanceCapability = defineDomainCapability(
 										: 'unknown'
 								const targetMessageId =
 									args.action === 'delete_message' ? args.message_id : 'unknown'
-								return `action=delete_message;stable_user_id=${targetStableUserId};message_id=${targetMessageId};d1_absent=${result.result.d1MessageAbsent ? 1 : 0};blobs_absent=${result.result.allCapturedBlobsAbsent ? 1 : 0}`
+								return `action=delete_message;stable_user_id=${targetStableUserId};message_id=${targetMessageId};authoritative_absent=${result.result.authoritativeMessageAbsent ? 1 : 0};blobs_absent=${result.result.allCapturedBlobsAbsent ? 1 : 0}`
 							}
 							default: {
 								const exhaustive: never = result

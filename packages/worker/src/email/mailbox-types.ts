@@ -1,9 +1,4 @@
 import {
-	emailClassificationValues,
-	emailDeliveryEventTypeValues,
-	emailDeliveryStatusValues,
-	emailDirectionValues,
-	emailProcessingStatusValues,
 	type EmailClassification,
 	type EmailDeliveryEventType,
 	type EmailDeliveryStatus,
@@ -12,6 +7,14 @@ import {
 } from './types.ts'
 import { type MailboxInboundDeliveryLedgerRpc } from './mailbox-inbound-ledger.ts'
 import { type MailboxInboundEffectLedgerRpc } from './mailbox-inbound-effect-ledger.ts'
+import { type MailboxProviderIndexRepairStatus } from './mailbox-provider-index-repair.ts'
+import {
+	type MailboxInboundDeliveryState,
+	type MailboxStorageKind,
+	type MailboxSubscriptionEffectState,
+} from './mailbox-type-helpers.ts'
+
+export * from './mailbox-type-helpers.ts'
 
 /**
  * Mailbox Durable Object wire types, constants, and boundary validators.
@@ -20,8 +23,6 @@ import { type MailboxInboundEffectLedgerRpc } from './mailbox-inbound-effect-led
 
 export const mailboxMessageRetentionDays = 365
 export const mailboxDeliveryEventRetentionDays = 90
-export const mailboxDefaultPageSize = 100
-export const mailboxMaxPageSize = 500
 /** Max complete delivery-event snapshots per `upsertDeliveryEvents` RPC. */
 export const mailboxUpsertDeliveryEventsMax = 100
 /** At most one R2-backed message is processed in each DO event/invocation. */
@@ -39,47 +40,8 @@ export const mailboxBlobDeleteMaxKeys = 1000
  * Bump when initializeSchema's DDL set changes. Warm objects run additive
  * migrations (CREATE INDEX IF NOT EXISTS / guarded ALTER) until they match.
  */
-export const mailboxSchemaVersion = 4
+export const mailboxSchemaVersion = 5
 export const mailboxMetaSchemaVersionKey = 'schema_version'
-
-export const mailboxExportThreadCursorPrefix = 'thread:'
-export const mailboxExportMessageCursorPrefix = 'message:'
-export const mailboxExportAttachmentCursorPrefix = 'attachment:'
-export const mailboxExportDeliveryEventCursorPrefix = 'delivery_event:'
-
-export const mailboxBlobRefRawMimeCursorPrefix = 'raw_mime:'
-export const mailboxBlobRefAttachmentCursorPrefix = 'attachment:'
-
-export const mailboxStorageKindValues = [
-	'raw-mime',
-	'external',
-	'unavailable',
-] as const
-export type MailboxStorageKind = (typeof mailboxStorageKindValues)[number]
-
-export const mailboxInboundDeliveryStateValues = [
-	'pending',
-	'storing',
-	'cleaning',
-	'received',
-	'rejected',
-	'orphan-cleaned',
-] as const
-export type MailboxInboundDeliveryState =
-	(typeof mailboxInboundDeliveryStateValues)[number]
-
-export const mailboxSubscriptionEffectStateValues = [
-	'pending',
-	'processing',
-	'complete',
-	'dead-letter',
-] as const
-export type MailboxSubscriptionEffectState =
-	(typeof mailboxSubscriptionEffectStateValues)[number]
-
-/** Canonical UTC ISO-8601 with milliseconds — lexical order matches time order. */
-export const mailboxCanonicalIsoTimestampPattern =
-	/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 export type MailboxThreadRecord = {
 	id: string
@@ -334,10 +296,33 @@ export type MailboxDeleteMessageWithBlobsResult =
 	| { status: 'missing'; tombstoned: boolean }
 	| {
 			status: 'deleted'
+			providerMessageId: string | null
 			attachmentsSeen: number
 			externalAttachmentsSeen: number
 			blobReferences: Array<MailboxBlobReference>
 	  }
+
+export type MailboxCommitInboundMessageGraphResult =
+	| { status: 'committed'; message: MailboxMessageRecord }
+	| { status: 'already-committed'; message: MailboxMessageRecord }
+	| { status: 'lease-lost' }
+
+export type MailboxCommitOutboundTerminalInput = {
+	ownerId: string
+	messageId: string
+	processingStatus: 'sent' | 'failed'
+	providerMessageId: string | null
+	error: string | null
+	sentAt: string | null
+	event: MailboxDeliveryEventInput
+	providerIndexRepair?: {
+		provider: string
+		providerMessageId: string
+		messageId: string
+		inboxId: string | null
+		createdAt: string
+	}
+}
 
 export type MailboxTombstoneMissingMessageResult =
 	| { status: 'message-present' }
@@ -395,17 +380,6 @@ export type MailboxCountMessagesInput = {
 	/** When set, applies the same subject/from/envelope substring match as search. */
 	query?: string | null
 }
-
-export type MailboxListCursorPayload = {
-	createdAt: string
-	id: string
-}
-
-export type MailboxExportPhase =
-	| 'thread'
-	| 'message'
-	| 'attachment'
-	| 'delivery_event'
 
 /** Partial thread touch — equal/newer `updatedAt` only; never regresses `lastMessageAt`. */
 export type MailboxTouchThreadInput = {
@@ -516,21 +490,51 @@ export type MailboxBootstrapDeliveryEventsResult = {
  * CAS RPCs are intersected below; `system:email` remains D1-only.
  */
 type MailboxCoreRpc = {
-	mirrorMessage: (input: {
-		/**
-		 * Explicit owner binding. DO name is not introspectable at runtime, so
-		 * writers must pass the owning user id for blob-key validation and
-		 * singleton identity checks.
-		 */
+	/**
+	 * Authoritative USER graph write. The entire thread/message/attachment
+	 * graph commits in one owner-local SQLite transaction.
+	 */
+	upsertMessageGraph: (input: {
 		ownerId: string
 		thread?: MailboxThreadInput | null
 		message: MailboxMessageInput
-		/**
-		 * Omitted → leave existing attachment metadata unchanged.
-		 * Explicit `[]` → clear attachments (only when the message snapshot is accepted).
-		 */
 		attachments?: Array<MailboxAttachmentInput>
 	}) => Promise<{ ok: true; accepted: boolean }>
+	/**
+	 * Authoritative USER inbound graph commit. The active `storing` lease and
+	 * graph identity are checked in the same SQLite transaction as all graph
+	 * writes, so an expired/replaced lease cannot commit metadata.
+	 */
+	commitInboundMessageGraph: (input: {
+		ownerId: string
+		deliveryId: string
+		storageLease: string
+		thread: MailboxThreadInput
+		message: MailboxMessageInput
+		attachments: Array<MailboxAttachmentInput>
+	}) => Promise<MailboxCommitInboundMessageGraphResult>
+	commitOutboundTerminal: (
+		input: MailboxCommitOutboundTerminalInput,
+	) => Promise<{ message: MailboxMessageRecord; eventInserted: boolean }>
+	completeOutboundProviderIndexRepair: (input: {
+		ownerId: string
+		provider: string
+		providerMessageId: string
+	}) => Promise<{ cleared: boolean }>
+	getOutboundProviderIndexRepairStatus: (input: {
+		ownerId: string
+	}) => Promise<MailboxProviderIndexRepairStatus>
+	recordBoundedRejection: (input: {
+		ownerId: string
+		inboxId: string
+		recipient: string
+		reason: string
+		phase: string
+		day: string
+		now: string
+		detailLimit: number
+		detailEventId: string
+	}) => Promise<{ count: number; detailed: boolean }>
 	/**
 	 * Complete delivery-event snapshot upsert. Rejects USER inbound
 	 * lifecycle/dedupe authority snapshots; use `bootstrapDeliveryEvents`.
@@ -603,6 +607,11 @@ type MailboxCoreRpc = {
 	getThread: (input: {
 		threadId: string
 	}) => Promise<MailboxThreadRecord | null>
+	findThreadForInboundMessage: (input: {
+		inboxId?: string | null
+		references: Array<string>
+		inReplyToHeader?: string | null
+	}) => Promise<MailboxThreadRecord | null>
 	getMessage: (input: {
 		messageId: string
 	}) => Promise<MailboxMessageRecord | null>
@@ -633,6 +642,15 @@ type MailboxCoreRpc = {
 		eventType?: EmailDeliveryEventType | null
 		limit?: number
 	}) => Promise<Array<MailboxDeliveryEventRecord>>
+	countDeliveryEvents: (input: {
+		ownerId: string
+		eventType: EmailDeliveryEventType
+		provider: string
+		createdAtGte: string
+	}) => Promise<{ count: number }>
+	getDeliveryEventByProviderEventId: (input: {
+		providerEventId: string
+	}) => Promise<MailboxDeliveryEventRecord | null>
 	countMailbox: () => Promise<MailboxCountResult>
 	exportMailbox: (input: {
 		pageSize?: number
@@ -649,8 +667,9 @@ type MailboxCoreRpc = {
 	runRetentionNow: (input: {
 		ownerId: string
 	}) => Promise<MailboxRunRetentionNowResult>
-	/** Parity rebuild only: clear graph metadata while retaining delete fences. */
-	purgeForParityRebuild: (input: { ownerId: string }) => Promise<{ ok: true }>
+	getInboundDueWorkHint: (input: {
+		ownerId: string
+	}) => Promise<{ dueAt: string | null }>
 	purge: () => Promise<{ ok: true }>
 }
 
@@ -658,254 +677,3 @@ export type MailboxInboundLedgerRpc = MailboxInboundDeliveryLedgerRpc &
 	MailboxInboundEffectLedgerRpc
 
 export type MailboxRpc = MailboxCoreRpc & MailboxInboundLedgerRpc
-
-export function mailboxNowIso() {
-	return new Date().toISOString()
-}
-
-export function normalizeMailboxPageSize(pageSize: number | undefined) {
-	const requested =
-		typeof pageSize === 'number' && Number.isFinite(pageSize)
-			? Math.trunc(pageSize)
-			: mailboxDefaultPageSize
-	return Math.min(Math.max(requested, 1), mailboxMaxPageSize)
-}
-
-/** Non-negative offset; invalid/omitted values become 0. */
-export function normalizeMailboxOffset(offset: number | null | undefined) {
-	if (typeof offset !== 'number' || !Number.isFinite(offset)) return 0
-	return Math.max(0, Math.trunc(offset))
-}
-
-export function assertMailboxNonEmptyString(
-	value: unknown,
-	label: string,
-): string {
-	if (typeof value !== 'string' || value.length === 0) {
-		throw new Error(`Mailbox ${label} must be a non-empty string.`)
-	}
-	return value
-}
-
-export function assertMailboxCanonicalIsoTimestamp(
-	value: string,
-	label: string,
-): string {
-	if (!mailboxCanonicalIsoTimestampPattern.test(value)) {
-		throw new Error(
-			`Mailbox ${label} must be a canonical ISO-8601 UTC timestamp (YYYY-MM-DDTHH:mm:ss.sssZ).`,
-		)
-	}
-	if (!Number.isFinite(Date.parse(value))) {
-		throw new Error(`Mailbox ${label} is not a valid timestamp.`)
-	}
-	return value
-}
-
-export function assertOptionalMailboxCanonicalIsoTimestamp(
-	value: string | null | undefined,
-	label: string,
-): string | null {
-	if (value == null) return null
-	return assertMailboxCanonicalIsoTimestamp(value, label)
-}
-
-export function assertMailboxDirection(value: string): EmailDirection {
-	if (!(emailDirectionValues as ReadonlyArray<string>).includes(value)) {
-		throw new Error(
-			`Mailbox direction must be inbound or outbound; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as EmailDirection
-}
-
-export function assertMailboxProcessingStatus(
-	value: string,
-): EmailProcessingStatus {
-	if (!(emailProcessingStatusValues as ReadonlyArray<string>).includes(value)) {
-		throw new Error(
-			`Mailbox processingStatus is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as EmailProcessingStatus
-}
-
-export function assertMailboxClassification(
-	value: string,
-): EmailClassification {
-	if (!(emailClassificationValues as ReadonlyArray<string>).includes(value)) {
-		throw new Error(
-			`Mailbox classification is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as EmailClassification
-}
-
-export function assertMailboxDeliveryStatus(
-	value: string,
-): EmailDeliveryStatus {
-	if (!(emailDeliveryStatusValues as ReadonlyArray<string>).includes(value)) {
-		throw new Error(
-			`Mailbox deliveryStatus is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as EmailDeliveryStatus
-}
-
-export function assertMailboxDeliveryEventType(
-	value: string,
-): EmailDeliveryEventType {
-	if (
-		!(emailDeliveryEventTypeValues as ReadonlyArray<string>).includes(value)
-	) {
-		throw new Error(
-			`Mailbox eventType is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as EmailDeliveryEventType
-}
-
-export function assertMailboxStorageKind(value: string): MailboxStorageKind {
-	if (!(mailboxStorageKindValues as ReadonlyArray<string>).includes(value)) {
-		throw new Error(
-			`Mailbox storageKind is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as MailboxStorageKind
-}
-
-export function assertMailboxInboundDeliveryState(
-	value: string,
-): MailboxInboundDeliveryState {
-	if (
-		!(mailboxInboundDeliveryStateValues as ReadonlyArray<string>).includes(
-			value,
-		)
-	) {
-		throw new Error(
-			`Mailbox delivery event state is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as MailboxInboundDeliveryState
-}
-
-export function assertMailboxSubscriptionEffectState(
-	value: string,
-): MailboxSubscriptionEffectState {
-	if (
-		!(mailboxSubscriptionEffectStateValues as ReadonlyArray<string>).includes(
-			value,
-		)
-	) {
-		throw new Error(
-			`Mailbox subscriptionEffectState is invalid; got ${JSON.stringify(value)}.`,
-		)
-	}
-	return value as MailboxSubscriptionEffectState
-}
-
-export function encodeMailboxListCursor(payload: MailboxListCursorPayload) {
-	return btoa(JSON.stringify(payload))
-}
-
-export function decodeMailboxListCursor(
-	cursor: string,
-): MailboxListCursorPayload {
-	let parsed: unknown
-	try {
-		parsed = JSON.parse(atob(cursor)) as unknown
-	} catch {
-		throw new Error('Mailbox list cursor is invalid.')
-	}
-	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-		throw new Error('Mailbox list cursor is invalid.')
-	}
-	const record = parsed as Record<string, unknown>
-	const createdAt = record['createdAt']
-	const id = record['id']
-	if (typeof createdAt !== 'string' || typeof id !== 'string') {
-		throw new Error('Mailbox list cursor is invalid.')
-	}
-	assertMailboxCanonicalIsoTimestamp(createdAt, 'list cursor createdAt')
-	assertMailboxNonEmptyString(id, 'list cursor id')
-	return { createdAt, id }
-}
-
-export function parseMailboxExportCursor(cursor: string | null): {
-	phase: MailboxExportPhase
-	startAfterId: string
-} {
-	if (cursor == null || cursor.length === 0) {
-		return { phase: 'thread', startAfterId: '' }
-	}
-	if (cursor.startsWith(mailboxExportThreadCursorPrefix)) {
-		return {
-			phase: 'thread',
-			startAfterId: cursor.slice(mailboxExportThreadCursorPrefix.length),
-		}
-	}
-	if (cursor.startsWith(mailboxExportMessageCursorPrefix)) {
-		return {
-			phase: 'message',
-			startAfterId: cursor.slice(mailboxExportMessageCursorPrefix.length),
-		}
-	}
-	if (cursor.startsWith(mailboxExportAttachmentCursorPrefix)) {
-		return {
-			phase: 'attachment',
-			startAfterId: cursor.slice(mailboxExportAttachmentCursorPrefix.length),
-		}
-	}
-	if (cursor.startsWith(mailboxExportDeliveryEventCursorPrefix)) {
-		return {
-			phase: 'delivery_event',
-			startAfterId: cursor.slice(mailboxExportDeliveryEventCursorPrefix.length),
-		}
-	}
-	throw new Error(
-		`Mailbox export cursor is invalid; got ${JSON.stringify(cursor)}.`,
-	)
-}
-
-export function mailboxExportCursorPrefixForPhase(
-	phase: MailboxExportPhase,
-): string {
-	switch (phase) {
-		case 'thread':
-			return mailboxExportThreadCursorPrefix
-		case 'message':
-			return mailboxExportMessageCursorPrefix
-		case 'attachment':
-			return mailboxExportAttachmentCursorPrefix
-		case 'delivery_event':
-			return mailboxExportDeliveryEventCursorPrefix
-		default: {
-			const exhaustive: never = phase
-			throw new Error(`Unhandled export phase: ${String(exhaustive)}`)
-		}
-	}
-}
-
-export function parseMailboxBlobRefCursor(cursor: string | null): {
-	phase: 'raw_mime' | 'attachment'
-	startAfterId: string
-} {
-	if (cursor == null || cursor.length === 0) {
-		return { phase: 'raw_mime', startAfterId: '' }
-	}
-	if (cursor.startsWith(mailboxBlobRefAttachmentCursorPrefix)) {
-		return {
-			phase: 'attachment',
-			startAfterId: cursor.slice(mailboxBlobRefAttachmentCursorPrefix.length),
-		}
-	}
-	if (cursor.startsWith(mailboxBlobRefRawMimeCursorPrefix)) {
-		return {
-			phase: 'raw_mime',
-			startAfterId: cursor.slice(mailboxBlobRefRawMimeCursorPrefix.length),
-		}
-	}
-	throw new Error(
-		`Mailbox blob-reference cursor is invalid; got ${JSON.stringify(cursor)}.`,
-	)
-}

@@ -12,6 +12,12 @@ import {
 	reconcileSystemStaleInboundDeliveries,
 } from './system-inbound-delivery-authority.ts'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
+import {
+	deferInboundDueOwner,
+	listDueInboundOwners,
+	replaceInboundDueOwnerHint,
+} from './inbound-due-owners.ts'
+import { mailboxRpc } from './mailbox-client.ts'
 
 const reconciliationUserBatchSize = 25
 const reconciliationTimeBudgetMs = 10_000
@@ -28,12 +34,14 @@ export async function sweepStaleInboundDeliveries(input: {
 		| 'USER_METER'
 	>
 	now?: Date
+	clock?: () => number
 }) {
 	const now = input.now ?? new Date()
 	const cutoff = new Date(
 		now.getTime() - staleInboundDeliveryAgeMs,
 	).toISOString()
-	const startedAt = Date.now()
+	const clock = input.clock ?? Date.now
+	const startedAt = clock()
 	const deadlineMs = startedAt + reconciliationTimeBudgetMs
 	const effectLeaseExpiredBefore = new Date(
 		now.getTime() - inboundEffectLeaseMs,
@@ -45,98 +53,13 @@ export async function sweepStaleInboundDeliveries(input: {
 	let effectsProcessed = 0
 	let errors = 0
 
-	// Discover owner ids by oldest due work. All message/blob access below is
-	// still performed under one explicit userId. Deferring failed attempts and
-	// verification tombstones moves them behind older untouched users.
-	const userRows = await input.env.APP_DB.prepare(
-		`WITH due_users AS (
-				SELECT user_id, created_at AS due_at
-				FROM email_delivery_events
-				WHERE provider = 'cloudflare-email-routing'
-					AND event_type = 'receive_started'
-					AND user_id != ?
-					AND created_at < ?
-					AND (
-						reconcile_after IS NULL
-						OR reconcile_after <= ?
-					)
-					AND (
-						state != 'orphan-cleaned'
-						OR cleanup_retry_at <= ?
-					)
-				UNION ALL
-				SELECT user_id, dedupe_expires_at
-				FROM email_delivery_events
-				WHERE provider = 'cloudflare-email-routing-dedupe'
-					AND user_id != ?
-					AND dedupe_expires_at <= ?
-				UNION ALL
-				SELECT user_id, COALESCE(
-					usage_effect_retry_at,
-					subscription_effect_retry_at,
-					created_at
-				)
-				FROM email_delivery_events
-				WHERE provider = 'cloudflare-email-routing'
-					AND event_type = 'received'
-					AND user_id != ?
-					AND needs_effect_reconcile = 1
-					AND fingerprint IS NOT NULL
-					AND (
-						(
-							usage_effect_recorded_at IS NULL
-							AND usage_effect_suppressed_at IS NULL
-							AND (
-								usage_effect_retry_at IS NULL
-								OR usage_effect_retry_at <= ?
-							)
-							AND (
-								usage_effect_lease IS NULL
-								OR usage_effect_lease_at IS NULL
-								OR usage_effect_lease_at < ?
-							)
-						)
-						OR (
-							(
-								subscription_effect_state IS NULL
-								OR subscription_effect_state NOT IN (
-									'complete',
-									'dead-letter'
-								)
-							)
-							AND (
-								subscription_effect_retry_at IS NULL
-								OR subscription_effect_retry_at <= ?
-							)
-							AND (
-								subscription_effect_state != 'processing'
-								OR subscription_effect_lease_at IS NULL
-								OR subscription_effect_lease_at < ?
-							)
-						)
-					)
-			)
-			SELECT user_id, MIN(due_at) AS due_at
-			FROM due_users
-			GROUP BY user_id
-			ORDER BY MIN(due_at) ASC, user_id ASC
-			LIMIT ?`,
-	)
-		.bind(
-			systemEmailOwnerId,
-			cutoff,
-			now.toISOString(),
-			now.toISOString(),
-			systemEmailOwnerId,
-			now.toISOString(),
-			systemEmailOwnerId,
-			now.toISOString(),
-			effectLeaseExpiredBefore,
-			now.toISOString(),
-			effectLeaseExpiredBefore,
-			reconciliationUserBatchSize,
-		)
-		.all<{ user_id: string; due_at: string }>()
+	// Thin coordination rows discover only owner Mailboxes that reported due
+	// work. Runtime is independent of total account fleet size.
+	const userRows = await listDueInboundOwners({
+		db: input.env.APP_DB,
+		now,
+		limit: reconciliationUserBatchSize,
+	})
 	const systemDue = await input.env.APP_DB.prepare(
 		`WITH due_work(due_at) AS (
 			SELECT created_at
@@ -222,15 +145,20 @@ export async function sweepStaleInboundDeliveries(input: {
 		)
 		.first<{ user_id: string; due_at: string }>()
 	const dueOwners = [
-		...(userRows.results ?? []),
-		...(systemDue ? [systemDue] : []),
+		...userRows.map((row) => ({
+			user_id: row.userId,
+			due_at: row.dueAt,
+			priority: row.reason === 'cutover-audit' ? 1 : 0,
+		})),
+		...(systemDue ? [{ ...systemDue, priority: 0 }] : []),
 	].sort(
 		(left, right) =>
+			left.priority - right.priority ||
 			left.due_at.localeCompare(right.due_at) ||
 			left.user_id.localeCompare(right.user_id),
 	)
 	for (const { user_id: userId } of dueOwners) {
-		if (Date.now() >= deadlineMs) break
+		if (clock() >= deadlineMs) break
 		try {
 			const reconcileUser = async () => {
 				const systemOwner = userId === systemEmailOwnerId
@@ -281,10 +209,31 @@ export async function sweepStaleInboundDeliveries(input: {
 			effectsProcessed += effectResult.processed
 			errors += effectResult.errors
 			usersProcessed += 1
+			if (userId !== systemEmailOwnerId) {
+				const hint = await mailboxRpc({
+					env: input.env,
+					userId,
+				}).getInboundDueWorkHint({ ownerId: userId })
+				await replaceInboundDueOwnerHint({
+					db: input.env.APP_DB,
+					userId,
+					dueAt: hint.dueAt,
+					reason: 'scheduled-refresh',
+					now,
+				})
+			}
 			if (result.budgetExhausted) break
 		} catch (error) {
 			errors += 1
 			usersProcessed += 1
+			if (userId !== systemEmailOwnerId) {
+				await deferInboundDueOwner({
+					db: input.env.APP_DB,
+					userId,
+					error,
+					now,
+				}).catch(() => undefined)
+			}
 			console.warn('inbound-email-user-reconciliation-failed', userId, error)
 		}
 	}
@@ -296,6 +245,6 @@ export async function sweepStaleInboundDeliveries(input: {
 		pointersPruned,
 		effectsProcessed,
 		errors,
-		budgetExhausted: Date.now() >= deadlineMs,
+		budgetExhausted: clock() >= deadlineMs,
 	}
 }

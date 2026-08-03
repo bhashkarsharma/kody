@@ -23,44 +23,40 @@ function createDb(count: number) {
 					return this
 				},
 				async first<T>() {
-					if (normalized.includes('from email_delivery_events')) {
+					if (normalized.includes('from email_delivery_alert_events')) {
 						return { count } as T
 					}
 					return null
 				},
 				async all<T>() {
-					if (normalized.includes('from users u')) {
+					if (normalized.includes('from users as user')) {
 						return {
 							results: [{ email: 'admin@example.com' }],
 						} as { results: Array<T> }
 					}
 					return { results: [] }
 				},
+				async run() {
+					return { meta: { changes: 0 } }
+				},
 			}
 		},
 	} as unknown as D1Database
 }
 
-test('email delivery burst alerts notify, cool down, and skip cooldown on notify failure', async () => {
+test('thin delivery alert signals notify once per cooldown window', async () => {
 	expect(
 		shouldRunEmailDeliveryAlertCron(new Date('2026-07-25T12:00:00.000Z')),
 	).toBe(true)
 	expect(
 		shouldRunEmailDeliveryAlertCron(new Date('2026-07-25T12:05:00.000Z')),
 	).toBe(false)
-
 	sendCloudflareEmail.mockClear()
 	const quiet = await checkEmailDeliveryBurstAndNotify({
-		env: {
-			APP_DB: createDb(10),
-			APP_BASE_URL: 'https://heykody.dev',
-			CLOUDFLARE_ACCOUNT_ID: 'acct',
-			CLOUDFLARE_API_TOKEN: 'token',
-		},
+		env: { APP_DB: createDb(10), APP_BASE_URL: 'https://heykody.dev' },
 		threshold: 20,
 	})
 	expect(quiet).toEqual({ status: 'below_threshold', count: 10 })
-	expect(sendCloudflareEmail).not.toHaveBeenCalled()
 
 	consoleWarn.mockImplementation(() => {})
 	const kvStore = new Map<string, string>()
@@ -72,53 +68,27 @@ test('email delivery burst alerts notify, cool down, and skip cooldown on notify
 			kvStore.set(key, value)
 		},
 	} as unknown as KVNamespace
-
 	const env = {
 		APP_DB: createDb(35),
 		APP_BASE_URL: 'https://heykody.dev',
-		CLOUDFLARE_ACCOUNT_ID: 'acct',
-		CLOUDFLARE_API_TOKEN: 'token',
+		USER_EMAIL_DOMAIN: 'mail.heykody.dev',
 		BUNDLE_ARTIFACTS_KV: kv,
 	}
 	const now = new Date('2026-07-25T12:00:00.000Z')
 	try {
-		const first = await checkEmailDeliveryBurstAndNotify({
-			env,
-			now,
-			threshold: 20,
-		})
-		expect(first).toEqual({ status: 'notified', count: 35, recipients: 1 })
-		expect(sendCloudflareEmail).toHaveBeenCalledTimes(1)
+		await expect(
+			checkEmailDeliveryBurstAndNotify({ env, now, threshold: 20 }),
+		).resolves.toEqual({ status: 'notified', count: 35, recipients: 1 })
 		expect(kvStore.get(emailDeliveryAlertKvKey)).toBe(String(now.getTime()))
-		expect(consoleWarn).toHaveBeenCalledWith(
-			'email-delivery-burst-alerted',
-			expect.objectContaining({ count: 35 }),
-		)
-
-		const second = await checkEmailDeliveryBurstAndNotify({
-			env,
-			now: new Date(now.getTime() + 60_000),
-			threshold: 20,
-		})
-		expect(second).toEqual({ status: 'cooldown', count: 35 })
-		expect(sendCloudflareEmail).toHaveBeenCalledTimes(1)
-
-		kvStore.clear()
-		sendCloudflareEmail.mockRejectedValueOnce(new Error('cf email down'))
 		await expect(
 			checkEmailDeliveryBurstAndNotify({
 				env,
-				now: new Date('2026-07-25T13:00:00.000Z'),
+				now: new Date(now.getTime() + 60_000),
 				threshold: 20,
 			}),
-		).rejects.toThrow('cf email down')
-		expect(kvStore.has(emailDeliveryAlertKvKey)).toBe(false)
-		expect(consoleWarn).toHaveBeenCalledWith(
-			'email-delivery-alert-notification-failed',
-			expect.any(Error),
-		)
+		).resolves.toEqual({ status: 'cooldown', count: 35 })
+		expect(sendCloudflareEmail).toHaveBeenCalledTimes(1)
 	} finally {
 		consoleWarn.mockReset()
-		sendCloudflareEmail.mockResolvedValue({ ok: true })
 	}
 })

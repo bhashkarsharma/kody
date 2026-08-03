@@ -53,13 +53,6 @@ export type UserScopedDataTarget =
 	  }
 	| { kind: 'bucket_parent'; table: string; parentTable: string }
 	| {
-			kind: 'attachment_parent'
-			table: string
-			includeInExport?: boolean
-			surface?: string
-			reason?: string
-	  }
-	| {
 			kind: 'community_listing_child'
 			table: string
 			listingColumn: string
@@ -111,9 +104,11 @@ export const accountOperatorOwnedD1Surfaces = [
 ] as const
 
 /**
- * Physical D1 tables that still exist in the migrated schema (pending a later
- * drop migration) but are intentionally absent from runtime account
- * deletion/export inventory. Schema coverage guardrails treat these
+ * Physical D1 tables pending a later drop migration. They are absent from
+ * generic account deletion/export inventory so live account code cannot read
+ * them. Account deletion invokes the tightly scoped legacy privacy cleanup
+ * module after authoritative Mailbox/R2 purge; export never reads these rows.
+ * Schema coverage guardrails treat these
  * `user_id` / `*_user_id` columns as covered so the live table does not look
  * like a missing inventory target; runtime deletion and export never query
  * them. Export documents each omission under `excludedD1Surfaces` (no raw
@@ -128,7 +123,36 @@ export type AccountUserDataPendingDropTarget = {
 }
 
 export const accountUserDataPendingDropTargets: ReadonlyArray<AccountUserDataPendingDropTarget> =
-	[]
+	[
+		{
+			table: 'email_delivery_events',
+			column: 'user_id',
+			surface: 'frozen_user_email_delivery_events',
+			reason:
+				'Frozen rollback snapshot after USER Mailbox-only cutover; excluded from export and deleted only by the scoped legacy privacy cleanup after Mailbox purge.',
+		},
+		{
+			table: 'email_attachments',
+			column: 'message_id',
+			surface: 'frozen_user_email_attachments',
+			reason:
+				'Frozen rollback snapshot after USER Mailbox-only cutover; excluded from export and deleted only by the scoped legacy privacy cleanup after Mailbox purge.',
+		},
+		{
+			table: 'email_messages',
+			column: 'user_id',
+			surface: 'frozen_user_email_messages',
+			reason:
+				'Frozen rollback snapshot after USER Mailbox-only cutover; excluded from export and deleted only by the scoped legacy privacy cleanup after Mailbox purge.',
+		},
+		{
+			table: 'email_threads',
+			column: 'user_id',
+			surface: 'frozen_user_email_threads',
+			reason:
+				'Frozen rollback snapshot after USER Mailbox-only cutover; excluded from export and deleted only by the scoped legacy privacy cleanup after Mailbox purge.',
+		},
+	]
 
 /** Targets that account export should skip (deletion still covers them). */
 export function isExcludedFromAccountExport(
@@ -184,9 +208,9 @@ export function getAccountExportExcludedD1Surfaces(): Array<{
  * Rows owned by accountUserDataExcludedOwnerIds are operator/platform data,
  * not user data; tests assert those owner ids stay deliberately excluded from
  * user account operations. Physical tables pending a later drop migration are
- * listed in accountUserDataPendingDropTargets instead of here so runtime
+ * listed in accountUserDataPendingDropTargets instead of here so generic
  * deletion/export never query them while schema coverage still recognizes
- * their user columns.
+ * their user columns. The dedicated privacy cleanup is the only exception.
  *
  * Order matters for deletion: child tables come before parent tables so the
  * cascade is self-contained even on engines / configs where foreign-key
@@ -290,19 +314,19 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 	{ kind: 'user_id', table: 'entity_sources' },
 	{
 		kind: 'user_id',
-		table: 'email_delivery_events',
+		table: 'email_inbound_due_owners',
 		includeInExport: false,
-		surface: 'user_email_delivery_events_projection',
+		surface: 'email_inbound_due_owners',
 		reason:
-			'USER delivery events are exported from the authoritative Mailbox section. The D1 compatibility projection remains an account-deletion target during Mailbox migration.',
+			'Operational Mailbox due-work coordination omitted from portable export; account deletion removes the owner hint.',
 	},
 	{
-		kind: 'attachment_parent',
-		table: 'email_attachments',
+		kind: 'user_id',
+		table: 'email_outbound_provider_index_repair_owners',
 		includeInExport: false,
-		surface: 'user_email_attachments_projection',
+		surface: 'email_outbound_provider_index_repair_owners',
 		reason:
-			'USER attachment metadata is exported from the authoritative Mailbox section. The D1 compatibility projection remains an account-deletion target during Mailbox migration.',
+			'Aggregate provider-index repair health omitted from portable export; account deletion removes the owner health row.',
 	},
 	{
 		kind: 'user_id',
@@ -310,23 +334,7 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 		includeInExport: false,
 		surface: 'email_outbound_provider_index',
 		reason:
-			'Derived global provider→owner reverse lookup rebuilt from outbound message provider ids. D1 message deletes currently cascade index rows via FK; account deletion still lists this table for inventory coverage and explicit owner cleanup.',
-	},
-	{
-		kind: 'user_id',
-		table: 'email_messages',
-		includeInExport: false,
-		surface: 'user_email_messages_projection',
-		reason:
-			'USER messages are exported from the authoritative Mailbox section. The D1 compatibility projection remains an account-deletion target during Mailbox migration.',
-	},
-	{
-		kind: 'user_id',
-		table: 'email_threads',
-		includeInExport: false,
-		surface: 'user_email_threads_projection',
-		reason:
-			'USER threads are exported from the authoritative Mailbox section. The D1 compatibility projection remains an account-deletion target during Mailbox migration.',
+			'Operational global provider→owner reverse lookup omitted from portable export. Mailbox rows retain provider ids, but no fleet-wide automatic rebuild is claimed; account deletion keeps explicit owner cleanup.',
 	},
 	{ kind: 'user_id', table: 'email_inbox_addresses' },
 	{ kind: 'user_id', table: 'email_inboxes' },
@@ -522,7 +530,6 @@ export function getAccountD1UserColumnCoverage() {
 			}
 			case 'replace_user_id_in_json_column':
 			case 'bucket_parent':
-			case 'attachment_parent':
 			case 'community_listing_child':
 			// db_user_target tables key rows by `target`, not a *_user_id
 			// column, so there is no schema column for the guard to cover.
@@ -574,9 +581,6 @@ export function resolveUserScopedTargetTable(
 	switch (target.kind) {
 		case 'mcp_memory_suppression': {
 			return 'mcp_memory_conversation_suppressions'
-		}
-		case 'attachment_parent': {
-			return 'email_attachments'
 		}
 		case 'user_id':
 		case 'db_user_id':
@@ -690,18 +694,6 @@ export function buildUserScopedTargetMatch(input: {
 				table,
 				whereSql,
 				qualifiedWhereSql: `${table}.${whereSql}`,
-				params: [input.mcpUserId],
-				mutation: { kind: 'delete' },
-			}
-		}
-		case 'attachment_parent': {
-			const whereSql = `message_id IN (
-						SELECT id FROM email_messages WHERE user_id = ?
-					)`
-			return {
-				table,
-				whereSql,
-				qualifiedWhereSql: `email_attachments.${whereSql}`,
 				params: [input.mcpUserId],
 				mutation: { kind: 'delete' },
 			}

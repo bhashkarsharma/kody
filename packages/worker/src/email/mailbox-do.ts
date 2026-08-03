@@ -7,16 +7,11 @@ import {
 } from './types.ts'
 import {
 	canonicalMailboxMessageBlobReferences,
-	computeMailboxRetentionReschedule,
 	deleteMailboxBlobKeys,
-	deleteMailboxRetentionCandidate,
-	enforceMailboxRetention,
-	mailboxRetentionAlarmAtMs,
-	nextMailboxRetentionDueAtMs,
-	selectMailboxRetentionCandidate,
-	selectMailboxRetentionWriteAlarm,
-	type MailboxRetentionMessageDeleteResult,
 } from './mailbox-retention.ts'
+import { MailboxMaintenanceCommands } from './mailbox-maintenance-commands.ts'
+import { MailboxGraphCommitCommands } from './mailbox-graph-commit-commands.ts'
+import { MailboxInboundCommands } from './mailbox-inbound-commands.ts'
 import { MailboxStore } from './mailbox-store.ts'
 import {
 	deleteMailboxDeliveryEvent,
@@ -25,41 +20,18 @@ import {
 	touchMailboxThread,
 	updateMailboxMessageDelivery,
 } from './mailbox-mutations.ts'
+import { findDeliveryEventByProviderEventId } from './mailbox-delivery-events.ts'
 import {
 	deleteMailboxMessageMetadataWithTombstone,
 	tombstoneMissingMailboxMessage,
 } from './mailbox-message-deletion-tombstones.ts'
-import {
-	claimMailboxInboundDeliveryCleanup,
-	markMailboxInboundDeliveryOrphanCleaned,
-	releaseMailboxInboundDeliveryCleanup,
-} from './mailbox-inbound-cleanup-ledger.ts'
 import { bootstrapMailboxDeliveryEvents } from './mailbox-delivery-event-bootstrap.ts'
 import { upsertMailboxDeliveryEvents } from './mailbox-delivery-event-upsert.ts'
 import { shouldSkipMailboxDeliveryEventWrite } from './mailbox-inbound-bootstrap.ts'
 import {
-	claimMailboxInboundDeliveryStorage,
-	claimMailboxInboundDeliveryWindow,
-	deferMailboxInboundDeliveryReconciliation,
-	getMailboxInboundDelivery,
-	getMailboxInboundDeliveryWindow,
-	insertMailboxChargedPendingInboundDelivery,
-	listMailboxDueStaleInboundDeliveries,
-	markMailboxInboundDeliveryReceived,
-	markMailboxInboundDeliveryRejected,
-	pruneMailboxExpiredInboundDedupePointers,
-	releaseMailboxInboundDeliveryStorage,
 	type MailboxInboundDeliveryInsertInput,
 	type MailboxInboundDeliverySnapshot,
 } from './mailbox-inbound-ledger.ts'
-import {
-	claimMailboxInboundSubscriptionEffect,
-	claimMailboxInboundUsageEffect,
-	completeMailboxInboundSubscriptionEffect,
-	completeMailboxInboundUsageEffect,
-	failMailboxInboundSubscriptionEffect,
-	listMailboxDueInboundEffectWork,
-} from './mailbox-inbound-effect-ledger.ts'
 import {
 	assertMailboxNonEmptyString,
 	type MailboxAttachmentInput,
@@ -68,6 +40,8 @@ import {
 	type MailboxBootstrapDeliveryEventsResult,
 	type MailboxCountMessagesInput,
 	type MailboxCountResult,
+	type MailboxCommitInboundMessageGraphResult,
+	type MailboxCommitOutboundTerminalInput,
 	type MailboxDeleteDeliveryEventInput,
 	type MailboxDeleteMessageWithBlobsResult,
 	type MailboxDeleteMessageMetadataInput,
@@ -101,162 +75,34 @@ import {
  * external attachment bytes stay in `EMAIL_BLOBS`; rows retain keys.
  * `system:email` stays in D1 by design.
  *
- * Dual-write / read-cutover live paths are wired elsewhere. USER inbound
- * ledger/effect transitions are authoritative here; `system:email` remains D1.
+ * USER graph reads/writes and inbound ledger/effect transitions are
+ * authoritative here; `system:email` remains on its dedicated D1 graph.
  */
 
 class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 	private readonly store: MailboxStore
-	private retentionAlarmArmed = false
-	private retentionIdleConfirmed = false
+	private readonly maintenance: MailboxMaintenanceCommands
+	private readonly graphCommits: MailboxGraphCommitCommands
+	private readonly inbound: MailboxInboundCommands
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env)
 		this.store = new MailboxStore(ctx.storage)
+		this.maintenance = new MailboxMaintenanceCommands(ctx, env, this.store)
+		this.graphCommits = new MailboxGraphCommitCommands(
+			ctx,
+			this.store,
+			this.maintenance,
+		)
+		this.inbound = new MailboxInboundCommands(ctx, this.store, this.maintenance)
 		this.ctx.blockConcurrencyWhile(async () => {
 			this.store.initializeSchema()
-			this.retentionAlarmArmed = (await this.ctx.storage.getAlarm()) != null
+			await this.maintenance.initializeAlarmState()
 		})
-	}
-
-	/**
-	 * Arming rule (keep this comment accurate — reviewers rely on it):
-	 *
-	 * - Schedule at most one alarm for the soonest retention due-time.
-	 * - Overdue work on the write path uses an hourly retry delay (not now+1s).
-	 * - Write-path ensure never postpones an earlier existing alarm (skew-equal
-	 *   times keep the existing alarm to avoid churn).
-	 * - After an alarm: blob failures → hourly backoff; successful pass with
-	 *   expired rows remaining → near-immediate continuation; else future due.
-	 * - `retentionAlarmArmed` skips getAlarm/setAlarm on hot writes once armed.
-	 * - `retentionIdleConfirmed` skips re-evaluation only while no new row has
-	 *   been written; every write clears it so the next ensure re-arms.
-	 * - Never arm in the constructor.
-	 */
-	private async ensureRetentionAlarm() {
-		if (this.retentionAlarmArmed) return
-		if (this.retentionIdleConfirmed) return
-
-		const dueAtMs = nextMailboxRetentionDueAtMs(this.store)
-		const proposedAtMs = mailboxRetentionAlarmAtMs({ dueAtMs })
-		const existingAtMs = await this.ctx.storage.getAlarm()
-		const selection = selectMailboxRetentionWriteAlarm({
-			proposedAtMs,
-			existingAtMs,
-		})
-		switch (selection.action) {
-			case 'idle':
-				this.retentionIdleConfirmed = true
-				this.retentionAlarmArmed = false
-				return
-			case 'keep-existing':
-				this.retentionIdleConfirmed = false
-				this.retentionAlarmArmed = true
-				return
-			case 'set':
-				this.retentionIdleConfirmed = false
-				await this.ctx.storage.setAlarm(selection.atMs)
-				this.retentionAlarmArmed = true
-				return
-			default: {
-				const exhaustive: never = selection
-				throw new Error(
-					`Unhandled retention write-alarm selection: ${String(exhaustive)}`,
-				)
-			}
-		}
-	}
-
-	private markRetentionDirty() {
-		this.retentionIdleConfirmed = false
-		this.retentionAlarmArmed = false
-	}
-
-	/**
-	 * Serialize an async R2→SQLite orchestration without letting a callback
-	 * rejection permanently break the Durable Object input gate.
-	 */
-	private async blockConcurrencySafely<T>(
-		operation: () => Promise<T>,
-	): Promise<T> {
-		const outcome = await this.ctx.blockConcurrencyWhile(
-			async (): Promise<
-				{ ok: true; value: T } | { ok: false; error: unknown }
-			> => {
-				try {
-					return { ok: true, value: await operation() }
-				} catch (error) {
-					return { ok: false, error }
-				}
-			},
-		)
-		if (!outcome.ok) throw outcome.error
-		return outcome.value
-	}
-
-	/**
-	 * Select, revalidate, and delete one retention candidate under its own
-	 * input gate. A message's keys are sent to R2 in bounded 1,000-key chunks;
-	 * an exceptional message with more keys may require multiple R2 calls, but
-	 * no gate spans multiple messages.
-	 */
-	private async deleteRetentionMessage(
-		cutoff: string,
-	): Promise<MailboxRetentionMessageDeleteResult | null> {
-		return await this.blockConcurrencySafely(async () => {
-			const candidate = selectMailboxRetentionCandidate(this.store, cutoff)
-			if (candidate == null) return null
-			const ownerId = this.store.getOwnerId()
-			if (ownerId == null) {
-				throw new Error('Mailbox retention candidate has no bound owner.')
-			}
-			return await deleteMailboxRetentionCandidate({
-				store: this.store,
-				blobs: this.env.EMAIL_BLOBS,
-				ownerId,
-				candidate,
-				cutoff,
-			})
-		})
-	}
-
-	/**
-	 * Shared retention turn for `alarm` and {@link runRetentionNow}. At most one
-	 * R2-backed message; natural cutoffs and exact post-turn alarm scheduling.
-	 */
-	private async runRetentionPass(): Promise<MailboxRunRetentionNowResult> {
-		const before = this.store.countMailbox()
-		const result = await enforceMailboxRetention({
-			store: this.store,
-			deleteMessage: (cutoff) => this.deleteRetentionMessage(cutoff),
-		})
-		const after = this.store.countMailbox()
-		const nowMs = Date.now()
-		const nextDueAtMs = nextMailboxRetentionDueAtMs(this.store, nowMs)
-		const reschedule = computeMailboxRetentionReschedule({
-			nowMs,
-			eligibleExpiredWorkRemaining: result.eligibleExpiredWorkRemaining,
-			earliestRetryAtMs: result.earliestRetryAtMs,
-			nextDueAtMs,
-		})
-		if (reschedule.atMs == null) {
-			this.retentionAlarmArmed = false
-			this.retentionIdleConfirmed = true
-		} else {
-			await this.ctx.storage.setAlarm(reschedule.atMs)
-			this.retentionAlarmArmed = true
-			this.retentionIdleConfirmed = false
-		}
-		return {
-			before,
-			after,
-			blobDeleteFailures: result.hadBlobDeleteFailures,
-			expiredRemaining: result.expiredWorkRemaining,
-		}
 	}
 
 	async alarm(): Promise<void> {
-		await this.runRetentionPass()
+		await this.maintenance.alarm()
 	}
 
 	/**
@@ -266,39 +112,154 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 	async runRetentionNow(input: {
 		ownerId: string
 	}): Promise<MailboxRunRetentionNowResult> {
-		this.store.assertOwner(input.ownerId)
-		return await this.runRetentionPass()
+		return await this.maintenance.runRetentionNow(input.ownerId)
 	}
 
-	async mirrorMessage(input: {
+	async upsertMessageGraph(input: {
 		ownerId: string
 		thread?: MailboxThreadInput | null
 		message: MailboxMessageInput
 		attachments?: Array<MailboxAttachmentInput>
 	}): Promise<{ ok: true; accepted: boolean }> {
-		const message = input.message
-		assertMailboxNonEmptyString(message.id, 'message.id')
-		let accepted = false
+		return await this.graphCommits.upsertMessageGraph(input)
+	}
+
+	async commitInboundMessageGraph(input: {
+		ownerId: string
+		deliveryId: string
+		storageLease: string
+		thread: MailboxThreadInput
+		message: MailboxMessageInput
+		attachments: Array<MailboxAttachmentInput>
+	}): Promise<MailboxCommitInboundMessageGraphResult> {
+		return await this.graphCommits.commitInboundMessageGraph(input)
+	}
+
+	async commitOutboundTerminal(
+		input: MailboxCommitOutboundTerminalInput,
+	): Promise<{ message: MailboxMessageRecord; eventInserted: boolean }> {
+		return await this.graphCommits.commitOutboundTerminal(input)
+	}
+
+	async completeOutboundProviderIndexRepair(input: {
+		ownerId: string
+		provider: string
+		providerMessageId: string
+	}): Promise<{ cleared: boolean }> {
+		return await this.graphCommits.completeOutboundProviderIndexRepair(input)
+	}
+
+	async getOutboundProviderIndexRepairStatus(input: { ownerId: string }) {
+		return this.graphCommits.getOutboundProviderIndexRepairStatus(input.ownerId)
+	}
+
+	async recordBoundedRejection(input: {
+		ownerId: string
+		inboxId: string
+		recipient: string
+		reason: string
+		phase: string
+		day: string
+		now: string
+		detailLimit: number
+		detailEventId: string
+	}): Promise<{ count: number; detailed: boolean }> {
+		let count = 0
+		let detailed = false
 		this.ctx.storage.transactionSync(() => {
-			const ownerId = this.store.assertOwner(input.ownerId)
-			if (this.store.isMessageTombstoned(message.id)) return
-			this.store.validateMessageBlobKeys({
-				ownerId,
-				message,
-				attachments: input.attachments,
-			})
-			if (input.thread) {
-				this.store.upsertThreadRow(input.thread)
+			this.store.assertOwner(input.ownerId)
+			const aggregateId = `email-rejections:${input.inboxId}:${input.day}`
+			const existing = this.ctx.storage.sql
+				.exec<{ detail_json: string }>(
+					`SELECT detail_json FROM email_delivery_events
+					WHERE id = ?
+					LIMIT 1`,
+					aggregateId,
+				)
+				.toArray()[0]
+			let priorCount = 0
+			if (existing) {
+				try {
+					const detail = JSON.parse(existing.detail_json) as {
+						count?: unknown
+					}
+					if (typeof detail.count === 'number') priorCount = detail.count
+				} catch {
+					priorCount = 0
+				}
 			}
-			const messageResult = this.store.upsertMessageRow(message)
-			accepted = messageResult.accepted
-			if (accepted && input.attachments !== undefined) {
-				this.store.replaceAttachmentsForMessage(message.id, input.attachments)
+			count = priorCount + 1
+			const event = (
+				id: string,
+				detailJson: string,
+			): MailboxDeliveryEventInput => ({
+				id,
+				messageId: null,
+				inboxId: input.inboxId,
+				eventType: 'rejected',
+				provider: 'cloudflare-email-routing',
+				providerMessageId: null,
+				providerEventId: null,
+				detailJson,
+				needsEffectReconcile: false,
+				state: null,
+				fingerprint: null,
+				storageLease: null,
+				storageLeaseAt: null,
+				cleanupLease: null,
+				cleanupLeaseAt: null,
+				cleanupRetryAt: null,
+				expectedAttachmentCount: null,
+				finalizationToken: null,
+				reconcileAfter: null,
+				dedupeExpiresAt: null,
+				usageEffectRecordedAt: null,
+				usageEffectSuppressedAt: null,
+				usageStartedAt: null,
+				usageMonth: null,
+				usageBytes: null,
+				usageDurationMs: null,
+				usageEffectRetryAt: null,
+				usageEffectLease: null,
+				usageEffectLeaseAt: null,
+				subscriptionEffectState: null,
+				subscriptionEffectLease: null,
+				subscriptionEffectLeaseAt: null,
+				subscriptionEffectRetryAt: null,
+				subscriptionEffectAttemptCount: null,
+				subscriptionEffectDeadLetterAt: null,
+				subscriptionEffectLastError: null,
+				createdAt: input.now,
+				updatedAt: input.now,
+			})
+			this.store.writeDeliveryEventRow(
+				event(
+					aggregateId,
+					JSON.stringify({
+						aggregate: true,
+						day: input.day,
+						count,
+						last_reason: input.reason,
+						last_phase: input.phase,
+						last_at: input.now,
+					}),
+				),
+			)
+			if (count <= Math.max(0, Math.trunc(input.detailLimit))) {
+				detailed = this.store.writeDeliveryEventRow(
+					event(
+						input.detailEventId,
+						JSON.stringify({
+							recipient: input.recipient,
+							reason: input.reason,
+							phase: input.phase,
+						}),
+					),
+				).inserted
 			}
 		})
-		this.markRetentionDirty()
-		await this.ensureRetentionAlarm()
-		return { ok: true, accepted }
+		await this.maintenance.markDirtyAndEnsure()
+		return { count, detailed }
 	}
 
 	async upsertDeliveryEvent(input: {
@@ -342,8 +303,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 				}
 			}
 		})
-		this.markRetentionDirty()
-		await this.ensureRetentionAlarm()
+		await this.maintenance.markDirtyAndEnsure()
 		return { inserted, accepted, updatedLatestStatus }
 	}
 
@@ -357,8 +317,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 			result = upsertMailboxDeliveryEvents(this.ctx.storage.sql, input.events)
 		})
 		if (!result) throw new Error('Mailbox upsert transaction did not run.')
-		this.markRetentionDirty()
-		await this.ensureRetentionAlarm()
+		await this.maintenance.markDirtyAndEnsure()
 		return result
 	}
 
@@ -373,8 +332,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		})
 		if (!result) throw new Error('Mailbox bootstrap transaction did not run.')
 		if (result.inserted > 0) {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
+			await this.maintenance.markDirtyAndEnsure()
 		}
 		return result
 	}
@@ -396,8 +354,8 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 	}
 
 	/**
-	 * Partial delivery/processing update for dual-write parity. Equal/newer
-	 * `updatedAt` only.
+	 * Partial authoritative delivery/processing update. Equal/newer `updatedAt`
+	 * only.
 	 */
 	async updateMessageDelivery(
 		input: MailboxUpdateMessageDeliveryInput,
@@ -412,8 +370,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 	}
 
 	/**
-	 * Partial classification update for dual-write parity. Equal/newer
-	 * `updatedAt` only.
+	 * Partial authoritative classification update. Equal/newer `updatedAt` only.
 	 */
 	async setMessageClassification(
 		input: MailboxSetMessageClassificationInput,
@@ -451,14 +408,14 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 
 	/**
 	 * Delete canonical owner-safe R2 objects before atomically deleting one
-	 * message graph. Blocking input concurrency prevents a mirror/update from
+	 * message graph. Blocking input concurrency prevents an update from
 	 * interleaving across the asynchronous R2 delete boundary.
 	 */
 	async deleteMessageWithBlobs(input: {
 		ownerId: string
 		messageId: string
 	}): Promise<MailboxDeleteMessageWithBlobsResult> {
-		return await this.blockConcurrencySafely(async () => {
+		return await this.maintenance.blockConcurrencySafely(async () => {
 			const ownerId = this.store.assertOwner(input.ownerId)
 			const messageId = assertMailboxNonEmptyString(
 				input.messageId,
@@ -493,6 +450,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 			})
 			return {
 				status: 'deleted',
+				providerMessageId: message.providerMessageId,
 				attachmentsSeen: attachments.length,
 				externalAttachmentsSeen: attachments.filter(
 					(attachment) => attachment.storageKind === 'external',
@@ -554,6 +512,14 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return this.store.getThread(input.threadId)
 	}
 
+	async findThreadForInboundMessage(input: {
+		inboxId?: string | null
+		references: Array<string>
+		inReplyToHeader?: string | null
+	}): Promise<MailboxThreadRecord | null> {
+		return this.store.findThreadForInboundMessage(input)
+	}
+
 	async getMessage(input: {
 		messageId: string
 	}): Promise<MailboxMessageRecord | null> {
@@ -613,6 +579,37 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		return this.store.listDeliveryEvents(input)
 	}
 
+	async countDeliveryEvents(input: {
+		ownerId: string
+		eventType: EmailDeliveryEventType
+		provider: string
+		createdAtGte: string
+	}): Promise<{ count: number }> {
+		this.store.assertOwner(input.ownerId)
+		const row = this.ctx.storage.sql
+			.exec<{ count: number }>(
+				`SELECT COUNT(*) AS count
+				FROM email_delivery_events
+				WHERE event_type = ?
+					AND provider = ?
+					AND created_at >= ?`,
+				input.eventType,
+				input.provider,
+				input.createdAtGte,
+			)
+			.one()
+		return { count: Number(row.count) }
+	}
+
+	async getDeliveryEventByProviderEventId(input: {
+		providerEventId: string
+	}): Promise<MailboxDeliveryEventRecord | null> {
+		return findDeliveryEventByProviderEventId(
+			this.ctx.storage.sql,
+			input.providerEventId,
+		)
+	}
+
 	async countMailbox(): Promise<MailboxCountResult> {
 		return this.store.countMailbox()
 	}
@@ -635,8 +632,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		ownerId: string
 		deliveryId: string
 	}): Promise<MailboxInboundDeliverySnapshot | null> {
-		this.store.assertOwner(input.ownerId)
-		return getMailboxInboundDelivery(this.ctx.storage.sql, input.deliveryId)
+		return this.inbound.getInboundDelivery(input)
 	}
 
 	async getInboundDeliveryWindow(input: {
@@ -644,8 +640,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		fingerprint: string
 		now?: string
 	}): Promise<MailboxInboundDeliverySnapshot | null> {
-		this.store.assertOwner(input.ownerId)
-		return getMailboxInboundDeliveryWindow(this.ctx.storage.sql, input)
+		return this.inbound.getInboundDeliveryWindow(input)
 	}
 
 	async claimInboundDeliveryWindow(input: {
@@ -653,14 +648,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		delivery: MailboxInboundDeliveryInsertInput
 		now?: string
 	}): Promise<MailboxInboundDeliverySnapshot> {
-		let result!: MailboxInboundDeliverySnapshot
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundDeliveryWindow(this.ctx.storage.sql, input)
-		})
-		this.markRetentionDirty()
-		await this.ensureRetentionAlarm()
-		return result
+		return await this.inbound.claimInboundDeliveryWindow(input)
 	}
 
 	async insertChargedPendingInboundDelivery(input: {
@@ -668,19 +656,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		delivery: MailboxInboundDeliveryInsertInput
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['insertChargedPendingInboundDelivery']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = insertMailboxChargedPendingInboundDelivery(
-				this.ctx.storage.sql,
-				input,
-			)
-		})
-		this.markRetentionDirty()
-		await this.ensureRetentionAlarm()
-		return result
+		return await this.inbound.insertChargedPendingInboundDelivery(input)
 	}
 
 	async claimInboundDeliveryStorage(input: {
@@ -690,16 +666,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		usageStartedAt?: string | null
 		now?: string
 	}) {
-		let result!: Awaited<ReturnType<MailboxRpc['claimInboundDeliveryStorage']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundDeliveryStorage(this.ctx.storage.sql, input)
-		})
-		if (result.status === 'claimed') {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
-		}
-		return result
+		return await this.inbound.claimInboundDeliveryStorage(input)
 	}
 
 	async releaseInboundDeliveryStorage(input: {
@@ -708,18 +675,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		storageLease: string
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['releaseInboundDeliveryStorage']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = releaseMailboxInboundDeliveryStorage(this.ctx.storage.sql, input)
-		})
-		if (result.status === 'released') {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
-		}
-		return result
+		return await this.inbound.releaseInboundDeliveryStorage(input)
 	}
 
 	async markInboundDeliveryRejected(input: {
@@ -730,16 +686,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		expectedState?: MailboxInboundDeliveryState
 		now?: string
 	}) {
-		let result!: Awaited<ReturnType<MailboxRpc['markInboundDeliveryRejected']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = markMailboxInboundDeliveryRejected(this.ctx.storage.sql, input)
-		})
-		if (result.status === 'rejected') {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
-		}
-		return result
+		return await this.inbound.markInboundDeliveryRejected(input)
 	}
 
 	async markInboundDeliveryReceived(input: {
@@ -751,16 +698,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		usageBytes: number
 		now?: string
 	}) {
-		let result!: Awaited<ReturnType<MailboxRpc['markInboundDeliveryReceived']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = markMailboxInboundDeliveryReceived(this.ctx.storage.sql, input)
-		})
-		if (result.status === 'received') {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
-		}
-		return result
+		return await this.inbound.markInboundDeliveryReceived(input)
 	}
 
 	async pruneExpiredInboundDedupePointers(input: {
@@ -768,21 +706,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		now?: string
 		limit?: number
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['pruneExpiredInboundDedupePointers']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = pruneMailboxExpiredInboundDedupePointers(
-				this.ctx.storage.sql,
-				input,
-			)
-		})
-		if (result.pruned > 0) {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
-		}
-		return result
+		return await this.inbound.pruneExpiredInboundDedupePointers(input)
 	}
 
 	async deferInboundDeliveryReconciliation(input: {
@@ -790,21 +714,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		deliveryId: string
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['deferInboundDeliveryReconciliation']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = deferMailboxInboundDeliveryReconciliation(
-				this.ctx.storage.sql,
-				input,
-			)
-		})
-		if (result.status === 'deferred') {
-			this.markRetentionDirty()
-			await this.ensureRetentionAlarm()
-		}
-		return result
+		return await this.inbound.deferInboundDeliveryReconciliation(input)
 	}
 
 	async claimInboundDeliveryCleanup(input: {
@@ -815,12 +725,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		staleBefore: string
 		now?: string
 	}) {
-		let result!: Awaited<ReturnType<MailboxRpc['claimInboundDeliveryCleanup']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundDeliveryCleanup(this.ctx.storage.sql, input)
-		})
-		return result
+		return this.inbound.claimInboundDeliveryCleanup(input)
 	}
 
 	async releaseInboundDeliveryCleanup(input: {
@@ -829,14 +734,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		cleanupLease: string
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['releaseInboundDeliveryCleanup']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = releaseMailboxInboundDeliveryCleanup(this.ctx.storage.sql, input)
-		})
-		return result
+		return this.inbound.releaseInboundDeliveryCleanup(input)
 	}
 
 	async markInboundDeliveryOrphanCleaned(input: {
@@ -846,17 +744,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		outcome: 'deleted' | 'delete-failed'
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['markInboundDeliveryOrphanCleaned']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = markMailboxInboundDeliveryOrphanCleaned(
-				this.ctx.storage.sql,
-				input,
-			)
-		})
-		return result
+		return this.inbound.markInboundDeliveryOrphanCleaned(input)
 	}
 
 	async claimInboundUsageEffect(input: {
@@ -865,12 +753,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		expectedFinalizationToken?: string | null
 		now?: string
 	}) {
-		let result!: Awaited<ReturnType<MailboxRpc['claimInboundUsageEffect']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundUsageEffect(this.ctx.storage.sql, input)
-		})
-		return result
+		return this.inbound.claimInboundUsageEffect(input)
 	}
 
 	async completeInboundUsageEffect(input: {
@@ -884,12 +767,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		usageDurationMs: number
 		now?: string
 	}) {
-		let result!: Awaited<ReturnType<MailboxRpc['completeInboundUsageEffect']>>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = completeMailboxInboundUsageEffect(this.ctx.storage.sql, input)
-		})
-		return result
+		return this.inbound.completeInboundUsageEffect(input)
 	}
 
 	async claimInboundSubscriptionEffect(input: {
@@ -898,17 +776,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		expectedFinalizationToken?: string | null
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['claimInboundSubscriptionEffect']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = claimMailboxInboundSubscriptionEffect(
-				this.ctx.storage.sql,
-				input,
-			)
-		})
-		return result
+		return this.inbound.claimInboundSubscriptionEffect(input)
 	}
 
 	async completeInboundSubscriptionEffect(input: {
@@ -920,17 +788,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		suppressionReason?: string | null
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['completeInboundSubscriptionEffect']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = completeMailboxInboundSubscriptionEffect(
-				this.ctx.storage.sql,
-				input,
-			)
-		})
-		return result
+		return this.inbound.completeInboundSubscriptionEffect(input)
 	}
 
 	async failInboundSubscriptionEffect(input: {
@@ -941,14 +799,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		error: string
 		now?: string
 	}) {
-		let result!: Awaited<
-			ReturnType<MailboxRpc['failInboundSubscriptionEffect']>
-		>
-		this.ctx.storage.transactionSync(() => {
-			this.store.assertOwner(input.ownerId)
-			result = failMailboxInboundSubscriptionEffect(this.ctx.storage.sql, input)
-		})
-		return result
+		return this.inbound.failInboundSubscriptionEffect(input)
 	}
 
 	async listDueStaleInboundDeliveries(input: {
@@ -956,8 +807,7 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		now?: string
 		limit?: number
 	}) {
-		this.store.assertOwner(input.ownerId)
-		return listMailboxDueStaleInboundDeliveries(this.ctx.storage.sql, input)
+		return this.inbound.listDueStaleInboundDeliveries(input)
 	}
 
 	async listDueInboundEffectWork(input: {
@@ -965,31 +815,20 @@ class MailboxBase extends DurableObject<Env> implements MailboxRpc {
 		now?: string
 		limit?: number
 	}) {
-		this.store.assertOwner(input.ownerId)
-		return listMailboxDueInboundEffectWork(this.ctx.storage.sql, input)
+		return this.inbound.listDueInboundEffectWork(input)
 	}
 
-	async purgeForParityRebuild(input: {
+	async getInboundDueWorkHint(input: {
 		ownerId: string
-	}): Promise<{ ok: true }> {
-		await this.blockConcurrencySafely(async () => {
-			this.ctx.storage.transactionSync(() => {
-				this.store.assertOwner(input.ownerId)
-				this.store.purgeMetadataPreservingTombstones()
-			})
-			await this.ctx.storage.deleteAlarm().catch(() => undefined)
-			this.retentionAlarmArmed = false
-			this.retentionIdleConfirmed = true
-		})
-		return { ok: true }
+	}): Promise<{ dueAt: string | null }> {
+		return this.inbound.getInboundDueWorkHint(input)
 	}
 
 	async purge(): Promise<{ ok: true }> {
 		await this.ctx.blockConcurrencyWhile(async () => {
 			await this.ctx.storage.deleteAlarm().catch(() => undefined)
 			await this.ctx.storage.deleteAll()
-			this.retentionAlarmArmed = false
-			this.retentionIdleConfirmed = true
+			this.maintenance.resetAfterPurge()
 			this.store.initializeSchema()
 		})
 		return { ok: true }

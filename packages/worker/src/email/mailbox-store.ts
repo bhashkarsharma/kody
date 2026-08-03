@@ -513,6 +513,34 @@ export class MailboxStore {
 		return row ? mapMailboxThreadRow(row) : null
 	}
 
+	findThreadForInboundMessage(input: {
+		inboxId?: string | null
+		references: Array<string>
+		inReplyToHeader?: string | null
+	}): MailboxThreadRecord | null {
+		const headers = [
+			...input.references,
+			...(input.inReplyToHeader ? [input.inReplyToHeader] : []),
+		].filter(Boolean)
+		for (const header of headers) {
+			const row = this.sql
+				.exec<Record<string, SqlStorageValue>>(
+					`SELECT thread.*
+					FROM email_threads AS thread
+					JOIN email_messages AS message ON message.thread_id = thread.id
+					WHERE (? IS NULL OR thread.inbox_id = ?)
+						AND message.message_id_header = ?
+					LIMIT 1`,
+					input.inboxId ?? null,
+					input.inboxId ?? null,
+					header,
+				)
+				.toArray()[0]
+			if (row) return mapMailboxThreadRow(row)
+		}
+		return null
+	}
+
 	getMessage(messageId: string): MailboxMessageRecord | null {
 		const row = this.sql
 			.exec<Record<string, SqlStorageValue>>(
@@ -873,14 +901,6 @@ export class MailboxStore {
 			writeMailboxMessageDeletionTombstone(this.sql, input)
 			this.deleteMessageCascade(input.messageId)
 		})
-	}
-
-	purgeMetadataPreservingTombstones() {
-		this.sql.exec(`DELETE FROM email_delivery_events`)
-		this.sql.exec(`DELETE FROM email_attachments`)
-		this.sql.exec(`DELETE FROM email_message_retention_retries`)
-		this.sql.exec(`DELETE FROM email_messages`)
-		this.sql.exec(`DELETE FROM email_threads`)
 	}
 
 	pruneExpiredDeliveryEvents(input: { cutoff: string; limit: number }) {

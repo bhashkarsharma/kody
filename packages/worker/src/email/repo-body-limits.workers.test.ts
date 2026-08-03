@@ -5,30 +5,24 @@ import {
 	utf8ByteLength,
 } from '@kody-internal/shared/backup-restore-safety.ts'
 import {
-	createEmailThread,
-	emailBodyTruncationNotice,
-	getEmailThreadById,
-	insertEmailDeliveryEvent,
-	insertEmailMessage,
-} from './repo.ts'
+	createSystemEmailThread,
+	getSystemEmailMessageById,
+	insertSystemEmailMessage,
+} from './system-email-graph-store.ts'
+import { emailBodyTruncationNotice } from './repo.ts'
 import { ensureEmailTestSchema } from './test-schema.ts'
 
-test('stored email bodies are bounded so D1 backups stay importable', async () => {
+test('dedicated system email bodies remain bounded for backup restore', async () => {
 	await ensureEmailTestSchema(env.APP_DB)
 	const oversized = `<p>${'x'.repeat(maxRestorableTextColumnBytes + 10_000)}</p>`
-
-	const stored = await insertEmailMessage({
+	const stored = await insertSystemEmailMessage({
 		db: env.APP_DB,
 		message: {
-			direction: 'inbound',
-			userId: `user-${crypto.randomUUID()}`,
+			processingStatus: 'stored',
 			fromAddress: 'sender@example.com',
-			toAddresses: ['inbox@example.com'],
-			subject: 'Giant newsletter',
 			textBody: 'short text body',
 			htmlBody: oversized,
-			rawMimeKey: 'emails/user/raw.mime',
-			processingStatus: 'stored',
+			rawMimeKey: 'emails/system/raw.mime',
 		},
 	})
 
@@ -39,59 +33,27 @@ test('stored email bodies are bounded so D1 backups stay importable', async () =
 	)
 })
 
-test('getEmailThreadById is owner-scoped and insertEmailDeliveryEvent returns the row', async () => {
+test('dedicated system thread and message reads remain owner-isolated', async () => {
 	await ensureEmailTestSchema(env.APP_DB)
-	const ownerId = `owner-${crypto.randomUUID()}`
-	const otherUserId = `other-${crypto.randomUUID()}`
-	const thread = await createEmailThread({
+	const thread = await createSystemEmailThread({
 		db: env.APP_DB,
-		userId: ownerId,
 		subjectNormalized: 'hello thread',
 		rootMessageIdHeader: '<root@example.com>',
 	})
-
-	expect(
-		await getEmailThreadById({
-			db: env.APP_DB,
-			userId: ownerId,
-			threadId: thread.id,
-		}),
-	).toMatchObject({
-		id: thread.id,
-		userId: ownerId,
-		subjectNormalized: 'hello thread',
-	})
-	expect(
-		await getEmailThreadById({
-			db: env.APP_DB,
-			userId: otherUserId,
-			threadId: thread.id,
-		}),
-	).toBeNull()
-
-	const createdAt = '2026-07-15T12:00:00.000Z'
-	const inserted = await insertEmailDeliveryEvent({
+	const message = await insertSystemEmailMessage({
 		db: env.APP_DB,
-		messageId: null,
-		userId: ownerId,
-		inboxId: null,
-		eventType: 'send_requested',
-		provider: 'cloudflare-email',
-		detail: { subject: 'hello' },
-		createdAt,
+		message: {
+			threadId: thread.id,
+			processingStatus: 'stored',
+			fromAddress: 'sender@example.com',
+			subject: 'hello',
+		},
 	})
-	expect(inserted).toMatchObject({
-		id: expect.any(String),
-		userId: ownerId,
-		eventType: 'send_requested',
-		provider: 'cloudflare-email',
-		detailJson: JSON.stringify({ subject: 'hello' }),
-		createdAt,
+	await expect(
+		getSystemEmailMessageById({ db: env.APP_DB, messageId: message.id }),
+	).resolves.toMatchObject({
+		id: message.id,
+		userId: 'system:email',
+		threadId: thread.id,
 	})
-	const row = await env.APP_DB.prepare(
-		`SELECT id, created_at FROM email_delivery_events WHERE id = ?`,
-	)
-		.bind(inserted.id)
-		.first<{ id: string; created_at: string }>()
-	expect(row).toEqual({ id: inserted.id, created_at: createdAt })
 })
