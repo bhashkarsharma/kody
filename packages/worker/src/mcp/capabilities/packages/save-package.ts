@@ -8,6 +8,10 @@ import { ensureEntitySource } from '#worker/repo/source-service.ts'
 import { syncArtifactSourceSnapshot } from '#worker/repo/source-sync.ts'
 import { getEntitySourceByEntity } from '#worker/repo/entity-sources.ts'
 import {
+	buildRepoLargeFileMessage,
+	findOversizedRepoSourceFile,
+} from '#worker/repo/large-file-policy.ts'
+import {
 	assertPackageSourceOverwriteAllowed,
 	assertPackagePrivateVisibilityChangeAllowed,
 	defaultPackagePrivateGuidance,
@@ -195,6 +199,12 @@ export const savePackageCapability = defineDomainCapability(
 				})
 				packageJsonContent = injectDefaultPrivateField(packageJsonContent)
 				files = { ...files, 'package.json': packageJsonContent }
+			}
+			// Gate on the final file set (after injectDefaultPrivateField) so the
+			// exact bytes handed to syncArtifactSourceSnapshot are what was checked.
+			const oversizedFile = findOversizedRepoSourceFile(Object.entries(files))
+			if (oversizedFile) {
+				throw new McpCallerError(buildRepoLargeFileMessage(oversizedFile))
 			}
 			const manifest = parseSavedPackageManifest({
 				content: packageJsonContent,

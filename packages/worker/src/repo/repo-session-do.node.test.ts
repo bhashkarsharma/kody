@@ -306,8 +306,38 @@ vi.mock('@cloudflare/shell', () => ({
 		constructor(_workspace: unknown) {}
 	},
 	createWorkspaceStateBackend: vi.fn(() => ({
-		planEdits: vi.fn(),
-		applyEditPlan: vi.fn(),
+		// Mirror the real backend closely enough for the applyEdits size gate:
+		// planned edits carry the resulting content per instruction.
+		planEdits: vi.fn(
+			async (
+				instructions: Array<{ kind: string; path: string; content?: string }>,
+			) => ({
+				edits: instructions.map((instruction) => ({
+					instruction,
+					path: instruction.path,
+					changed: true,
+					content: instruction.content ?? '',
+					diff: '',
+				})),
+				totalChanged: instructions.length,
+				totalInstructions: instructions.length,
+			}),
+		),
+		applyEditPlan: vi.fn(
+			async (plan: {
+				edits: Array<{ path: string; content: string; diff: string }>
+				totalChanged: number
+			}) => ({
+				dryRun: false,
+				totalChanged: plan.totalChanged,
+				edits: plan.edits.map((edit) => ({
+					path: edit.path,
+					changed: true,
+					content: edit.content,
+					diff: edit.diff,
+				})),
+			}),
+		),
 		walkTree: vi.fn(),
 	})),
 }))
@@ -403,6 +433,7 @@ vi.mock('#worker/package-registry/repo.ts', () => ({
 const { RepoSession } = await import('./repo-session-do.ts')
 const { deleteRepoSession, insertRepoSession } =
 	await import('./repo-sessions.ts')
+const { maxRepoSourceFileBytes } = await import('./large-file-policy.ts')
 
 function createDurableObjectState() {
 	const storageState = new Map<string, unknown>()
@@ -759,6 +790,61 @@ test('runCommands applies git apply patches (modify, delete, and rename)', async
 			content: 'export const name = "new"\n',
 		}),
 	)
+})
+
+test('git apply is all-or-nothing when a later patch exceeds the size limit', async () => {
+	setCommonSessionFixtures()
+	mockModule.workspaceReadFile.mockImplementation(async (path: string) => {
+		if (path === '/session/src/keep.ts') return 'export const keep = false\n'
+		return ''
+	})
+	const repoSession = new RepoSession(createDurableObjectState(), createEnv())
+
+	const oversizedLine = 'x'.repeat(maxRepoSourceFileBytes + 1)
+	await expect(
+		repoSession.runCommands({
+			sessionId: 'session-1',
+			userId: 'user-1',
+			runChecks: false,
+			publish: false,
+			commands: [
+				"git apply <<'PATCH'",
+				'--- a/src/keep.ts',
+				'+++ b/src/keep.ts',
+				'@@ -1 +1 @@',
+				'-export const keep = false',
+				'+export const keep = true',
+				'--- /dev/null',
+				'+++ b/assets/huge.txt',
+				'@@ -0,0 +1 @@',
+				`+${oversizedLine}`,
+				'PATCH',
+			].join('\n'),
+		}),
+	).rejects.toThrow(/"assets\/huge\.txt".*per-file limit/s)
+	// The valid first patch must not have been written before the failure.
+	expect(mockModule.workspaceWriteFile).not.toHaveBeenCalled()
+	expect(mockModule.workspaceRm).not.toHaveBeenCalled()
+})
+
+test('applyEdits rejects a write over the per-file repo size limit with hosting guidance', async () => {
+	setCommonSessionFixtures()
+	const repoSession = new RepoSession(createDurableObjectState(), createEnv())
+
+	await expect(
+		repoSession.applyEdits({
+			sessionId: 'session-1',
+			userId: 'user-1',
+			edits: [
+				{
+					kind: 'write',
+					path: 'assets/dataset.csv',
+					content: 'x'.repeat(maxRepoSourceFileBytes + 1),
+				},
+			],
+		}),
+	).rejects.toThrow(/"assets\/dataset\.csv".*per-file limit.*Cloudflare R2/s)
+	expect(mockModule.workspaceWriteFile).not.toHaveBeenCalled()
 })
 
 test('runCommands rejects publish without checks for direct RPC callers', async () => {

@@ -5,6 +5,10 @@ import {
 	writeMockArtifactSnapshot,
 } from './artifacts.ts'
 import { getEntitySourceById, updateEntitySource } from './entity-sources.ts'
+import {
+	buildRepoLargeFileMessage,
+	findOversizedRepoSourceFile,
+} from './large-file-policy.ts'
 import { parseAuthoredPackageJson } from '#worker/package-registry/manifest.ts'
 import { parseRepoManifest } from './manifest.ts'
 import { repoSessionRpc } from './repo-session-do.ts'
@@ -104,6 +108,14 @@ export async function syncArtifactSourceSnapshot(
 	}
 	const source = await getEntitySourceById(input.env.APP_DB, input.sourceId)
 	if (!source) return null
+	// Per-user isolation: every caller passes the owning user's id (fleet
+	// codemods pass the package owner, not the acting admin). A mismatch means
+	// a bug upstream, so fail closed before any repo write.
+	if (source.user_id !== input.userId) {
+		throw new Error(
+			'Entity source ownership mismatch: refusing to sync a repo snapshot for another user.',
+		)
+	}
 	const sessionId = buildSyncSessionId(source.id)
 	const session = repoSessionRpc(input.env, sessionId)
 	const edits = Object.entries(input.files).map(([path, content]) => ({
@@ -117,6 +129,14 @@ export async function syncArtifactSourceSnapshot(
 				input.bootstrapAccess?.remote &&
 				isLoopbackArtifactsRemote(input.bootstrapAccess.remote)
 			) {
+				// The local-dev mock lane skips the RepoSession applyEdits gate, so
+				// enforce the per-file limit here for dev/prod parity.
+				const oversizedFile = findOversizedRepoSourceFile(
+					Object.entries(input.files),
+				)
+				if (oversizedFile) {
+					throw new Error(buildRepoLargeFileMessage(oversizedFile))
+				}
 				const snapshot = await writeMockArtifactSnapshot({
 					env: input.env,
 					repoId: source.repo_id,

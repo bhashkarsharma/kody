@@ -43,6 +43,10 @@ import {
 	isolatedBundleChunkSize,
 	type IsolatedCheckPhaseRunner,
 } from './isolated-check-phases.ts'
+import {
+	buildRepoLargeFileMessage,
+	maxRepoSourceFileBytes,
+} from './large-file-policy.ts'
 import { normalizeRepoWorkspacePath } from './manifest.ts'
 
 export type RepoCheckKind =
@@ -218,9 +222,11 @@ async function* workspaceFilesForSnapshot(input: {
 	workspace: {
 		glob(pattern: string): Promise<Array<{ path: string; type: string }>>
 		readFile(path: string): Promise<string | null>
+		stat?(path: string): Promise<{ size: number } | null>
 	}
 	root: string
 }) {
+	const encoder = new TextEncoder()
 	const normalizedRoot = normalizeRepoWorkspacePath(input.root).replace(
 		/\/+$/,
 		'',
@@ -237,7 +243,14 @@ async function* workspaceFilesForSnapshot(input: {
 			normalizedRoot && normalizedPath.startsWith(`${normalizedRoot}/`)
 				? normalizedPath.slice(normalizedRoot.length + 1)
 				: normalizedPath
-		yield [relativePath, content] as const
+		// Prefer the filesystem's byte size: readFile UTF-8-decodes binary
+		// blobs lossily, so re-encoding the string can overstate a binary
+		// file's size by up to 3x.
+		const stats = input.workspace.stat
+			? await input.workspace.stat(file.path)
+			: null
+		const byteLength = stats?.size ?? encoder.encode(content).byteLength
+		yield [relativePath, content, byteLength] as const
 	}
 }
 
@@ -1084,6 +1097,12 @@ export async function runRepoChecks(input: {
 	workspace: {
 		readFile(path: string): Promise<string | null>
 		glob(pattern: string): Promise<Array<{ path: string; type: string }>>
+		/**
+		 * Optional true byte size. When present (the real @cloudflare/shell
+		 * workspace), per-file size checks use it so binary files are measured
+		 * exactly instead of via lossy UTF-8 round-tripping.
+		 */
+		stat?(path: string): Promise<{ size: number } | null>
 	}
 	manifestPath: string
 	sourceRoot: string
@@ -1148,10 +1167,9 @@ export async function runRepoChecks(input: {
 	)
 	const sourceWalk = await (async () => {
 		const collected: Record<string, string> = {}
-		const encoder = new TextEncoder()
 		let fileCount = 0
 		let totalBytes = 0
-		for await (const [path, content] of workspaceFilesForSnapshot({
+		for await (const [path, content, fileBytes] of workspaceFilesForSnapshot({
 			workspace: input.workspace,
 			root: sourceRoot,
 		})) {
@@ -1162,7 +1180,16 @@ export async function runRepoChecks(input: {
 					message: `Repo checks aborted: source root "${sourceRoot || '/'}" contains more than the ${repoChecksSourceMaxFiles}-file publish check limit. Remove files that should not be published (for example build output, vendored dependencies, or data files) and run the checks again.`,
 				}
 			}
-			totalBytes += encoder.encode(content).byteLength
+			if (fileBytes > maxRepoSourceFileBytes) {
+				return {
+					ok: false as const,
+					message: `Repo checks aborted: ${buildRepoLargeFileMessage({
+						path,
+						byteLength: fileBytes,
+					})}`,
+				}
+			}
+			totalBytes += fileBytes
 			if (totalBytes > repoChecksSourceMaxTotalBytes) {
 				return {
 					ok: false as const,

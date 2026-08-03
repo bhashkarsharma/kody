@@ -104,6 +104,11 @@ import {
 	parseRepoGitCommands,
 } from './repo-session-commands.ts'
 import { createIsomorphicGitFs } from './isomorphic-git-fs.ts'
+import {
+	buildRepoLargeFileMessage,
+	maxRepoSourceFileBytes,
+	measureRepoSourceFileBytes,
+} from './large-file-policy.ts'
 
 const repoSessionWorkspacePrefix = '/session'
 const lastCheckStatusStorageKey = 'repo-session:last-check-status'
@@ -779,6 +784,25 @@ class RepoSessionBase extends DurableObject<Env> {
 				}
 			}),
 		)
+		// Gate on planned results rather than raw instructions so replace and
+		// writeJson edits cannot grow a file past the per-file limit either.
+		// Unchanged entries are skipped so a no-op edit touching a grandfathered
+		// oversized file does not fail the batch.
+		for (const plannedEdit of plan.edits) {
+			if (!plannedEdit.changed) continue
+			const byteLength = measureRepoSourceFileBytes(plannedEdit.content)
+			if (byteLength > maxRepoSourceFileBytes) {
+				throw new Error(
+					buildRepoLargeFileMessage({
+						path: toExternalRepoPath(
+							plannedEdit.path,
+							repoSessionWorkspacePrefix,
+						),
+						byteLength,
+					}),
+				)
+			}
+		}
 		const result = await this.state.applyEditPlan(plan, {
 			dryRun: input.dryRun,
 			rollbackOnError: input.rollbackOnError,
@@ -1287,6 +1311,12 @@ class RepoSessionBase extends DurableObject<Env> {
 			input.sessionId,
 			input.userId,
 		)
+		const byteLength = measureRepoSourceFileBytes(input.content)
+		if (byteLength > maxRepoSourceFileBytes) {
+			throw new Error(
+				buildRepoLargeFileMessage({ path: input.path, byteLength }),
+			)
+		}
 		await this.workspace.writeFile(
 			resolveRepoWorkspacePath(input.path, repoSessionWorkspacePrefix),
 			input.content,
@@ -1350,6 +1380,19 @@ class RepoSessionBase extends DurableObject<Env> {
 			content: string
 			diff: string
 		}> = []
+		// Two phases so a patch set is all-or-nothing: plan (and validate) every
+		// patch before any workspace mutation, so an unclean or oversized later
+		// patch cannot leave earlier patches partially applied. The staged
+		// overlay lets sequential patches in one set observe prior results in
+		// both dry-run and real apply.
+		const stagedContents = new Map<string, string | null>()
+		const plannedOps: Array<{
+			workspacePath: string
+			sourceWorkspacePath: string
+			isDelete: boolean
+			isRename: boolean
+			nextContent: string
+		}> = []
 		for (const patch of patches) {
 			const oldPath =
 				patch.oldFileName && patch.oldFileName !== '/dev/null'
@@ -1372,30 +1415,61 @@ class RepoSessionBase extends DurableObject<Env> {
 				sourcePath,
 				repoSessionWorkspacePrefix,
 			)
+			const stagedContent = stagedContents.get(sourceWorkspacePath)
 			const currentContent =
-				(await this.workspace.readFile(sourceWorkspacePath)) ?? ''
+				stagedContent !== undefined
+					? (stagedContent ?? '')
+					: ((await this.workspace.readFile(sourceWorkspacePath)) ?? '')
 			const nextContent = applyPatch(currentContent, patch)
 			if (nextContent === false) {
 				throw new Error(
 					`git apply patch did not apply cleanly to ${targetPath}.`,
 				)
 			}
-			if (!input.dryRun) {
-				if (patch.newFileName === '/dev/null') {
-					await this.workspace.rm(workspacePath, { force: true })
-				} else {
-					await this.workspace.writeFile(workspacePath, nextContent)
-					if (oldPath && newPath && oldPath !== newPath) {
-						await this.workspace.rm(sourceWorkspacePath, { force: true })
-					}
+			const patchedByteLength = measureRepoSourceFileBytes(nextContent)
+			if (patchedByteLength > maxRepoSourceFileBytes) {
+				throw new Error(
+					buildRepoLargeFileMessage({
+						path: targetPath,
+						byteLength: patchedByteLength,
+					}),
+				)
+			}
+			const isDelete = patch.newFileName === '/dev/null'
+			const isRename = Boolean(oldPath && newPath && oldPath !== newPath)
+			if (isDelete) {
+				stagedContents.set(workspacePath, null)
+			} else {
+				stagedContents.set(workspacePath, nextContent)
+				if (isRename) {
+					stagedContents.set(sourceWorkspacePath, null)
 				}
 			}
+			plannedOps.push({
+				workspacePath,
+				sourceWorkspacePath,
+				isDelete,
+				isRename,
+				nextContent,
+			})
 			edits.push({
 				path: targetPath,
 				changed: nextContent !== currentContent,
 				content: nextContent,
 				diff: formatPatch(patch),
 			})
+		}
+		if (!input.dryRun) {
+			for (const op of plannedOps) {
+				if (op.isDelete) {
+					await this.workspace.rm(op.workspacePath, { force: true })
+				} else {
+					await this.workspace.writeFile(op.workspacePath, op.nextContent)
+					if (op.isRename) {
+						await this.workspace.rm(op.sourceWorkspacePath, { force: true })
+					}
+				}
+			}
 		}
 		return {
 			dryRun: input.dryRun ?? false,
