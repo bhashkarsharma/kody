@@ -535,6 +535,10 @@
 		{
 			"filename": "0130-system-email-graph-expand.sql",
 			"sha256": "214a39fc10a79389c8b0bac78adfe5be95f82077e9d02a7152101c41eb1c5d7f"
+		},
+		{
+			"filename": "0131-system-email-graph-authority.sql",
+			"sha256": "e2b8cecc90501c54c6a7391da9e2d0ab334c62c6ff749bbb128167a7db2480e8"
 		}
 	]
 }

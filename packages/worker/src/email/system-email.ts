@@ -1,9 +1,5 @@
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
 import { systemEmailOwnerId } from './email-owner.ts'
-import {
-	reconcileSystemEmailGraphFromLegacy,
-	type SystemEmailGraphMutationCounts,
-} from './system-email-graph-repo.ts'
 import { maxRawMimeBytes } from './parser.ts'
 import { buildPlatformEmailAddress } from './platform-address.ts'
 import {
@@ -16,6 +12,29 @@ import {
 	getEmailInboxByName,
 } from './repo.ts'
 import { type EmailInboxAddressRecord, type EmailInboxRecord } from './types.ts'
+import { assertSystemEmailGraphAuthority } from './system-email-authority.ts'
+import { systemEmailGraphColumnContracts } from './system-email-graph-columns.ts'
+import {
+	commitSystemEmailGraphBulkDeletes,
+	systemEmailGraphContract,
+} from './system-email-graph-transaction.ts'
+
+const threadContract = systemEmailGraphContract(
+	systemEmailGraphColumnContracts,
+	'threads',
+)
+const messageContract = systemEmailGraphContract(
+	systemEmailGraphColumnContracts,
+	'messages',
+)
+const attachmentContract = systemEmailGraphContract(
+	systemEmailGraphColumnContracts,
+	'attachments',
+)
+const deliveryEventContract = systemEmailGraphContract(
+	systemEmailGraphColumnContracts,
+	'deliveryEvents',
+)
 
 export { systemEmailOwnerId }
 
@@ -45,8 +64,11 @@ export const systemEmailLimits = {
  */
 export const systemEmailPruneTimeBudgetMs = 10_000
 
-/** D1 caps bound parameters per statement, so IN (...) deletes are chunked. */
-const systemEmailDeleteIdsMaxParameters = 100
+/**
+ * D1 caps bound parameters per statement at 100. Keep room for owner/cutoff
+ * fences used by the compatibility-mirror statements.
+ */
+const systemEmailDeleteIdsMaxParameters = 40
 
 const systemEmailLocalSet = new Set<string>(systemEmailLocals)
 
@@ -203,14 +225,13 @@ export async function refundSystemEmailDailyReceive(input: {
 export async function countStoredSystemEmailMessages(input: {
 	db: D1Database
 }) {
+	await assertSystemEmailGraphAuthority(input.db)
 	const row = await input.db
 		.prepare(
 			`SELECT COUNT(*) AS count
-			FROM email_messages
-			WHERE user_id = ?
-				AND direction = 'inbound'`,
+			FROM system_email_messages
+			WHERE direction = 'inbound'`,
 		)
-		.bind(systemEmailOwnerId)
 		.first<{ count: number }>()
 	return Number(row?.count ?? 0)
 }
@@ -232,8 +253,9 @@ async function listSystemEmailMessages(input: {
 	offset?: number
 	limit: number
 }) {
-	const where = [`user_id = ?`, `direction = 'inbound'`]
-	const bindings: Array<string | number> = [systemEmailOwnerId]
+	await assertSystemEmailGraphAuthority(input.db)
+	const where = [`direction = 'inbound'`]
+	const bindings: Array<string | number> = []
 	if (input.before) {
 		where.push(`created_at < ?`)
 		bindings.push(input.before)
@@ -250,7 +272,7 @@ async function listSystemEmailMessages(input: {
 	const result = await input.db
 		.prepare(
 			`SELECT id, created_at
-			FROM email_messages
+			FROM system_email_messages
 			WHERE ${where.join(' AND ')}
 			ORDER BY created_at DESC, id DESC
 			LIMIT ? OFFSET ?`,
@@ -265,9 +287,11 @@ async function deleteSystemEmailMessagesByIds(input: {
 	blobs: R2Bucket
 	messageIds: ReadonlyArray<string>
 }) {
+	await assertSystemEmailGraphAuthority(input.db)
 	const result = {
 		deletedMessages: 0,
 		deletedRawMimeBlobs: 0,
+		deletedAttachmentBlobs: 0,
 		blobDeleteErrors: 0,
 	}
 	for (
@@ -282,13 +306,25 @@ async function deleteSystemEmailMessagesByIds(input: {
 		const chunkPlaceholders = messageIds.map(() => '?').join(', ')
 		const { results } = await input.db
 			.prepare(
-				`SELECT id, user_id, raw_mime_key
-				FROM email_messages
+				`SELECT id, raw_mime_key
+				FROM system_email_messages
 				WHERE id IN (${chunkPlaceholders})`,
 			)
 			.bind(...messageIds)
-			.all<{ id: string; user_id: string; raw_mime_key: string | null }>()
+			.all<{ id: string; raw_mime_key: string | null }>()
 		const blobRows = results ?? []
+		const attachmentRows = await input.db
+			.prepare(
+				`SELECT storage_key
+				FROM system_email_attachments
+				WHERE message_id IN (${chunkPlaceholders})
+					AND storage_key IS NOT NULL`,
+			)
+			.bind(...messageIds)
+			.all<{ storage_key: string }>()
+		const attachmentBlobKeys = (attachmentRows.results ?? []).map(
+			(row) => row.storage_key,
+		)
 		// Delete R2 blobs before their rows, mirroring the user-mail retention
 		// policy: once a row is gone its keys are lost, so a failed blob delete
 		// would orphan the object forever. Deletes use the deterministic
@@ -297,14 +333,16 @@ async function deleteSystemEmailMessagesByIds(input: {
 		let deletableIds: ReadonlyArray<string> = messageIds
 		if (blobRows.length > 0) {
 			const blobRowIds = new Set(blobRows.map((row) => row.id))
-			const blobKeys = blobRows.map((row) =>
-				emailRawMimeKey(row.user_id, row.id),
-			)
+			const blobKeys = [
+				...blobRows.map((row) => emailRawMimeKey(systemEmailOwnerId, row.id)),
+				...attachmentBlobKeys,
+			]
 			try {
 				await input.blobs.delete(blobKeys)
 				result.deletedRawMimeBlobs += blobRows.filter(
 					(row) => row.raw_mime_key !== null,
 				).length
+				result.deletedAttachmentBlobs += attachmentBlobKeys.length
 			} catch (error) {
 				result.blobDeleteErrors += blobRows.length
 				deletableIds = messageIds.filter((id) => !blobRowIds.has(id))
@@ -313,28 +351,67 @@ async function deleteSystemEmailMessagesByIds(input: {
 		}
 		if (deletableIds.length === 0) continue
 		const placeholders = deletableIds.map(() => '?').join(', ')
-		await input.db
-			.prepare(
-				`DELETE FROM email_attachments
-				WHERE message_id IN (${placeholders})`,
-			)
-			.bind(...deletableIds)
-			.run()
-		await input.db
-			.prepare(
-				`DELETE FROM email_delivery_events
-				WHERE message_id IN (${placeholders})`,
-			)
-			.bind(...deletableIds)
-			.run()
-		// Provider-index rows cascade via FK ON DELETE CASCADE from email_messages.
-		await input.db
-			.prepare(
-				`DELETE FROM email_messages
-				WHERE id IN (${placeholders})`,
-			)
-			.bind(...deletableIds)
-			.run()
+		await commitSystemEmailGraphBulkDeletes({
+			db: input.db,
+			mutations: [
+				{
+					contract: attachmentContract,
+					ids: deletableIds,
+					matchColumn: 'message_id',
+					dedicated: input.db
+						.prepare(
+							`DELETE FROM system_email_attachments
+					WHERE message_id IN (${placeholders})`,
+						)
+						.bind(...deletableIds),
+					legacy: input.db
+						.prepare(
+							`DELETE FROM email_attachments
+					WHERE message_id IN (${placeholders})
+						AND EXISTS (
+							SELECT 1 FROM email_messages
+							WHERE email_messages.id = email_attachments.message_id
+								AND email_messages.user_id = ?
+						)`,
+						)
+						.bind(...deletableIds, systemEmailOwnerId),
+				},
+				{
+					contract: deliveryEventContract,
+					ids: deletableIds,
+					matchColumn: 'message_id',
+					dedicated: input.db
+						.prepare(
+							`DELETE FROM system_email_delivery_events
+							WHERE message_id IN (${placeholders})`,
+						)
+						.bind(...deletableIds),
+					legacy: input.db
+						.prepare(
+							`DELETE FROM email_delivery_events
+					WHERE user_id = ? AND message_id IN (${placeholders})`,
+						)
+						.bind(systemEmailOwnerId, ...deletableIds),
+				},
+				{
+					contract: messageContract,
+					ids: deletableIds,
+					matchColumn: 'id',
+					dedicated: input.db
+						.prepare(
+							`DELETE FROM system_email_messages
+							WHERE id IN (${placeholders})`,
+						)
+						.bind(...deletableIds),
+					legacy: input.db
+						.prepare(
+							`DELETE FROM email_messages
+					WHERE user_id = ? AND id IN (${placeholders})`,
+						)
+						.bind(systemEmailOwnerId, ...deletableIds),
+				},
+			],
+		})
 		result.deletedMessages += deletableIds.length
 	}
 	return result
@@ -346,23 +423,10 @@ export type SystemEmailRetentionResult = {
 	deletedCounters: number
 	deletedThreads: number
 	deletedRawMimeBlobs: number
+	deletedAttachmentBlobs: number
 	blobDeleteErrors: number
-	dedicatedGraphSync:
-		| {
-				status: 'reconciled'
-				upserted: SystemEmailGraphMutationCounts
-				deleted: SystemEmailGraphMutationCounts
-				referencedOwnerMismatchCount: number
-				parity: boolean
-		  }
-		| {
-				status: 'skipped'
-				reason: 'legacy-blob-delete-errors'
-				blobDeleteErrors: number
-		  }
-	warnings: Array<
-		'dedicated-graph-sync-skipped' | 'dedicated-graph-post-reconcile-mismatch'
-	>
+	authority: 'dedicated'
+	warnings: Array<'authority-row-delete-skipped'>
 }
 
 export async function pruneSystemEmailRetention(input: {
@@ -372,6 +436,7 @@ export async function pruneSystemEmailRetention(input: {
 	now?: Date
 	timeBudgetMs?: number
 }) {
+	await assertSystemEmailGraphAuthority(input.db)
 	const now = input.now ?? new Date()
 	const timeBudgetMs = input.timeBudgetMs ?? systemEmailPruneTimeBudgetMs
 	const deadlineMs = Date.now() + timeBudgetMs
@@ -386,22 +451,21 @@ export async function pruneSystemEmailRetention(input: {
 		deletedCounters: 0,
 		deletedThreads: 0,
 		deletedRawMimeBlobs: 0,
+		deletedAttachmentBlobs: 0,
 		blobDeleteErrors: 0,
-		dedicatedGraphSync: {
-			status: 'skipped',
-			reason: 'legacy-blob-delete-errors',
-			blobDeleteErrors: 0,
-		},
+		authority: 'dedicated',
 		warnings: [],
 	}
 
 	const addMessageDelete = (batch: {
 		deletedMessages: number
 		deletedRawMimeBlobs: number
+		deletedAttachmentBlobs: number
 		blobDeleteErrors: number
 	}) => {
 		result.deletedMessages += batch.deletedMessages
 		result.deletedRawMimeBlobs += batch.deletedRawMimeBlobs
+		result.deletedAttachmentBlobs += batch.deletedAttachmentBlobs
 		result.blobDeleteErrors += batch.blobDeleteErrors
 	}
 
@@ -449,24 +513,47 @@ export async function pruneSystemEmailRetention(input: {
 
 	let deletedEventsInBatch = 0
 	do {
-		const eventDelete = await input.db
+		const eventRows = await input.db
 			.prepare(
-				`DELETE FROM email_delivery_events
-				WHERE id IN (
-					SELECT id
-					FROM email_delivery_events
-					WHERE user_id = ?
-						AND created_at < ?
-					ORDER BY created_at ASC, id ASC
-					LIMIT ?
-				)`,
+				`SELECT id
+				FROM system_email_delivery_events
+				WHERE created_at < ?
+				ORDER BY created_at ASC, id ASC
+				LIMIT ?`,
 			)
-			.bind(systemEmailOwnerId, cutoffIso, systemEmailLimits.pruneBatchSize)
-			.run()
-		deletedEventsInBatch = eventDelete.meta.changes ?? 0
+			.bind(cutoffIso, systemEmailDeleteIdsMaxParameters)
+			.all<{ id: string }>()
+		const eventIds = (eventRows.results ?? []).map((row) => row.id)
+		deletedEventsInBatch = eventIds.length
+		if (eventIds.length > 0) {
+			const placeholders = eventIds.map(() => '?').join(', ')
+			const deletes = await commitSystemEmailGraphBulkDeletes({
+				db: input.db,
+				mutations: [
+					{
+						contract: deliveryEventContract,
+						ids: eventIds,
+						matchColumn: 'id',
+						dedicated: input.db
+							.prepare(
+								`DELETE FROM system_email_delivery_events
+								WHERE id IN (${placeholders})`,
+							)
+							.bind(...eventIds),
+						legacy: input.db
+							.prepare(
+								`DELETE FROM email_delivery_events
+								WHERE user_id = ? AND id IN (${placeholders})`,
+							)
+							.bind(systemEmailOwnerId, ...eventIds),
+					},
+				],
+			})
+			deletedEventsInBatch = Number(deletes[0]?.meta.changes ?? 0)
+		}
 		result.deletedDeliveryEvents += deletedEventsInBatch
 	} while (
-		deletedEventsInBatch >= systemEmailLimits.pruneBatchSize &&
+		deletedEventsInBatch >= systemEmailDeleteIdsMaxParameters &&
 		Date.now() < deadlineMs
 	)
 
@@ -476,49 +563,46 @@ export async function pruneSystemEmailRetention(input: {
 		.run()
 	result.deletedCounters = counterDelete.meta.changes ?? 0
 
-	const threadDelete = await input.db
-		.prepare(
-			`DELETE FROM email_threads
-			WHERE user_id = ?
-				AND NOT EXISTS (
-					SELECT 1 FROM email_messages WHERE email_messages.thread_id = email_threads.id
-				)`,
-		)
-		.bind(systemEmailOwnerId)
-		.run()
-	result.deletedThreads = threadDelete.meta.changes ?? 0
-
-	if (result.blobDeleteErrors > 0) {
-		result.dedicatedGraphSync = {
-			status: 'skipped',
-			reason: 'legacy-blob-delete-errors',
-			blobDeleteErrors: result.blobDeleteErrors,
-		}
-		result.warnings.push('dedicated-graph-sync-skipped')
-		console.warn('system-email-dedicated-graph-sync-skipped', {
-			reason: 'legacy-blob-delete-errors',
-			blobDeleteErrors: result.blobDeleteErrors,
+	if (Date.now() < deadlineMs) {
+		const threadRows = await input.db
+			.prepare(
+				`SELECT id FROM system_email_threads
+				WHERE NOT EXISTS (
+						SELECT 1 FROM system_email_messages
+						WHERE system_email_messages.thread_id =
+							system_email_threads.id
+					)
+				ORDER BY created_at ASC, id ASC
+				LIMIT ?`,
+			)
+			.bind(systemEmailDeleteIdsMaxParameters)
+			.all<{ id: string }>()
+		const threadIds = (threadRows.results ?? []).map((row) => row.id)
+		if (threadIds.length === 0) return result
+		const placeholders = threadIds.map(() => '?').join(', ')
+		const deletes = await commitSystemEmailGraphBulkDeletes({
+			db: input.db,
+			mutations: [
+				{
+					contract: threadContract,
+					ids: threadIds,
+					matchColumn: 'id',
+					dedicated: input.db
+						.prepare(
+							`DELETE FROM system_email_threads
+							WHERE id IN (${placeholders})`,
+						)
+						.bind(...threadIds),
+					legacy: input.db
+						.prepare(
+							`DELETE FROM email_threads
+							WHERE user_id = ? AND id IN (${placeholders})`,
+						)
+						.bind(systemEmailOwnerId, ...threadIds),
+				},
+			],
 		})
-		return result
-	}
-
-	const graphSync = await reconcileSystemEmailGraphFromLegacy({ db: input.db })
-	result.dedicatedGraphSync = {
-		status: 'reconciled',
-		upserted: graphSync.metrics.upserted,
-		deleted: graphSync.metrics.deleted,
-		referencedOwnerMismatchCount:
-			graphSync.metrics.referencedOwnerMismatchCount,
-		parity: graphSync.postReport.parity,
-	}
-	if (!graphSync.postReport.parity) {
-		result.warnings.push('dedicated-graph-post-reconcile-mismatch')
-		console.warn('system-email-dedicated-graph-post-reconcile-mismatch', {
-			referencedOwnerMismatchCount:
-				graphSync.metrics.referencedOwnerMismatchCount,
-			upserted: graphSync.metrics.upserted,
-			deleted: graphSync.metrics.deleted,
-		})
+		result.deletedThreads += Number(deletes[0]?.meta.changes ?? 0)
 	}
 
 	return result

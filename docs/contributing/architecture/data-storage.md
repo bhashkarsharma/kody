@@ -19,14 +19,14 @@ platform local parts (`kody`, `support`, `abuse`, `postmaster`, `security`, and
 `admin`). Migration `0130-system-email-graph-expand.sql` adds permanent D1
 tables `system_email_threads`, `system_email_messages`,
 `system_email_attachments`, and `system_email_delivery_events`. They omit
-`user_id` because the operator owner is implicit. During step 4a they are
-copy-only parity targets: legacy rows under reserved owner id `system:email`
-remain live read/write authority and are neither modified nor deleted. The
-reserved id is not a login account and must not be conflated with the
-`kody@example.com` fixture or Kent's personal account. Account deletion and
-export treat both graph copies as platform/operator content, not user data;
-legacy exclusion is listed in `accountUserDataExcludedOwnerIds` and the
-dedicated tables in `accountOperatorOwnedD1Surfaces`, with guardrail tests.
+`user_id` because the operator owner is implicit. Since step 4b they are the
+live authority; legacy rows under reserved owner id `system:email` are atomic
+rollback mirrors through step 5. The reserved id is not a login account and must
+not be conflated with the `kody@example.com` fixture or Kent's personal account.
+Account deletion and export treat both graph copies as platform/operator
+content, not user data; legacy exclusion is listed in
+`accountUserDataExcludedOwnerIds` and the dedicated tables in
+`accountOperatorOwnedD1Surfaces`, with guardrail tests.
 
 Platform feedback remains user-owned and user-scoped in storage, but has a
 narrow cross-user read and triage path. Only feedback the submitting user
@@ -64,10 +64,9 @@ warning-only failures.
 Legacy system email rows owned by `system:email` and all four dedicated
 `system_email_*` graph tables are intentionally excluded from account deletion.
 They are operator-owned mail for reserved platform addresses, not portable user
-content. During step 4a, legacy remains retention authority: the scheduled
-system-email lane applies its 90-day age policy, 5,000-message cap, and
-blob-before-row deletion first, then atomically reconciles the dedicated copy so
-it cannot retain rows absent from legacy after a successful pass.
+content. The scheduled system-email lane applies its 90-day age policy,
+5,000-message cap, and blob-before-row deletion against the dedicated authority,
+then removes the corresponding legacy mirrors in the same D1 batch.
 
 Platform-feedback rows follow two account-deletion behaviors. Deleting the
 submitting account deletes its submissions. When a deleted account was an admin
@@ -784,43 +783,99 @@ verified backup whose SHA-256 starts with `7787f8c9`; this change is explicitly
 non-destructive.
 
 **Operator system-email graph split:** migration
-`0130-system-email-graph-expand.sql` is the step 4a non-destructive deploy
-boundary. It creates a dedicated D1 thread/message/attachment/delivery-event
-graph with stable ids, current promoted inbound fields, and internal FKs, then
-copies only legacy `system:email` rows in FK-safe order. The admin mailbox
-maintenance `status` action exposes aggregate `systemEmailGraph` copy parity
-(counts, missing rows, referenced-owner/ownership/relationship/key-field
-mismatches, and no email content). Copy and reconciliation fence shared
-`email_inboxes.user_id` and `email_sender_identities.user_id`: a legacy system
-row that references another owner's inbox, sender identity, or inherited graph
-parent is skipped and keeps aggregate parity false. Legacy shared rows remain
-the sole live read/write/retention authority; there is no feature flag or
-behavior cutover in 4a.
+`0130-system-email-graph-expand.sql` was the step 4a non-destructive expand/copy
+boundary. Migration `0131-system-email-graph-authority.sql` is also additive:
+before changing either graph, a CHECK sentinel rejects provider links and
+cross-owner inbox/sender/thread/message references. It then reconciles changes
+made after the 0130 snapshot by deleting dedicated drift child-first and
+full-column UPSERTing valid legacy authority rows parent-first. It then replaces
+every promoted transition/effect column in both the dedicated graph and rollback
+mirror for Cloudflare inbound and dedupe rows with the canonical `detail_json`
+projection, including clearing stale non-null values when a JSON property is
+absent. `needs_effect_reconcile` remains column-authoritative because legacy
+receive and effect transitions update it in the same statement as JSON.
+Non-inbound providers retain their promoted columns. To stay below D1's
+five-term compound-SELECT limit, the migration records each ownership, provider,
+and per-table parity concern with a separate bounded zero-only CHECK row. The
+four post-copy table checks cover exact counts and full-column values,
+missing/extra IDs, and invalid cross-owner inbox/sender references. Any nonzero
+row aborts the whole reconciliation before the singleton
+`system_email_graph_authority` insert persists the validated
+`graph_mismatch_count = 0` and `provider_link_count = 0` totals. The migration
+never deletes shared rows. The 4b Worker requires that marker on every dedicated
+authority entry point and refuses startup/work when it is missing or invalid.
+The pre-4b rollback Worker does not know about the marker and ignores it.
 
-The explicit audited `admin_mailbox_maintenance` action
-`system_email_graph_reconcile` requires `force: true`. In one atomic D1 batch it
-deletes dedicated rows absent from the valid legacy graph in child-first order,
-then upserts every current legacy column in parent-first order. It returns
-aggregate mutation metrics and a post-reconcile parity report, never email
-content. The same reconcile primitive runs after successful scheduled legacy
-system-email retention. If any R2 deletion fails, the legacy row remains for
-retry and dedicated reconciliation is skipped with aggregate warnings; D1 or
-reconcile failures escape the scheduled lane for normal failure reporting and
-retry. This does not make dedicated tables authority, and routine status remains
-read-only. The full graph comparator runs for explicit maintenance status and
-after graph reconciliation.
+Wrangler submits each migration file together with its `d1_migrations` ledger
+insert as one D1 multi-statement transaction (local execution uses `D1.batch`;
+remote execution uses D1's transactional multi-statement query). Therefore a
+preflight or post-copy CHECK failure rolls back the authority table, the counter
+correlation-token column, and every graph mutation. The migration tests execute
+the file through Wrangler's local D1 path and prove an early preflight failure
+rolls back DDL, graph changes, and the migration ledger; Node SQLite coverage
+also proves a late post-copy parity failure leaves the pre-0131 graph unchanged
+and no marker behind.
 
-The existing `email_outbound_provider_index` deliberately remains unchanged. Its
-`message_id` FK targets legacy `email_messages`; a second FK cannot validly
-target either of two message tables. System outbound/provider-linked rows are
-therefore classified in parity as `legacy-email-messages-until-4b-routing`. Step
-4b must design authority routing, then dual-write the dedicated graph and move
-reads/retention authority. Immediately before that boundary, writes must be
-quiesced or the 4b dual-write path must already be active; an operator must run
-the forced graph reconcile and observe zero graph, referenced-owner, and
-provider-index parity mismatches. Step 5 may clean up legacy system rows only
-after 4b parity and rollback gates pass: **4a schema/copy/parity → 4b
-dual-write/read authority → step 5 legacy cleanup**.
+After 4b, `system_email_threads`, `system_email_messages`,
+`system_email_attachments`, and `system_email_delivery_events` are the only live
+metadata and inbound-ledger authority for `system:email`. Reads never fall back
+to shared `email_*` rows, and the reserved owner never gets a Mailbox Durable
+Object. Shared inbox/address/sender configuration remains in D1 because the
+dedicated graph references that operator configuration; account export/deletion
+continues to exclude the reserved owner.
+
+Every authoritative graph or inbound-ledger mutation writes the dedicated row
+first and writes a complete legacy `system:email` compatibility mirror in the
+same transactional D1 batch. The shared transaction composer follows each pair
+with a SQL parity/absence guard, so an exception **or silent no-op** on the
+legacy fence aborts the batch before commit. This composer is the single mirror
+seam removed in step 5. A same-id collision with a user-owned legacy delivery
+event also fails closed. R2 retention is the deliberate cross-service exception:
+it deletes all referenced blobs first, then atomically deletes dedicated
+metadata and its legacy mirror. If any blob delete fails, the authoritative row
+remains for retry. Scheduled retention selects age/cap/events/orphan threads
+only from the dedicated graph; it never copies stale legacy state into dedicated
+tables.
+
+The admin mailbox maintenance `status` action remains an aggregate, content-free
+parity report. The audited `system_email_graph_reconcile` action is now a
+rollback-mirror repair only and requires both `force: true` and
+`direction: "dedicated_to_legacy"`. In one D1 batch it removes legacy drift
+child-first and upserts the complete legacy graph parent-first. There is no
+legacy-to-dedicated reconcile path after cutover.
+
+The existing `email_outbound_provider_index` still has an FK to legacy
+`email_messages`, so it cannot index the dedicated graph. The production cutover
+check found zero provider-linked `system:email` rows; parity reports this
+healthy disposition as `no-system-provider-links` with `dedicated-inbound-only`
+authority. System outbound sends and provider-linked dedicated messages are
+rejected rather than creating a broken cross-authority FK. Immediately before
+deploying 0131, operators must capture fresh production evidence that the
+provider index, legacy provider-linked system messages, and dedicated
+provider-linked messages all remain zero. The marker insert independently
+recounts those surfaces; a nonzero count violates its constraint and rolls back
+the migration. Runtime marker checks repeat the provider gate so links created
+after migration also stop dedicated work. Step 5 may remove legacy system rows
+only after dedicated/mirror parity and rollback gates pass: **4a
+schema/copy/parity → 4b dedicated authority plus rollback mirror → step 5 legacy
+cleanup**.
+
+The pre-4b shared D1 system-delivery engine is retained only as a compatibility
+and rollback reference. Once the dedicated marker exists it rejects
+`system:email` calls; USER Mailbox paths are unaffected. Dedicated and legacy
+implementations share lease/retry timing constants and are covered by
+claim/release/retry/reject/receive/reconcile transition-parity tests. Their SQL
+engines intentionally remain separate during rollback support; step 5 removes
+the legacy system branch instead of attempting a risky state-machine rewrite
+during authority cutover.
+
+Rolling back to the pre-4b Worker is supported because 4b continuously maintains
+the legacy mirror. Once that older Worker accepts a write, however, legacy
+becomes newer and the dedicated graph becomes stale. Do not roll forward to 4b
+directly: quiesce ingress and scheduled/effect consumers, repair or rebuild
+dedicated state with the approved operator procedure, verify full parity and
+zero provider links, and only then redeploy. The 4b reconcile action
+intentionally cannot import those rollback-era legacy writes.
 
 **Accepted rollback → roll-forward caveat and manual repair:** a rollback to the
 previous Worker can advance USER inbound state in legacy `detail_json` with
@@ -1315,10 +1370,10 @@ below.
 ### What stays in D1
 
 - **Operator system-email inbox** — remains permanently in D1 for cross-account
-  admin access, fixed bounded caps, and separate system-email retention. Step 4a
-  copies the legacy `system:email` graph into dedicated `system_email_*` tables;
-  legacy remains live authority until 4b. Both copies stay excluded from account
-  deletion and export (`accountUserDataExcludedOwnerIds` and
+  admin access, fixed bounded caps, and separate system-email retention. The
+  dedicated `system_email_*` graph is authoritative; legacy `system:email` rows
+  are atomic rollback mirrors through step 5. Both copies stay excluded from
+  account deletion and export (`accountUserDataExcludedOwnerIds` and
   `accountOperatorOwnedD1Surfaces`). Operator mail is never migrated into
   per-user Mailbox objects.
 - **Low-write email config** — sender identities, inboxes, inbox addresses,
@@ -1343,11 +1398,12 @@ below.
   because authoritative outbound message rows are already exported.
   `recordProviderEmailDeliveryEvent` resolves index-first, then loads the
   owner-scoped message by `user_id`/`message_id` (no full-table provider scan).
-  `system:email` rows are indexed when they carry a provider id. Aggregate
-  parity (`loadOutboundProviderIndexParityReport`; counts only) is surfaced on
-  `admin_mailbox_maintenance` `status.outboundProviderIndex` for production
-  verification. This phase does not flip Mailbox write authority; contextless
-  provider-id reverse lookups must not enumerate per-user Mailbox objects.
+  System outbound is unsupported, and the verified `no-system-provider-links`
+  disposition means `system:email` rows are never added to this legacy-FK index.
+  Aggregate parity (`loadOutboundProviderIndexParityReport`; counts only) is
+  surfaced on `admin_mailbox_maintenance` `status.outboundProviderIndex` for
+  production verification. Contextless provider-id reverse lookups must not
+  enumerate per-user Mailbox objects or resolve a system compatibility mirror.
 
 ### Inbound durability boundary (USER Mailbox authority)
 
@@ -1373,7 +1429,8 @@ owner/provider-matched pre-deploy D1 snapshot. Malformed or cross-owner legacy
 rows are skipped. Pre-claim bounded rejection audit rows remain D1-only.
 
 `system:email` is the explicit exception: its inbound lifecycle, effects, and
-reconciliation remain D1-authoritative and never bootstrap a Mailbox.
+reconciliation use the dedicated D1 graph and never bootstrap a Mailbox or read
+the legacy compatibility mirror.
 
 If attachment commit fails but message cleanup (or a residual probe) cannot
 prove the pre-commit state, the handler acknowledges the already-created message
@@ -1949,20 +2006,17 @@ Current retention policies:
   the same safety conditions, so per-commit snapshots do not accumulate
   indefinitely. Ambiguous publish/edit cases are intentionally kept.
 - `email_delivery_events`: user-owned delivery events keep 90 days. System email
-  rows under `system:email` remain governed by the system-email retention job,
-  which prunes messages (and their `EMAIL_BLOBS` raw-MIME blobs) and delivery
-  events older than 90 days in bounded batches within its own time budget,
-  deletes stale `system_email_daily_counters`, and caps stored system messages
-  at 5,000. The four dedicated `system_email_*` tables have explicit
-  `alternate_cleanup` dispositions: in 4a the lane runs legacy retention first,
-  then atomically upserts the remaining graph and deletes dedicated drift in
-  child-first order. This actively bounds the copy while legacy remains
-  authority. A legacy blob-delete failure skips that reconcile so the preserved
-  legacy row and dedicated copy retry together. Step 4b will move retention
-  authority itself to the dedicated graph. After Mailbox cut-over, user-owned
-  delivery-event retention moves to the per-user Mailbox DO alarm (still 90
-  days, strict blob-before-row); D1 policies here remain authoritative until
-  that phase.
+  is governed by the dedicated system-email retention job, which prunes
+  messages, external attachment objects, raw-MIME blobs, and delivery events
+  older than 90 days in parameter-bounded batches within its own time budget,
+  deletes stale `system_email_daily_counters`, caps stored system messages at
+  5,000, and prunes orphan threads. All R2 objects are deleted before dedicated
+  metadata; a failure preserves authority rows for retry. Each successful D1
+  delete removes the legacy compatibility mirror in the same batch. The four
+  dedicated `system_email_*` tables therefore have explicit `alternate_cleanup`
+  dispositions. After Mailbox cut-over, user-owned delivery-event retention
+  moves to the per-user Mailbox DO alarm (still 90 days, strict
+  blob-before-row).
 - `email_messages` / `email_attachments` / `email_threads`: user-owned messages
   (excluding the `system:email` owner) keep 365 days, deleted oldest first in
   batches. Retention deletes the deterministic
@@ -1973,7 +2027,7 @@ Current retention policies:
   threads left with no messages are pruned for the affected users. After Mailbox
   cut-over, the same 365-day window and blob-before-row ordering are
   self-enforced by the Mailbox DO alarm; `system:email` stays on the D1
-  system-email retention job (and clears matching provider-index rows).
+  system-email retention job. System mail has no provider-index rows.
 - `entitlement_daily_counters`: **retired** — dropped by migration
   `0126-drop-entitlement-daily-counters.sql` after stages 1/2 stopped mirror
   writes and detached runtime inventory. No scheduled retention disposition or

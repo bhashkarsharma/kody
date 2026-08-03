@@ -177,6 +177,20 @@ function createAdminCapabilityTestDb(input: {
 			const normalizedQuery = normalizeQuery(query)
 			const createStatement = (params: Array<unknown>) => ({
 				async first<T>() {
+					if (
+						normalizedQuery.includes(
+							'select authority, graph_mismatch_count, provider_link_count from system_email_graph_authority',
+						)
+					) {
+						return {
+							authority: 'dedicated',
+							graph_mismatch_count: 0,
+							provider_link_count: 0,
+						} as T
+					}
+					if (normalizedQuery.includes('as unsupported')) {
+						return { unsupported: 0 } as T
+					}
 					if (normalizedQuery.includes('select count(*) as total from users')) {
 						return { total: users.length } as T
 					}
@@ -251,21 +265,21 @@ function createAdminCapabilityTestDb(input: {
 					}
 					if (
 						normalizedQuery.includes(
-							'select count(*) as total from email_messages',
+							'select count(*) as total from system_email_messages',
 						)
 					) {
 						return {
 							total: systemEmailMessages.filter(
-								(row) => row.user_id === params[0] && row.id,
+								(row) => row.user_id === 'system:email' && row.id,
 							).length,
 						} as T
 					}
 					if (
-						normalizedQuery.includes('from email_messages as message') &&
+						normalizedQuery.includes('from system_email_messages as message') &&
 						normalizedQuery.includes('message.id = ?')
 					) {
 						const message = systemEmailMessages.find(
-							(row) => row.user_id === params[0] && row.id === params[1],
+							(row) => row.user_id === 'system:email' && row.id === params[1],
 						)
 						if (!message) return null
 						const address = emailInboxAddresses.find(
@@ -342,7 +356,7 @@ function createAdminCapabilityTestDb(input: {
 						}
 					}
 					if (
-						normalizedQuery.includes('from email_messages as message') &&
+						normalizedQuery.includes('from system_email_messages as message') &&
 						normalizedQuery.includes("message.direction = 'inbound'")
 					) {
 						const pageSize = Number(params[1])
@@ -369,7 +383,7 @@ function createAdminCapabilityTestDb(input: {
 								}) as Array<T>,
 						}
 					}
-					if (normalizedQuery.includes('from email_attachments')) {
+					if (normalizedQuery.includes('from system_email_attachments')) {
 						return { results: [] as Array<T> }
 					}
 					if (normalizedQuery.includes('from usage_rollups')) {

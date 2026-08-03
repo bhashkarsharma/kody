@@ -24,6 +24,7 @@ function createFakeDb(
 	input: {
 		existingRollups?: Array<RollupKeyRow>
 		emailUsageRows?: Array<EmailUsageRow>
+		systemEmailUsageRows?: Array<EmailUsageRow>
 		liveUserIds?: Array<string>
 	} = {},
 ) {
@@ -34,6 +35,19 @@ function createFakeDb(
 	const db = {
 		prepare(sql: string) {
 			return {
+				async first() {
+					if (sql.includes('FROM system_email_graph_authority')) {
+						return {
+							authority: 'dedicated',
+							graph_mismatch_count: 0,
+							provider_link_count: 0,
+						}
+					}
+					if (sql.includes('AS unsupported')) {
+						return { unsupported: 0 }
+					}
+					throw new Error(`Unsupported first query: ${sql}`)
+				},
 				bind(...params: Array<unknown>) {
 					return {
 						sql,
@@ -51,6 +65,10 @@ function createFakeDb(
 							if (sql.includes('FROM email_delivery_events event')) {
 								selects.push({ sql, params })
 								return { results: input.emailUsageRows ?? [] }
+							}
+							if (sql.includes('FROM system_email_delivery_events')) {
+								selects.push({ sql, params })
+								return { results: input.systemEmailUsageRows ?? [] }
 							}
 							if (!sql.includes('SELECT user_id, metric FROM usage_rollups')) {
 								throw new Error(`Unsupported all query: ${sql}`)

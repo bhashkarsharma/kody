@@ -2,11 +2,15 @@ import { bytesToBase64 } from '@kody-internal/shared/base64.ts'
 import { isoTimestampDayKey } from '@kody-internal/shared/date-keys.ts'
 import PostalMime from 'postal-mime'
 import { withAccountWriteLease } from '#worker/account/deletion-state.ts'
-import { normalizeEmailAddress } from './address.ts'
-import { resolveInboundEmailAuthVerdict } from './auth-verdict.ts'
-import { getInboundDelivery, type InboundDelivery } from './inbound-delivery.ts'
+import {
+	EmailRawMimeStorageError,
+	putEmailRawMime,
+	RetryableInboundStorageError,
+} from './email-raw-mime-store.ts'
+import { resolveInboundEmailClassification } from './inbound-classification.ts'
+import { type InboundDelivery } from './inbound-delivery.ts'
 import { type UserInboundDeliveryAuthority } from './inbound-delivery-authority.ts'
-import { markSystemInboundDeliveryReceived } from './system-inbound-delivery-authority.ts'
+import { recordBoundedSystemEmailRejection } from './system-inbound-delivery-store.ts'
 import {
 	mirrorMailboxMessageGraphFromD1,
 	type MailboxLiveMirrorEnv,
@@ -18,7 +22,6 @@ import {
 import {
 	createEmailThread,
 	deleteEmailMessageById,
-	emailRawMimeKey,
 	findEmailThreadForInboundMessage,
 	getEmailAttachmentRecordById,
 	getEmailMessageById,
@@ -30,7 +33,16 @@ import {
 	touchEmailThread,
 	updateEmailMessageClassificationInD1,
 } from './repo.ts'
-import { evaluateEmailSenderRules } from './sender-rules.ts'
+import { systemEmailOwnerId } from './email-owner.ts'
+import {
+	deleteSystemEmailMessageById,
+	getSystemEmailAttachmentById,
+	getSystemEmailMessageById,
+	insertSystemEmailAttachments,
+	insertSystemEmailMessage,
+	listSystemEmailAttachments,
+	updateSystemEmailMessageClassification,
+} from './system-email-graph-store.ts'
 import {
 	type EmailAttachmentRecord,
 	type EmailClassification,
@@ -39,6 +51,8 @@ import {
 	type EmailMessageRecord,
 	type ParsedInboundEmail,
 } from './types.ts'
+
+export { EmailRawMimeStorageError, RetryableInboundStorageError }
 
 export {
 	createEmailThread,
@@ -56,53 +70,6 @@ export {
 
 function nowIso() {
 	return new Date().toISOString()
-}
-
-/**
- * Retryable inbound storage failure. Stable delivery/message/blob identifiers
- * make another Email Routing attempt repair the same logical delivery without
- * consuming quota or inserting another message.
- */
-export class RetryableInboundStorageError extends Error {
-	override name = 'RetryableInboundStorageError'
-	constructor(message: string, cause?: unknown) {
-		super(message, { cause })
-	}
-}
-
-/**
- * Retryable EMAIL_BLOBS put failure for inbound raw MIME (pre-commit).
- * The inbound email handler lets this propagate so Cloudflare Email Routing
- * treats delivery as a temporary failure (throw) rather than a permanent
- * `setReject`.
- */
-export class EmailRawMimeStorageError extends RetryableInboundStorageError {
-	override name = 'EmailRawMimeStorageError'
-	constructor(messageId: string, cause?: unknown) {
-		super(
-			`Failed to store email raw MIME in EMAIL_BLOBS (message ${messageId}); delivery should be retried.`,
-			cause,
-		)
-	}
-}
-
-/**
- * Persist inbound raw MIME to EMAIL_BLOBS before the D1 insert. Returns the
- * object key on success. Throws EmailRawMimeStorageError on put failure.
- */
-async function putRawMimeToBlobs(input: {
-	blobs: R2Bucket
-	userId: string
-	messageId: string
-	rawMime: string
-}): Promise<string> {
-	const key = emailRawMimeKey(input.userId, input.messageId)
-	try {
-		await input.blobs.put(key, input.rawMime)
-		return key
-	} catch (error) {
-		throw new EmailRawMimeStorageError(input.messageId, error)
-	}
 }
 
 /**
@@ -137,6 +104,25 @@ type InsertEmailMessageWithRawMimeInput = Omit<
 	}
 }
 
+function systemInboundMessageInput(
+	message: InsertEmailMessageInput['message'],
+): Parameters<typeof insertSystemEmailMessage>[0]['message'] {
+	if (
+		message.userId !== systemEmailOwnerId ||
+		message.direction !== 'inbound' ||
+		message.providerMessageId != null
+	) {
+		throw new Error(
+			'System inbound email requires system:email ownership without provider IDs.',
+		)
+	}
+	const { direction, providerMessageId, userId, ...systemMessage } = message
+	void direction
+	void providerMessageId
+	void userId
+	return systemMessage
+}
+
 /**
  * Domain insert for messages that must not point at EMAIL_BLOBS raw MIME.
  * Forces `rawMimeKey: null` so callers cannot invent a key without a blob.
@@ -145,13 +131,19 @@ type InsertEmailMessageWithRawMimeInput = Omit<
 export async function insertEmailMessageWithoutRawMime(
 	input: InsertEmailMessageWithoutRawMimeInput,
 ) {
-	return await insertEmailMessage({
+	const insertInput = {
 		db: input.db,
 		message: {
 			...input.message,
 			rawMimeKey: null,
 		},
-	})
+	}
+	return input.message.userId === systemEmailOwnerId
+		? await insertSystemEmailMessage({
+				db: insertInput.db,
+				message: systemInboundMessageInput(insertInput.message),
+			})
+		: await insertEmailMessage(insertInput)
 }
 
 export async function insertEmailMessageWithRawMime(
@@ -163,7 +155,7 @@ export async function insertEmailMessageWithRawMime(
 		const messageId = messageInput.id ?? crypto.randomUUID()
 		let rawMimeKey: string | null = null
 		if (rawMime != null) {
-			rawMimeKey = await putRawMimeToBlobs({
+			rawMimeKey = await putEmailRawMime({
 				blobs,
 				userId: messageInput.userId,
 				messageId,
@@ -171,14 +163,20 @@ export async function insertEmailMessageWithRawMime(
 			})
 		}
 		try {
-			return await insertEmailMessage({
+			const insertInput = {
 				db,
 				message: {
 					...messageInput,
 					id: messageId,
 					rawMimeKey,
 				},
-			})
+			}
+			return messageInput.userId === systemEmailOwnerId
+				? await insertSystemEmailMessage({
+						db: insertInput.db,
+						message: systemInboundMessageInput(insertInput.message),
+					})
+				: await insertEmailMessage(insertInput)
 		} catch (error) {
 			if (rawMimeKey != null) {
 				await blobs.delete(rawMimeKey).catch(() => undefined)
@@ -186,7 +184,7 @@ export async function insertEmailMessageWithRawMime(
 			throw error
 		}
 	}
-	return messageInput.userId === 'system:email'
+	return messageInput.userId === systemEmailOwnerId
 		? await write()
 		: await withAccountWriteLease({
 				db,
@@ -200,12 +198,24 @@ export async function getEmailMessageWithAttachmentsById(input: {
 	userId: string
 	messageId: string
 }) {
-	const message = await getEmailMessageById(input)
+	const message =
+		input.userId === systemEmailOwnerId
+			? await getSystemEmailMessageById({
+					db: input.db,
+					messageId: input.messageId,
+				})
+			: await getEmailMessageById(input)
 	if (!message) return null
-	const attachments = await listEmailAttachmentsForMessage({
-		db: input.db,
-		messageId: message.id,
-	})
+	const attachments =
+		input.userId === systemEmailOwnerId
+			? await listSystemEmailAttachments({
+					db: input.db,
+					messageId: message.id,
+				})
+			: await listEmailAttachmentsForMessage({
+					db: input.db,
+					messageId: message.id,
+				})
 	return {
 		message,
 		attachments,
@@ -229,30 +239,49 @@ export async function insertEmailMessageWithAttachments(
 	}
 	if (input.attachments.length === 0) return message
 	try {
-		await insertEmailAttachments({
+		const attachmentInput = {
 			db: input.db,
 			messageId: message.id,
 			attachments: input.attachments,
-		})
+		}
+		if (message.userId === systemEmailOwnerId) {
+			await insertSystemEmailAttachments(attachmentInput)
+		} else {
+			await insertEmailAttachments(attachmentInput)
+		}
 		return message
 	} catch (attachmentError) {
 		let cleanupError: unknown
 		try {
-			await deleteEmailMessageById({
-				db: input.db,
-				blobs: input.blobs,
-				messageId: message.id,
-			})
+			if (message.userId === systemEmailOwnerId) {
+				await deleteSystemEmailMessageById({
+					db: input.db,
+					blobs: input.blobs,
+					messageId: message.id,
+				})
+			} else {
+				await deleteEmailMessageById({
+					db: input.db,
+					blobs: input.blobs,
+					messageId: message.id,
+				})
+			}
 		} catch (error) {
 			cleanupError = error
 		}
 		let remaining: Awaited<ReturnType<typeof getEmailMessageById>>
 		try {
-			remaining = await getEmailMessageById({
-				db: input.db,
-				userId: message.userId,
-				messageId: message.id,
-			})
+			remaining =
+				message.userId === systemEmailOwnerId
+					? await getSystemEmailMessageById({
+							db: input.db,
+							messageId: message.id,
+						})
+					: await getEmailMessageById({
+							db: input.db,
+							userId: message.userId,
+							messageId: message.id,
+						})
 		} catch (probeError) {
 			// Probe failed: commit state is ambiguous. Do not retry/refund —
 			// that risks duplicates if the row is still durable.
@@ -283,67 +312,6 @@ export async function insertEmailMessageWithAttachments(
 	}
 }
 
-async function resolveInboundEmailClassification(input: {
-	db: D1Database
-	userId: string
-	envelopeFrom: string
-	authResults: string | null
-}): Promise<{
-	classification: EmailClassification
-	classificationReason: string | null
-}> {
-	const senderAddress = normalizeEmailAddress(input.envelopeFrom)
-	let ruleMatch: Awaited<ReturnType<typeof evaluateEmailSenderRules>> = null
-	if (senderAddress) {
-		try {
-			ruleMatch = await evaluateEmailSenderRules({
-				db: input.db,
-				userId: input.userId,
-				senderAddress,
-			})
-		} catch (error) {
-			if (
-				!(error instanceof Error) ||
-				!error.message.includes('no such table: email_sender_rules')
-			) {
-				throw error
-			}
-		}
-	}
-
-	if (ruleMatch) {
-		switch (ruleMatch.effect) {
-			case 'allow':
-				return { classification: 'accepted', classificationReason: null }
-			case 'block':
-				return {
-					classification: 'quarantined',
-					classificationReason: `Sender matched block rule ${ruleMatch.rule.value}.`,
-				}
-			case 'quarantine':
-				return {
-					classification: 'quarantined',
-					classificationReason: `Sender matched quarantine rule ${ruleMatch.rule.value}.`,
-				}
-			default: {
-				const _exhaustive: never = ruleMatch.effect
-				throw new Error(
-					`Unsupported sender rule effect: ${String(_exhaustive)}`,
-				)
-			}
-		}
-	}
-
-	const verdict = resolveInboundEmailAuthVerdict(input.authResults)
-	if (verdict.suspect) {
-		return {
-			classification: 'quarantined',
-			classificationReason: verdict.reason,
-		}
-	}
-	return { classification: 'accepted', classificationReason: null }
-}
-
 export async function storeIdempotentInboundEmail(input: {
 	db: D1Database
 	blobs: R2Bucket
@@ -351,9 +319,14 @@ export async function storeIdempotentInboundEmail(input: {
 	parsed: ParsedInboundEmail
 	subjectNormalized: string
 	now: string
-	authority?: Pick<UserInboundDeliveryAuthority, 'get' | 'receive'>
+	authority: Pick<UserInboundDeliveryAuthority, 'get' | 'receive'>
 }) {
 	const { delivery, parsed } = input
+	if (delivery.userId === systemEmailOwnerId) {
+		throw new Error(
+			'System inbound storage must use the dedicated system email service.',
+		)
+	}
 	if (!delivery.storageLease) {
 		throw new RetryableInboundStorageError(
 			'Inbound delivery storage requires an active lease.',
@@ -364,7 +337,7 @@ export async function storeIdempotentInboundEmail(input: {
 		userId: delivery.userId,
 		storageLease: delivery.storageLease,
 	}
-	await putRawMimeToBlobs({
+	await putEmailRawMime({
 		blobs: input.blobs,
 		userId: delivery.userId,
 		messageId: delivery.messageId,
@@ -385,16 +358,19 @@ export async function storeIdempotentInboundEmail(input: {
 			inReplyToHeader: parsed.inReplyTo,
 		})
 		if (!thread) {
-			thread = await createEmailThread({
+			const threadInput = {
 				db: input.db,
 				id: delivery.threadId,
-				userId: delivery.userId,
 				inboxId: delivery.inboxId,
 				subjectNormalized: input.subjectNormalized,
 				rootMessageIdHeader: parsed.messageId,
 				lastMessageAt: input.now,
 				ignoreConflict: true,
 				inboundDeliveryFence,
+			}
+			thread = await createEmailThread({
+				...threadInput,
+				userId: delivery.userId,
 			})
 		}
 		const { classification, classificationReason } =
@@ -405,12 +381,12 @@ export async function storeIdempotentInboundEmail(input: {
 				authResults: parsed.authResults,
 			})
 		try {
-			stored = await insertEmailMessage({
+			const messageInput = {
 				db: input.db,
 				inboundDeliveryFence,
 				message: {
 					id: delivery.messageId,
-					direction: 'inbound',
+					direction: 'inbound' as const,
 					userId: delivery.userId,
 					inboxId: delivery.inboxId,
 					threadId: thread.id,
@@ -431,7 +407,7 @@ export async function storeIdempotentInboundEmail(input: {
 					htmlBody: parsed.htmlBody,
 					rawMimeKey: delivery.rawMimeKey,
 					rawSize: parsed.rawSize,
-					processingStatus: 'stored',
+					processingStatus: 'stored' as const,
 					classification,
 					classificationReason,
 					providerMessageId: null,
@@ -439,7 +415,8 @@ export async function storeIdempotentInboundEmail(input: {
 					receivedAt: input.now,
 					sentAt: null,
 				},
-			})
+			}
+			stored = await insertEmailMessage(messageInput)
 		} catch (error) {
 			stored = await getEmailMessageById({
 				db: input.db,
@@ -456,7 +433,7 @@ export async function storeIdempotentInboundEmail(input: {
 	}
 
 	try {
-		await insertEmailAttachments({
+		const attachmentInput = {
 			db: input.db,
 			messageId: delivery.messageId,
 			ignoreConflicts: true,
@@ -471,7 +448,8 @@ export async function storeIdempotentInboundEmail(input: {
 				storageKind: 'raw-mime',
 				storageKey: null,
 			})),
-		})
+		}
+		await insertEmailAttachments(attachmentInput)
 	} catch (error) {
 		throw new RetryableInboundStorageError(
 			'Failed to commit inbound email attachments; the stable delivery will be retried.',
@@ -493,6 +471,10 @@ export async function storeIdempotentInboundEmail(input: {
 		)
 	}
 
+	const authority = input.authority
+	if (!authority) {
+		throw new Error('User inbound finalization requires Mailbox authority.')
+	}
 	let finalizedDelivery: InboundDelivery
 	try {
 		const finalization = {
@@ -503,22 +485,9 @@ export async function storeIdempotentInboundEmail(input: {
 			usageMonth: (stored.receivedAt ?? stored.createdAt).slice(0, 7),
 			usageBytes: stored.rawSize ?? 0,
 		}
-		finalizedDelivery = input.authority
-			? await input.authority.receive(finalization)
-			: await markSystemInboundDeliveryReceived({
-					db: input.db,
-					...finalization,
-				})
+		finalizedDelivery = await authority.receive(finalization)
 	} catch (error) {
-		const committed = await (
-			input.authority
-				? input.authority.get(delivery.deliveryId)
-				: getInboundDelivery({
-						db: input.db,
-						userId: delivery.userId,
-						deliveryId: delivery.deliveryId,
-					})
-		).catch(() => null)
+		const committed = await authority.get(delivery.deliveryId).catch(() => null)
 		if (committed?.state !== 'received') {
 			throw new RetryableInboundStorageError(
 				'Failed to finalize the inbound delivery ledger; the stable delivery will be retried.',
@@ -529,11 +498,12 @@ export async function storeIdempotentInboundEmail(input: {
 	}
 	try {
 		if (stored.threadId) {
-			await touchEmailThread({
+			const touchInput = {
 				db: input.db,
 				threadId: stored.threadId,
 				lastMessageAt: input.now,
-			})
+			}
+			await touchEmailThread(touchInput)
 		}
 	} catch (error) {
 		console.error(
@@ -632,17 +602,29 @@ export async function getEmailAttachmentById(input: {
 	userId: string
 	attachmentId: string
 }) {
-	const attachment = await getEmailAttachmentRecordById({
-		db: input.db,
-		userId: input.userId,
-		attachmentId: input.attachmentId,
-	})
+	const attachment =
+		input.userId === systemEmailOwnerId
+			? await getSystemEmailAttachmentById({
+					db: input.db,
+					attachmentId: input.attachmentId,
+				})
+			: await getEmailAttachmentRecordById({
+					db: input.db,
+					userId: input.userId,
+					attachmentId: input.attachmentId,
+				})
 	if (!attachment) return null
-	const message = await getEmailMessageById({
-		db: input.db,
-		userId: input.userId,
-		messageId: attachment.messageId,
-	})
+	const message =
+		input.userId === systemEmailOwnerId
+			? await getSystemEmailMessageById({
+					db: input.db,
+					messageId: attachment.messageId,
+				})
+			: await getEmailMessageById({
+					db: input.db,
+					userId: input.userId,
+					messageId: attachment.messageId,
+				})
 	return loadEmailAttachmentContent({
 		blobs: input.blobs,
 		attachment,
@@ -684,6 +666,17 @@ export async function recordBoundedEmailRejectionEvent(input: {
 	now?: Date
 }) {
 	const now = input.now ?? new Date()
+	if (input.userId === systemEmailOwnerId) {
+		return await recordBoundedSystemEmailRejection({
+			db: input.db,
+			inboxId: input.inboxId,
+			recipient: input.recipient,
+			reason: input.reason,
+			phase: input.phase,
+			now,
+			detailLimit: maxDetailedEmailRejectionEventsPerDay,
+		})
+	}
 	const nowIsoString = now.toISOString()
 	const day = isoTimestampDayKey(nowIsoString)
 	const aggregateDetail = JSON.stringify({
@@ -749,23 +742,34 @@ export async function setEmailMessageClassification(input: {
 	classificationReason?: string | null
 	now?: string
 }) {
-	const updated = await updateEmailMessageClassificationInD1({
-		db: input.db,
-		userId: input.userId,
-		messageId: input.messageId,
-		classification: input.classification,
-		classificationReason: input.classificationReason,
-		now: input.now,
-	})
+	const updated =
+		input.userId === systemEmailOwnerId
+			? await updateSystemEmailMessageClassification({
+					db: input.db,
+					messageId: input.messageId,
+					classification: input.classification,
+					classificationReason: input.classificationReason,
+					now: input.now,
+				})
+			: await updateEmailMessageClassificationInD1({
+					db: input.db,
+					userId: input.userId,
+					messageId: input.messageId,
+					classification: input.classification,
+					classificationReason: input.classificationReason,
+					now: input.now,
+				})
 	if (!updated) {
 		return false
 	}
-	await mirrorMailboxMessageGraphFromD1({
-		env: input.env,
-		db: input.db,
-		userId: input.userId,
-		messageId: input.messageId,
-	})
+	if (input.userId !== systemEmailOwnerId) {
+		await mirrorMailboxMessageGraphFromD1({
+			env: input.env,
+			db: input.db,
+			userId: input.userId,
+			messageId: input.messageId,
+		})
+	}
 	return true
 }
 
