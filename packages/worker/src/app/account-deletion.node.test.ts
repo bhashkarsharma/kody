@@ -20,6 +20,7 @@ import {
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
 import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
 
 type RowMap = Record<string, Array<Record<string, unknown>>>
@@ -104,25 +105,6 @@ function createTestDb(
 								return { results: results as Array<T>, meta: { changes: 0 } }
 							}
 							if (
-								lower.includes(
-									'select count(*) as count from account_write_leases',
-								)
-							) {
-								const user = (rows.users ?? []).find(
-									(row) => row['id'] === params[0],
-								)
-								results = [
-									{
-										count: (rows.account_write_leases ?? []).filter(
-											(row) =>
-												row['user_id'] === user?.['stable_user_id'] &&
-												row['released_at'] == null,
-										).length,
-									},
-								]
-								return { results: results as Array<T>, meta: { changes: 0 } }
-							}
-							if (
 								lower ===
 								'select stable_user_id, deleting_at from users where id = ?'
 							) {
@@ -133,32 +115,6 @@ function createTestDb(
 										stable_user_id: row['stable_user_id'],
 										deleting_at: row['deleting_at'] ?? null,
 									}))
-								return { results: results as Array<T>, meta: { changes: 0 } }
-							}
-							if (
-								lower.startsWith(
-									'select token, holder, acquired_at from account_write_leases',
-								)
-							) {
-								const stableUserId = params[0] as string
-								results = (rows.account_write_leases ?? [])
-									.filter(
-										(row) =>
-											row['user_id'] === stableUserId &&
-											row['released_at'] == null,
-									)
-									.map((row) => ({
-										token: row['token'],
-										holder: row['holder'],
-										acquired_at: row['acquired_at'],
-									}))
-									.sort((left, right) => {
-										const byAcquired = String(left.acquired_at).localeCompare(
-											String(right.acquired_at),
-										)
-										if (byAcquired !== 0) return byAcquired
-										return String(left.token).localeCompare(String(right.token))
-									})
 								return { results: results as Array<T>, meta: { changes: 0 } }
 							}
 							if (
@@ -2047,21 +2003,21 @@ test('account deletion waits for an active writer and resumes on retry', async (
 				id: 1,
 				email: 'a@example.com',
 				stable_user_id: 'user-aaa',
-				active_write_count: 1,
 				updated_at: '2026-07-22',
 			},
 		],
-		account_write_leases: [
-			{
-				token: 'crashed-token',
-				user_id: 'user-aaa',
-				holder: 'test',
-				acquired_at: '2000-01-01 00:00:00',
-				released_at: null,
-			},
-		],
 	})
-	const env = createSuccessfulDeletionEnv(db)
+	// Set up a UserMeter with an active write lease to simulate a crashed writer.
+	const userMeter = createInMemoryUserMeterEnv()
+	const meterStub = userMeterRpc({ env: userMeter.env, userId: 'user-aaa' })
+	await meterStub.acquireWriteLease({
+		token: 'crashed-token-aaa',
+		holder: 'test:crashed-writer',
+		acquiredAt: '2000-01-01 00:00:00',
+	})
+	const env = createSuccessfulDeletionEnv(db, {
+		USER_METER: userMeter.env.USER_METER,
+	})
 	await expect(
 		deleteUserAccount({
 			env,
@@ -2072,11 +2028,10 @@ test('account deletion waits for an active writer and resumes on retry', async (
 	expect(rows.users?.[0]).toEqual(
 		expect.objectContaining({
 			deleting_at: expect.any(String),
-			active_write_count: 1,
 		}),
 	)
-	rows.account_write_leases![0]!['released_at'] = '2026-07-23 00:00:00'
-	rows.users![0]!['active_write_count'] = 0
+	// Release the meter lease to simulate the crashed writer being repaired.
+	await meterStub.releaseWriteLease({ token: 'crashed-token-aaa' })
 	await expect(
 		deleteUserAccount({
 			env,
