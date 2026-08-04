@@ -384,8 +384,15 @@ config, and expect users to reauthorize OAuth and remote connectors.
 | Hourly `:45`             | Control plane     | D1 freshness (identity, size ceiling, manifest age ≤26h, R2 size/ETag) + seal recent complete days |
 
 Hourly freshness does not SHA-256 the SQL bytes; drills do. Page yourself on
-`freshness-stale`, size-ceiling hits, missing manifests, seal failures,
-`backup-unrestorable-statements`, or unexpected disablement of the enable gates.
+`freshness-unrestorable` (the SQL contains statements D1 cannot import),
+`freshness-stale`, size-ceiling hits, missing manifests or required SQL stats,
+seal failures, `backup-unrestorable-statements`, or unexpected disablement of
+the enable gates. Post-cutover unrestorable exports never receive a canonical
+day manifest; catch-up retries can re-export the day after the oversized row or
+write path is bounded. Historical bad days may already have canonical and full
+manifests; immutable media is intentionally left unchanged, so freshness,
+dashboard, drill, and production-restore gates remain essential until it ages
+out.
 
 ## Offline CLI fallback
 
