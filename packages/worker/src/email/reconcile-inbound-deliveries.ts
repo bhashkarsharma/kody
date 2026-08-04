@@ -201,6 +201,7 @@ export async function sweepStaleInboundDeliveries(input: {
 					: await withAccountWriteLease({
 							db: input.env.APP_DB,
 							stableUserId: userId,
+							env: input.env,
 							write: reconcileUser,
 						})
 			recovered += result.recovered
