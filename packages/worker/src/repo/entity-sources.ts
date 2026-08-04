@@ -105,6 +105,17 @@ export async function getEntitySourceByEntity(
 	return result ? mapEntitySourceRow(result) : null
 }
 
+export async function getEntitySourceByRepoId(
+	db: D1Database,
+	repoId: string,
+): Promise<EntitySourceRow | null> {
+	const result = await db
+		.prepare(`SELECT * FROM entity_sources WHERE repo_id = ? LIMIT 1`)
+		.bind(repoId)
+		.first<Record<string, unknown>>()
+	return result ? mapEntitySourceRow(result) : null
+}
+
 export async function listEntitySourcesByUser(
 	db: D1Database,
 	userId: string,

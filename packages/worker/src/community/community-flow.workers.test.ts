@@ -178,6 +178,7 @@ async function seedOwnerPackage(input: {
 }
 
 test('community package flow works end-to-end through capability handlers', async () => {
+	silenceIncidentalRuntimeWarnings()
 	using _artifactsMock = createMswNodeServer(
 		createArtifactsMswHandlers({
 			accountId: mockAccountId,

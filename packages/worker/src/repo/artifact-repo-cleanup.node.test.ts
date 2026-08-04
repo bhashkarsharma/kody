@@ -5,6 +5,9 @@ const mockModule = vi.hoisted(() => ({
 	getEntitySourceById: vi.fn(),
 	getEntitySourceByIdForUser: vi.fn(),
 	listEntitySourcesByUser: vi.fn(),
+	deleteArtifactsRepoPushSubscription: vi.fn(async () => true),
+	getArtifactsPushSubscriptionBySourceId: vi.fn(async () => null),
+	deleteArtifactsPushSubscriptionBySourceId: vi.fn(async () => true),
 	listRepoSessionsBySource: vi.fn(async () => []),
 	listRepoSessionsByUser: vi.fn(async () => []),
 	hasArtifactsAccess: vi.fn(),
@@ -16,6 +19,18 @@ vi.mock('./artifacts.ts', () => ({
 	}),
 	hasArtifactsAccess: (...args: Array<unknown>) =>
 		mockModule.hasArtifactsAccess(...args),
+}))
+
+vi.mock('./artifacts-push-subscriptions.ts', () => ({
+	deleteArtifactsRepoPushSubscription: (...args: Array<unknown>) =>
+		mockModule.deleteArtifactsRepoPushSubscription(...args),
+}))
+
+vi.mock('./artifacts-push-subscription-store.ts', () => ({
+	getArtifactsPushSubscriptionBySourceId: (...args: Array<unknown>) =>
+		mockModule.getArtifactsPushSubscriptionBySourceId(...args),
+	deleteArtifactsPushSubscriptionBySourceId: (...args: Array<unknown>) =>
+		mockModule.deleteArtifactsPushSubscriptionBySourceId(...args),
 }))
 
 vi.mock('./entity-sources.ts', () => ({
@@ -212,4 +227,71 @@ test('generic source cleanup deletes the source root with user scope checks', as
 		artifactAccessUnavailable: true,
 	})
 	expect(missingAccessWarnings).toHaveLength(1)
+})
+
+test('account cleanup deletes stored Artifacts push subscriptions before repos', async () => {
+	mockModule.hasArtifactsAccess.mockReturnValue(true)
+	mockModule.deleteArtifactRepo.mockResolvedValue({
+		id: 'repo_deleted',
+		alreadyDeleted: false,
+	})
+	mockModule.listEntitySourcesByUser.mockResolvedValue([
+		{ id: 'source-1', user_id: 'user-1', repo_id: 'package-pkg-1' },
+	])
+	mockModule.listRepoSessionsByUser.mockResolvedValue([])
+	mockModule.getArtifactsPushSubscriptionBySourceId.mockResolvedValue({
+		source_id: 'source-1',
+		user_id: 'user-1',
+		repo_id: 'package-pkg-1',
+		subscription_id: 'sub-1',
+		created_at: '2026-05-01T00:00:00.000Z',
+		updated_at: '2026-05-01T00:00:00.000Z',
+	})
+
+	await cleanupAllUserArtifactRepos({
+		env,
+		userId: 'user-1',
+		warnings: [],
+	})
+
+	expect(mockModule.deleteArtifactsRepoPushSubscription).toHaveBeenCalledWith({
+		env,
+		subscriptionId: 'sub-1',
+		repoName: 'package-pkg-1',
+	})
+	expect(
+		mockModule.deleteArtifactsPushSubscriptionBySourceId,
+	).toHaveBeenCalledWith(
+		{},
+		{
+			sourceId: 'source-1',
+			userId: 'user-1',
+		},
+	)
+	expect(mockModule.deleteArtifactRepo).toHaveBeenCalledWith('package-pkg-1')
+})
+
+test('cleanup skips Cloudflare push subscription delete when none is stored', async () => {
+	mockModule.hasArtifactsAccess.mockReturnValue(true)
+	mockModule.deleteArtifactsRepoPushSubscription.mockClear()
+	mockModule.deleteArtifactRepo.mockResolvedValue({
+		id: 'repo_deleted',
+		alreadyDeleted: false,
+	})
+	mockModule.getEntitySourceByIdForUser.mockResolvedValue({
+		id: 'source-1',
+		user_id: 'user-1',
+		repo_id: 'job-job-1',
+	})
+	mockModule.listRepoSessionsBySource.mockResolvedValue([])
+	mockModule.getArtifactsPushSubscriptionBySourceId.mockResolvedValue(null)
+
+	await cleanupArtifactReposForSource({
+		env,
+		userId: 'user-1',
+		sourceId: 'source-1',
+	})
+
+	expect(mockModule.deleteArtifactsRepoPushSubscription).not.toHaveBeenCalled()
+	expect(mockModule.deleteArtifactRepo).toHaveBeenCalledWith('job-job-1')
 })

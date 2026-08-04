@@ -592,6 +592,7 @@ function createJobMutationDatabase(input: {
 			'published_bundle_artifacts',
 			structuredClone(input.publishedBundleArtifacts ?? []),
 		],
+		['entity_source_artifacts_push_subscriptions', []],
 	])
 
 	const clone = <T>(value: T): T => structuredClone(value)
@@ -653,6 +654,15 @@ function createJobMutationDatabase(input: {
 									'entity_sources',
 									(row) =>
 										row['id'] === params[0] && row['user_id'] === params[1],
+								) as T | null
+							}
+							if (
+								normalized ===
+								'SELECT * FROM entity_source_artifacts_push_subscriptions WHERE source_id = ? LIMIT 1'
+							) {
+								return selectOne(
+									'entity_source_artifacts_push_subscriptions',
+									(row) => row['source_id'] === params[0],
 								) as T | null
 							}
 							throw new Error(`Unsupported first query: ${query}`)
@@ -801,6 +811,22 @@ function createJobMutationDatabase(input: {
 											'entity_sources',
 											(row) =>
 												row['id'] === params[0] && row['user_id'] === params[1],
+										),
+										last_row_id: 0,
+									},
+								}
+							}
+							if (
+								normalized ===
+								'DELETE FROM entity_source_artifacts_push_subscriptions WHERE source_id = ? AND user_id = ?'
+							) {
+								return {
+									meta: {
+										changes: deleteWhere(
+											'entity_source_artifacts_push_subscriptions',
+											(row) =>
+												row['source_id'] === params[0] &&
+												row['user_id'] === params[1],
 										),
 										last_row_id: 0,
 									},

@@ -1,5 +1,12 @@
 import { expect, test, vi } from 'vitest'
 
+vi.mock('./artifacts-push-subscriptions.ts', () => ({
+	ensureArtifactsRepoPushSubscription: vi.fn(async () => ({
+		subscriptionId: null,
+		skipped: true,
+	})),
+}))
+
 const { ensureEntitySource } = await import('./source-service.ts')
 
 function createEntitySourceRow() {

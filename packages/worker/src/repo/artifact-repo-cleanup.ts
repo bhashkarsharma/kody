@@ -4,6 +4,11 @@ import {
 	hasArtifactsAccess,
 	type ArtifactDeleteRepoResult,
 } from './artifacts.ts'
+import { deleteArtifactsRepoPushSubscription } from './artifacts-push-subscriptions.ts'
+import {
+	deleteArtifactsPushSubscriptionBySourceId,
+	getArtifactsPushSubscriptionBySourceId,
+} from './artifacts-push-subscription-store.ts'
 import {
 	getEntitySourceByIdForUser,
 	listEntitySourcesByUser,
@@ -79,6 +84,53 @@ function collectUniqueRepoNames(
 	return Array.from(unique)
 }
 
+async function deletePushSubscriptionForSource(input: {
+	env: Env
+	userId: string
+	source: EntitySourceRow
+	warnings?: Array<string>
+}) {
+	const stored = await getArtifactsPushSubscriptionBySourceId(
+		input.env.APP_DB,
+		input.source.id,
+	)
+	if (!stored?.subscription_id) return
+	try {
+		await deleteArtifactsRepoPushSubscription({
+			env: input.env,
+			subscriptionId: stored.subscription_id,
+			repoName: input.source.repo_id,
+		})
+	} catch (error) {
+		const message = getErrorMessage(error)
+		input.warnings?.push(
+			`Artifacts push event subscription delete failed for ${input.source.repo_id}: ${message}`,
+		)
+		console.warn(
+			JSON.stringify({
+				message: 'artifacts push event subscription delete failed',
+				userId: input.userId,
+				repoName: input.source.repo_id,
+				subscriptionId: stored.subscription_id,
+				error: message,
+			}),
+		)
+	}
+	await deleteArtifactsPushSubscriptionBySourceId(input.env.APP_DB, {
+		sourceId: input.source.id,
+		userId: input.userId,
+	}).catch((error) => {
+		console.warn(
+			JSON.stringify({
+				message: 'failed to clear artifacts push subscription row',
+				userId: input.userId,
+				sourceId: input.source.id,
+				error: getErrorMessage(error),
+			}),
+		)
+	})
+}
+
 async function deleteReposForEntitySource(input: {
 	env: Env
 	userId: string
@@ -91,6 +143,12 @@ async function deleteReposForEntitySource(input: {
 		)
 		return 0
 	}
+	await deletePushSubscriptionForSource({
+		env: input.env,
+		userId: input.userId,
+		source: input.source,
+		warnings: input.warnings,
+	})
 	const sessions = await listRepoSessionsBySource(input.env.APP_DB, {
 		userId: input.userId,
 		sourceId: input.source.id,
@@ -221,6 +279,14 @@ export async function cleanupAllUserArtifactRepos(input: {
 		listEntitySourcesByUser(input.env.APP_DB, input.userId),
 		listRepoSessionsByUser(input.env.APP_DB, input.userId),
 	])
+	for (const source of sources) {
+		await deletePushSubscriptionForSource({
+			env: input.env,
+			userId: input.userId,
+			source,
+			warnings: input.warnings,
+		})
+	}
 	const repoNames = collectUniqueRepoNames([
 		...sources.map((source) => source.repo_id),
 		...sessions.map((session) => session.source_repo_id),
