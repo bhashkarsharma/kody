@@ -11,11 +11,25 @@ import {
 	countsTowardPackageActivation,
 } from './package-activation-state.ts'
 import {
+	type JobRunObservabilityBatchSeedResult,
 	type JobRunObservabilityRecord,
+	type JobRunObservabilitySeedApplyStatus,
 	type JobRunObservabilitySeedInput,
 	type JobRunObservabilityStatus,
 	type JobRunObservabilityUpsertInput,
+	jobRunObservabilitySeedMaxBatch,
 } from './job-run-observability.ts'
+import {
+	type LegacyParityVerifyInput,
+	type LegacyParityVerifyResult,
+	assertLegacyParityBoundedArray,
+	bucketParityHolds,
+	coerceLegacyParityMinimumSuccessCount,
+	emptyLegacyParityBucketCounts,
+	isActivationMilestoneName,
+	legacyParitySqlInPlaceholders,
+	normalizeLegacyParityWorkflowCheck,
+} from './legacy-parity.ts'
 import {
 	type WorkflowProjectionRecord,
 	type WorkflowProjectionReserveResult,
@@ -2173,11 +2187,291 @@ class RunLogBase extends DurableObject<Env> {
 	async seedJobRunObservabilityIfAbsent(
 		input: JobRunObservabilitySeedInput,
 	): Promise<{ seeded: boolean }> {
-		const jobId = input.jobId.trim()
-		if (!jobId) return { seeded: false }
+		const result = this.applyJobRunObservabilitySeed(input)
+		return { seeded: result.status === 'seeded' }
+	}
+
+	/**
+	 * Batch expand-phase D1 → RunLog job-observability seed. Reuses the exact
+	 * once-only additive merge of {@link seedJobRunObservabilityIfAbsent}.
+	 * Hard-capped at {@link jobRunObservabilitySeedMaxBatch}; oversized input
+	 * fails rather than silently slicing.
+	 *
+	 * `attempted` is the input length (including blank `jobId` entries). Blank
+	 * ids are neither seeded nor alreadySeeded.
+	 */
+	async seedJobRunObservabilityBatch(input: {
+		seeds: Array<JobRunObservabilitySeedInput>
+	}): Promise<JobRunObservabilityBatchSeedResult> {
+		if (!Array.isArray(input.seeds)) {
+			throw new Error('seedJobRunObservabilityBatch seeds must be an array')
+		}
+		if (input.seeds.length > jobRunObservabilitySeedMaxBatch) {
+			throw new Error(
+				`seedJobRunObservabilityBatch accepts at most ${jobRunObservabilitySeedMaxBatch} seeds (got ${input.seeds.length})`,
+			)
+		}
+		let seeded = 0
+		let alreadySeeded = 0
+		for (const seed of input.seeds) {
+			const status = this.applyJobRunObservabilitySeed(seed).status
+			switch (status) {
+				case 'seeded':
+					seeded += 1
+					break
+				case 'already-seeded':
+					alreadySeeded += 1
+					break
+				case 'blank':
+					break
+				default: {
+					const exhaustive: never = status
+					throw new Error(
+						`Unhandled job observability seed status: ${String(exhaustive)}`,
+					)
+				}
+			}
+		}
+		return {
+			attempted: input.seeds.length,
+			seeded,
+			alreadySeeded,
+		}
+	}
+
+	/**
+	 * Content-free legacy parity check for a bounded expand-phase inventory.
+	 * Returns only matched/missing/under-count buckets, activationInitialized,
+	 * and one parity boolean — never user-authored names, errors, or messages.
+	 * Each input array is hard-capped; oversized input fails closed.
+	 */
+	async verifyLegacyParity(
+		input: LegacyParityVerifyInput,
+	): Promise<LegacyParityVerifyResult> {
+		const workflows = assertLegacyParityBoundedArray(
+			input.workflows,
+			'verifyLegacyParity workflows',
+		)
+		const jobIds = assertLegacyParityBoundedArray(
+			input.jobIds,
+			'verifyLegacyParity jobIds',
+		)
+		const activationPackages = assertLegacyParityBoundedArray(
+			input.activationPackages,
+			'verifyLegacyParity activationPackages',
+		)
+		const activationMilestones = assertLegacyParityBoundedArray(
+			input.activationMilestones,
+			'verifyLegacyParity activationMilestones',
+		)
+
+		const workflowChecks = workflows.map((entry) =>
+			normalizeLegacyParityWorkflowCheck(entry),
+		)
+		const workflowUpdatedAtById = this.loadWorkflowUpdatedAtByIds(
+			workflowChecks
+				.map((check) => check?.id)
+				.filter((id): id is string => id != null),
+		)
+		const workflowCounts = emptyLegacyParityBucketCounts()
+		for (const check of workflowChecks) {
+			if (!check) {
+				workflowCounts.missing += 1
+				continue
+			}
+			const updatedAt = workflowUpdatedAtById.get(check.id)
+			if (updatedAt == null) {
+				workflowCounts.missing += 1
+				continue
+			}
+			const threshold = check.minimumUpdatedAt
+			switch (threshold.status) {
+				case 'absent':
+					workflowCounts.matched += 1
+					break
+				case 'invalid':
+					workflowCounts.underCount += 1
+					break
+				case 'valid': {
+					const storedMs = Date.parse(updatedAt)
+					if (!Number.isFinite(storedMs)) {
+						workflowCounts.underCount += 1
+						break
+					}
+					const storedIso = new Date(storedMs).toISOString()
+					if (storedIso < threshold.iso) {
+						workflowCounts.underCount += 1
+						break
+					}
+					workflowCounts.matched += 1
+					break
+				}
+				default: {
+					const exhaustive: never = threshold
+					throw new Error(
+						`Unhandled workflow minimumUpdatedAt status: ${String(exhaustive)}`,
+					)
+				}
+			}
+		}
+
+		const normalizedJobIds = jobIds.map((rawJobId) => rawJobId?.trim() ?? '')
+		const jobLegacySeededById = this.loadJobLegacySeededByIds(
+			normalizedJobIds.filter((jobId) => jobId.length > 0),
+		)
+		const jobCounts = emptyLegacyParityBucketCounts()
+		for (const jobId of normalizedJobIds) {
+			if (!jobId) {
+				jobCounts.missing += 1
+				continue
+			}
+			const legacySeeded = jobLegacySeededById.get(jobId)
+			if (legacySeeded == null) {
+				jobCounts.missing += 1
+				continue
+			}
+			if (!legacySeeded) {
+				jobCounts.underCount += 1
+				continue
+			}
+			jobCounts.matched += 1
+		}
+
+		const packageChecks = activationPackages.map((check) => {
+			const packageId = check.packageId?.trim() ?? ''
+			const minimumSuccessCount = coerceLegacyParityMinimumSuccessCount(
+				check.minimumSuccessCount,
+			)
+			return { packageId, minimumSuccessCount }
+		})
+		const packageSuccessCountById = this.loadPackageSuccessCountByIds(
+			packageChecks
+				.filter(
+					(check) =>
+						check.packageId.length > 0 && check.minimumSuccessCount != null,
+				)
+				.map((check) => check.packageId),
+		)
+		const packageCounts = emptyLegacyParityBucketCounts()
+		for (const check of packageChecks) {
+			if (!check.packageId) {
+				packageCounts.missing += 1
+				continue
+			}
+			// Non-finite minimums fail closed as underCount (not matched).
+			if (check.minimumSuccessCount == null) {
+				packageCounts.underCount += 1
+				continue
+			}
+			const successCount = packageSuccessCountById.get(check.packageId)
+			if (successCount == null) {
+				packageCounts.missing += 1
+				continue
+			}
+			if (successCount < check.minimumSuccessCount) {
+				packageCounts.underCount += 1
+				continue
+			}
+			packageCounts.matched += 1
+		}
+
+		const milestoneCounts = emptyLegacyParityBucketCounts()
+		for (const rawMilestone of activationMilestones) {
+			const milestone =
+				typeof rawMilestone === 'string' ? rawMilestone.trim() : ''
+			if (!milestone || !isActivationMilestoneName(milestone)) {
+				milestoneCounts.missing += 1
+				continue
+			}
+			if (this.hasActivationMilestone(milestone)) {
+				milestoneCounts.matched += 1
+			} else {
+				milestoneCounts.missing += 1
+			}
+		}
+
+		const activationInitialized =
+			(this.getMeta(metaActivationInitializedKey) ?? 0) === 1
+		const parity =
+			bucketParityHolds(workflowCounts) &&
+			bucketParityHolds(jobCounts) &&
+			bucketParityHolds(packageCounts) &&
+			bucketParityHolds(milestoneCounts)
+
+		return {
+			workflows: workflowCounts,
+			jobs: jobCounts,
+			activationPackages: packageCounts,
+			activationMilestones: milestoneCounts,
+			activationInitialized,
+			parity,
+		}
+	}
+
+	private loadWorkflowUpdatedAtByIds(ids: Array<string>): Map<string, string> {
+		const uniqueIds = [...new Set(ids)]
+		const byId = new Map<string, string>()
+		if (uniqueIds.length === 0) return byId
+		const placeholders = legacyParitySqlInPlaceholders(uniqueIds.length)
+		const rows = this.ctx.storage.sql
+			.exec<{ id: string; updated_at: string }>(
+				`SELECT id, updated_at FROM workflow_projections
+				WHERE id IN (${placeholders})`,
+				...uniqueIds,
+			)
+			.toArray()
+		for (const row of rows) {
+			byId.set(String(row.id), String(row.updated_at))
+		}
+		return byId
+	}
+
+	private loadJobLegacySeededByIds(ids: Array<string>): Map<string, boolean> {
+		const uniqueIds = [...new Set(ids)]
+		const byId = new Map<string, boolean>()
+		if (uniqueIds.length === 0) return byId
+		const placeholders = legacyParitySqlInPlaceholders(uniqueIds.length)
+		const rows = this.ctx.storage.sql
+			.exec<{ job_id: string; legacy_seeded: number }>(
+				`SELECT job_id, legacy_seeded FROM job_run_observability
+				WHERE job_id IN (${placeholders})`,
+				...uniqueIds,
+			)
+			.toArray()
+		for (const row of rows) {
+			byId.set(String(row.job_id), Number(row.legacy_seeded ?? 0) === 1)
+		}
+		return byId
+	}
+
+	private loadPackageSuccessCountByIds(
+		ids: Array<string>,
+	): Map<string, number> {
+		const uniqueIds = [...new Set(ids)]
+		const byId = new Map<string, number>()
+		if (uniqueIds.length === 0) return byId
+		const placeholders = legacyParitySqlInPlaceholders(uniqueIds.length)
+		const rows = this.ctx.storage.sql
+			.exec<{ package_id: string; success_count: number }>(
+				`SELECT package_id, success_count FROM package_run_successes
+				WHERE package_id IN (${placeholders})`,
+				...uniqueIds,
+			)
+			.toArray()
+		for (const row of rows) {
+			byId.set(String(row.package_id), Number(row.success_count) || 0)
+		}
+		return byId
+	}
+
+	private applyJobRunObservabilitySeed(input: JobRunObservabilitySeedInput): {
+		status: JobRunObservabilitySeedApplyStatus
+	} {
+		const jobId = typeof input.jobId === 'string' ? input.jobId.trim() : ''
+		if (!jobId) return { status: 'blank' }
 		const existing = this.getJobRunObservabilitySync(jobId)
 		if (existing?.legacySeeded) {
-			return { seeded: false }
+			return { status: 'already-seeded' }
 		}
 		const lastRunStatus =
 			input.lastRunStatus === 'success' || input.lastRunStatus === 'error'
@@ -2186,7 +2480,10 @@ class RunLogBase extends DurableObject<Env> {
 		const legacyRunCount = Math.max(0, Math.trunc(input.runCount))
 		const legacySuccessCount = Math.max(0, Math.trunc(input.successCount))
 		const legacyErrorCount = Math.max(0, Math.trunc(input.errorCount))
-		const legacyUpdatedAt = input.updatedAt.trim() || new Date().toISOString()
+		const legacyUpdatedAt =
+			typeof input.updatedAt === 'string' && input.updatedAt.trim()
+				? input.updatedAt.trim()
+				: new Date().toISOString()
 
 		if (!existing) {
 			this.ctx.storage.sql.exec(
@@ -2204,7 +2501,7 @@ class RunLogBase extends DurableObject<Env> {
 				legacyErrorCount,
 				legacyUpdatedAt,
 			)
-			return { seeded: true }
+			return { status: 'seeded' }
 		}
 
 		const legacyLastRunAt = input.lastRunAt
@@ -2249,7 +2546,7 @@ class RunLogBase extends DurableObject<Env> {
 			mergedUpdatedAt,
 			jobId,
 		)
-		return { seeded: true }
+		return { status: 'seeded' }
 	}
 
 	private getJobRunObservabilitySync(
@@ -3080,6 +3377,12 @@ export type RunLogRpc = {
 	seedJobRunObservabilityIfAbsent: (
 		input: JobRunObservabilitySeedInput,
 	) => Promise<{ seeded: boolean }>
+	seedJobRunObservabilityBatch: (input: {
+		seeds: Array<JobRunObservabilitySeedInput>
+	}) => Promise<JobRunObservabilityBatchSeedResult>
+	verifyLegacyParity: (
+		input: LegacyParityVerifyInput,
+	) => Promise<LegacyParityVerifyResult>
 	getJobRunObservability: (input: {
 		jobId: string
 	}) => Promise<JobRunObservabilityRecord | null>
