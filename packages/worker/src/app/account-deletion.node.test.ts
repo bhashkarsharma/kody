@@ -8,7 +8,10 @@ import {
 	deleteUserAccount,
 	getAccountDeletionD1UserColumnCoverage,
 } from './account-deletion.ts'
-import { accountUserDataExcludedOwnerIds } from '#worker/account/data-targets.ts'
+import {
+	accountQuiescentDetachedD1ProjectionTables,
+	accountUserDataExcludedOwnerIds,
+} from '#worker/account/data-targets.ts'
 import { jobVectorId } from '#mcp/jobs-vectorize.ts'
 import {
 	AccountDeletionInProgressError,
@@ -586,6 +589,13 @@ test('account deletion D1 coverage includes every live user-owned schema column'
 		.all() as Array<{ name: string }>
 	const liveUserColumns = new Set<string>()
 	for (const table of tables) {
+		if (
+			accountQuiescentDetachedD1ProjectionTables.some(
+				(candidate) => candidate === table.name,
+			)
+		) {
+			continue
+		}
 		const columns = db
 			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
 			.all() as Array<{ name: string }>
@@ -780,7 +790,6 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 				conversation_id: 'conv-1',
 			},
 		],
-		workflow_runs: [{ id: 'wr-1', user_id: userAaa }],
 		mcp_memory_conversation_suppressions: [
 			{ user_id: userAaa, conversation_id: 'c1', memory_id: 'mem-1' },
 		],

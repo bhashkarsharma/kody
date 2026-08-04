@@ -72,6 +72,18 @@ export const accountUserDataExcludedOwnerIds = [
 ] as const
 
 /**
+ * Legacy RunLog D1 projection tables kept as quiescent rollback copies after
+ * the RunLog authority application deploy. Deploy 2 detaches account
+ * deletion/export inventory and the hourly D1 workflow_runs retention lane;
+ * migration-only `0137` drops the physical tables.
+ */
+export const accountQuiescentDetachedD1ProjectionTables = [
+	'workflow_runs',
+	'user_package_run_successes',
+	'user_activation_milestones',
+] as const
+
+/**
  * D1 tables that are operator/platform owned by construction and have no
  * user-id ownership column. They are permanently outside account deletion and
  * export; listing them here keeps that disposition explicit in export manifests.
@@ -160,7 +172,6 @@ export function getAccountExportExcludedD1Surfaces(): Array<{
  */
 export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 	{ kind: 'user_id', table: 'package_invocation_tokens' },
-	{ kind: 'user_id', table: 'workflow_runs' },
 	{ kind: 'user_id', table: 'package_service_states' },
 	{ kind: 'user_id', table: 'user_storage_buckets' },
 	{
@@ -173,8 +184,6 @@ export const accountUserDataTargets: ReadonlyArray<UserScopedDataTarget> = [
 	},
 	{ kind: 'user_id', table: 'usage_rollups' },
 	{ kind: 'user_id', table: 'feature_flag_exposure_rollups' },
-	{ kind: 'user_id', table: 'user_activation_milestones' },
-	{ kind: 'user_id', table: 'user_package_run_successes' },
 	{ kind: 'user_id', table: 'agent_package_conversation_uses' },
 	// Per-package codemod outcomes belong to the package owner. Delete before
 	// anonymizing run attribution so orphaned items do not outlive the user.

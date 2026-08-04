@@ -7,6 +7,7 @@ import {
 	accountExportRedactedColumnsByTable,
 	accountExportRedactedForeignUserId,
 	accountOperatorOwnedD1Surfaces,
+	accountQuiescentDetachedD1ProjectionTables,
 	accountUserDataTargets,
 	buildUserScopedDeleteOrUpdateSql,
 	buildUserScopedTargetMatch,
@@ -301,8 +302,96 @@ test('final schema drops entitlement_daily_counters without stale inventory cove
 	const coveredColumns = getAccountD1UserColumnCoverage()
 	expect(coveredColumns.has('entitlement_daily_counters.user_id')).toBe(false)
 	expect(liveUserColumns.has('entitlement_daily_counters.user_id')).toBe(false)
+	const quiescentDetachedColumns = new Set(
+		accountQuiescentDetachedD1ProjectionTables.map(
+			(table) => `${table}.user_id`,
+		),
+	)
 	const missing = [...liveUserColumns].filter(
-		(column) => !coveredColumns.has(column),
+		(column) =>
+			!coveredColumns.has(column) && !quiescentDetachedColumns.has(column),
+	)
+	const stale = [...coveredColumns].filter(
+		(column) => !liveUserColumns.has(column),
+	)
+	expect(missing).toEqual([])
+	expect(stale).toEqual([])
+})
+
+test('final schema keeps quiescent legacy RunLog D1 projections without stale inventory coverage', () => {
+	const quiescentTables = accountQuiescentDetachedD1ProjectionTables
+	for (const table of quiescentTables) {
+		expect(
+			accountUserDataTargets.some(
+				(target) => 'table' in target && target.table === table,
+			),
+		).toBe(false)
+	}
+
+	const deletionStatements = accountUserDataTargets.map((target) => {
+		const match = matchFor(target)
+		return buildUserScopedDeleteOrUpdateSql(match).sql
+	})
+	const exportStatements = accountUserDataTargets
+		.filter((target) => !isExcludedFromAccountExport(target))
+		.map((target) => {
+			const match = matchFor(target)
+			return `SELECT * FROM ${match.table} WHERE ${match.qualifiedWhereSql}`
+		})
+	const inventorySql = [
+		deletionStatements.join('\n'),
+		exportStatements.join('\n'),
+	].join('\n')
+	for (const table of quiescentTables) {
+		expect(inventorySql).not.toMatch(new RegExp(`\\b${table}\\b`, 'u'))
+	}
+
+	const db = new DatabaseSync(':memory:')
+	applyMigrations(db)
+	for (const table of quiescentTables) {
+		const tableExists = db
+			.prepare(
+				`SELECT 1 AS present
+				FROM sqlite_schema
+				WHERE type = 'table' AND name = ?`,
+			)
+			.get(table) as { present: number } | undefined
+		expect(
+			tableExists,
+			`${table} should remain as a quiescent rollback copy before migration 0137`,
+		).toBeDefined()
+	}
+
+	const liveUserColumns = new Set<string>()
+	const tables = db
+		.prepare(
+			`SELECT name
+			FROM sqlite_schema
+			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+			ORDER BY name`,
+		)
+		.all() as Array<{ name: string }>
+	for (const table of tables) {
+		const columns = db
+			.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table.name)})`)
+			.all() as Array<{ name: string }>
+		for (const column of columns) {
+			if (column.name === 'user_id' || column.name.endsWith('_user_id')) {
+				liveUserColumns.add(`${table.name}.${column.name}`)
+			}
+		}
+	}
+	const coveredColumns = getAccountD1UserColumnCoverage()
+	const quiescentDetachedColumns = new Set(
+		quiescentTables.map((table) => `${table}.user_id`),
+	)
+	for (const table of quiescentTables) {
+		expect(coveredColumns.has(`${table}.user_id`)).toBe(false)
+		expect(liveUserColumns.has(`${table}.user_id`)).toBe(true)
+	}
+	const missing = [...liveUserColumns].filter(
+		(column) =>
+			!coveredColumns.has(column) && !quiescentDetachedColumns.has(column),
 	)
 	const stale = [...coveredColumns].filter(
 		(column) => !liveUserColumns.has(column),
