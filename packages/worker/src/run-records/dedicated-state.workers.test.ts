@@ -14,10 +14,10 @@ import {
 	findWorkflowProjectionByIdempotencyKey,
 	finishPackageInvocationRecord,
 	finishRunRecord,
+	getAdminInsightsSnapshot,
 	getJobRunObservability,
 	getJobRunObservabilityBatch,
 	getWorkflowProjection,
-	importWorkflowProjections,
 	listActivationMilestones,
 	listPackageRunSuccesses,
 	listRunRecords,
@@ -387,103 +387,6 @@ test('reserveWorkflowProjectionSlot serializes concurrent creating, prunes stale
 	})
 	expect(sameId.countBeforeReservation).toBe(0)
 	expect(sameId).toMatchObject({ reserved: true, inserted: false })
-})
-
-test('importWorkflowProjections batches rows with monotonic and terminal-sticky guards', async () => {
-	const userId = uniqueUserId('wf-batch-import')
-	await upsertWorkflowProjection({
-		env,
-		userId,
-		projection: {
-			id: 'wf-batch-terminal',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
-			sourceType: 'inline',
-			workflowName: 'done',
-			idempotencyKey: 'batch-terminal',
-			runAt: '2026-07-31T20:00:00.000Z',
-			status: 'cancelled',
-			createdAt: '2026-07-31T20:00:00.000Z',
-			updatedAt: '2026-07-31T20:00:00.000Z',
-			completedAt: '2026-07-31T20:00:00.000Z',
-		},
-	})
-	await upsertWorkflowProjection({
-		env,
-		userId,
-		projection: {
-			id: 'wf-batch-newer',
-			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
-			sourceType: 'inline',
-			workflowName: 'live',
-			idempotencyKey: 'batch-newer',
-			runAt: '2026-07-31T20:00:00.000Z',
-			status: 'running',
-			createdAt: '2026-07-31T20:00:00.000Z',
-			updatedAt: '2026-07-31T20:00:02.000Z',
-		},
-	})
-
-	const result = await importWorkflowProjections({
-		env,
-		userId,
-		projections: [
-			{
-				id: 'wf-batch-terminal',
-				bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
-				sourceType: 'inline',
-				workflowName: 'done',
-				idempotencyKey: 'batch-terminal',
-				runAt: '2026-07-31T20:00:01.000Z',
-				status: 'queued',
-				createdAt: '2026-07-31T20:00:00.000Z',
-				updatedAt: '2026-07-31T20:00:01.000Z',
-				completedAt: null,
-			},
-			{
-				id: 'wf-batch-newer',
-				bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
-				sourceType: 'inline',
-				workflowName: 'live',
-				idempotencyKey: 'batch-newer',
-				runAt: '2026-07-31T19:00:00.000Z',
-				status: 'queued',
-				createdAt: '2026-07-31T19:00:00.000Z',
-				updatedAt: '2026-07-31T20:00:01.000Z',
-			},
-			{
-				id: 'wf-batch-fresh',
-				bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
-				sourceType: 'package',
-				packageId: 'pkg-1',
-				workflowName: 'nightly',
-				exportName: 'run',
-				idempotencyKey: 'batch-fresh',
-				runAt: '2026-07-31T21:00:00.000Z',
-				status: 'running',
-				createdAt: '2026-07-31T21:00:00.000Z',
-				updatedAt: '2026-07-31T21:00:00.000Z',
-			},
-		],
-	})
-	expect(result).toEqual({ imported: 3 })
-	expect(
-		await getWorkflowProjection({ env, userId, id: 'wf-batch-terminal' }),
-	).toMatchObject({
-		status: 'cancelled',
-		updatedAt: '2026-07-31T20:00:00.000Z',
-	})
-	expect(
-		await getWorkflowProjection({ env, userId, id: 'wf-batch-newer' }),
-	).toMatchObject({
-		status: 'running',
-		updatedAt: '2026-07-31T20:00:02.000Z',
-	})
-	expect(
-		await getWorkflowProjection({ env, userId, id: 'wf-batch-fresh' }),
-	).toMatchObject({
-		status: 'running',
-		idempotencyKey: 'batch-fresh',
-	})
 })
 
 test('workflow projection upsert keeps terminal status sticky against newer active/creating', async () => {
@@ -1290,5 +1193,282 @@ test('export cursors always make progress across phase handoffs and empty tails'
 			packageRunSuccesses: [],
 			activationMilestones: [],
 		})
+	}
+})
+
+function jobRunObservabilityColumnNames(state: DurableObjectState) {
+	return state.storage.sql
+		.exec<{ name: string }>(`PRAGMA table_info(job_run_observability)`)
+		.toArray()
+		.map((row) => String(row.name))
+}
+
+test('fresh schema v8 creates job_run_observability with inert legacy_seeded for rollback', async () => {
+	const userId = uniqueUserId('schema-v8-fresh')
+	const stub = env.RUN_LOG.get(env.RUN_LOG.idFromName(userId))
+	await runInDurableObject(stub, async (instance: RunLog, state) => {
+		expect(instance).toBeInstanceOf(RunLog)
+		const version = state.storage.sql
+			.exec<{ value: number }>(
+				`SELECT value FROM run_log_meta WHERE key = 'schema_version' LIMIT 1`,
+			)
+			.toArray()[0]
+		expect(Number(version?.value)).toBe(8)
+
+		expect(jobRunObservabilityColumnNames(state)).toEqual([
+			'job_id',
+			'last_run_at',
+			'last_run_status',
+			'last_run_error',
+			'last_duration_ms',
+			'run_count',
+			'success_count',
+			'error_count',
+			'updated_at',
+			'legacy_seeded',
+		])
+
+		// Simulated v7-style INSERT including legacy_seeded must succeed on
+		// fresh v8 storage so a rollback deploy can still write the column.
+		state.storage.sql.exec(
+			`INSERT INTO job_run_observability (
+				job_id, last_run_at, last_run_status, last_run_error, last_duration_ms,
+				run_count, success_count, error_count, updated_at, legacy_seeded
+			) VALUES ('job-v7-insert', '2026-08-01T00:00:00.000Z', 'success', NULL, 10,
+				3, 2, 1, '2026-08-01T00:00:00.000Z', 1)`,
+		)
+		const seeded = state.storage.sql
+			.exec<{ legacy_seeded: number }>(
+				`SELECT legacy_seeded FROM job_run_observability
+				WHERE job_id = 'job-v7-insert' LIMIT 1`,
+			)
+			.toArray()[0]
+		expect(Number(seeded?.legacy_seeded)).toBe(1)
+	})
+
+	const updated = await upsertJobRunObservability({
+		env,
+		userId,
+		outcome: {
+			jobId: 'job-v7-insert',
+			status: 'error',
+			ranAt: '2026-08-01T01:00:00.000Z',
+			error: 'post-v8',
+		},
+	})
+	expect(updated).toMatchObject({
+		jobId: 'job-v7-insert',
+		runCount: 4,
+		successCount: 2,
+		errorCount: 2,
+		lastRunStatus: 'error',
+		lastRunError: 'post-v8',
+	})
+	expect(updated).not.toHaveProperty('legacySeeded')
+})
+
+test('warm schema v7 job_run_observability upgrades to v8 without ALTER', async () => {
+	const userId = uniqueUserId('schema-v7-warm')
+	const stub = env.RUN_LOG.get(env.RUN_LOG.idFromName(userId))
+	await runInDurableObject(stub, async (instance: RunLog, state) => {
+		expect(instance).toBeInstanceOf(RunLog)
+		await state.storage.deleteAll()
+
+		state.storage.sql.exec(`
+			CREATE TABLE run_log_meta (
+				key TEXT PRIMARY KEY NOT NULL,
+				value INTEGER NOT NULL
+			)
+		`)
+		state.storage.sql.exec(
+			`INSERT INTO run_log_meta (key, value) VALUES ('schema_version', 7)`,
+		)
+		state.storage.sql.exec(`
+			CREATE TABLE job_run_observability (
+				job_id TEXT PRIMARY KEY NOT NULL,
+				last_run_at TEXT,
+				last_run_status TEXT,
+				last_run_error TEXT,
+				last_duration_ms INTEGER,
+				run_count INTEGER NOT NULL DEFAULT 0,
+				success_count INTEGER NOT NULL DEFAULT 0,
+				error_count INTEGER NOT NULL DEFAULT 0,
+				updated_at TEXT NOT NULL,
+				legacy_seeded INTEGER NOT NULL DEFAULT 0
+			)
+		`)
+		state.storage.sql.exec(
+			`INSERT INTO job_run_observability (
+				job_id, last_run_at, last_run_status, last_run_error, last_duration_ms,
+				run_count, success_count, error_count, updated_at, legacy_seeded
+			) VALUES ('job-warm-v7', '2026-07-01T00:00:00.000Z', 'success', NULL, 5,
+				1, 1, 0, '2026-07-01T00:00:00.000Z', 1)`,
+		)
+
+		const alterStatements: Array<string> = []
+		const originalExec = state.storage.sql.exec.bind(state.storage.sql)
+		state.storage.sql.exec = (query: string, ...args: Array<unknown>) => {
+			if (/ALTER\s+TABLE/i.test(query)) {
+				alterStatements.push(query)
+			}
+			return originalExec(query, ...args)
+		}
+
+		const proto = Object.getPrototypeOf(instance) as {
+			initializeSchema: () => void
+		}
+		proto.initializeSchema.call(instance)
+
+		expect(alterStatements).toEqual([])
+		const version = state.storage.sql
+			.exec<{ value: number }>(
+				`SELECT value FROM run_log_meta WHERE key = 'schema_version' LIMIT 1`,
+			)
+			.toArray()[0]
+		expect(Number(version?.value)).toBe(8)
+		expect(jobRunObservabilityColumnNames(state)).toContain('legacy_seeded')
+
+		const preserved = state.storage.sql
+			.exec<{ legacy_seeded: number; run_count: number }>(
+				`SELECT legacy_seeded, run_count FROM job_run_observability
+				WHERE job_id = 'job-warm-v7' LIMIT 1`,
+			)
+			.toArray()[0]
+		expect(Number(preserved?.legacy_seeded)).toBe(1)
+		expect(Number(preserved?.run_count)).toBe(1)
+	})
+
+	const read = await getJobRunObservability({
+		env,
+		userId,
+		jobId: 'job-warm-v7',
+	})
+	expect(read).toMatchObject({
+		jobId: 'job-warm-v7',
+		runCount: 1,
+		successCount: 1,
+		lastRunStatus: 'success',
+	})
+	expect(read).not.toHaveProperty('legacySeeded')
+})
+
+test('getAdminInsightsSnapshot returns content-free workflow counts and milestones', async () => {
+	silenceExpectedConsoleWarns(['activation-run-record-failed'])
+	const userId = uniqueUserId('admin-insights')
+	const reachedAt = '2026-08-01T12:00:00.000Z'
+
+	await upsertWorkflowProjection({
+		env,
+		userId,
+		projection: {
+			id: 'wf-running-1',
+			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			sourceType: 'inline',
+			workflowName: 'secret-name-must-not-leak',
+			idempotencyKey: 'admin-running-1',
+			runAt: reachedAt,
+			status: 'running',
+			createdAt: reachedAt,
+			updatedAt: reachedAt,
+			lastError: 'secret-error-must-not-leak',
+		},
+	})
+	await upsertWorkflowProjection({
+		env,
+		userId,
+		projection: {
+			id: 'wf-running-2',
+			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			sourceType: 'inline',
+			workflowName: 'other',
+			idempotencyKey: 'admin-running-2',
+			runAt: reachedAt,
+			status: 'running',
+			createdAt: reachedAt,
+			updatedAt: reachedAt,
+		},
+	})
+	await upsertWorkflowProjection({
+		env,
+		userId,
+		projection: {
+			id: 'wf-complete',
+			bindingName: 'DYNAMIC_CALLABLE_WORKFLOWS',
+			sourceType: 'inline',
+			workflowName: 'done',
+			idempotencyKey: 'admin-complete',
+			runAt: reachedAt,
+			status: 'complete',
+			createdAt: reachedAt,
+			updatedAt: reachedAt,
+			completedAt: reachedAt,
+		},
+	})
+
+	await finishRunRecord({
+		env,
+		handle: beginRunRecord({
+			env,
+			userId,
+			context: {
+				surface: 'job',
+				name: 'activate',
+				packageId: 'pkg-admin',
+				jobId: 'job-admin',
+			},
+		}),
+		status: 'success',
+	})
+	await finishRunRecord({
+		env,
+		handle: beginRunRecord({
+			env,
+			userId,
+			context: {
+				surface: 'job',
+				name: 'activate-2',
+				packageId: 'pkg-admin',
+			},
+		}),
+		status: 'success',
+	})
+
+	const snapshot = await getAdminInsightsSnapshot({ env, userId })
+	expect(snapshot.workflowStatusCounts).toEqual([
+		{ status: 'running', count: 2 },
+		{ status: 'complete', count: 1 },
+	])
+	expect(snapshot.activationMilestones).toEqual([
+		expect.objectContaining({
+			milestone: 'package_activated',
+			packageId: 'pkg-admin',
+			reachedAt: expect.any(String),
+		}),
+		expect.objectContaining({
+			milestone: 'package_run_succeeded',
+			packageId: 'pkg-admin',
+			reachedAt: expect.any(String),
+		}),
+	])
+
+	const serialized = JSON.stringify(snapshot)
+	expect(serialized).not.toMatch(/secret-name-must-not-leak/)
+	expect(serialized).not.toMatch(/secret-error-must-not-leak/)
+	expect(serialized).not.toMatch(/job-admin/)
+	expect(serialized).not.toMatch(/"name"/)
+	expect(serialized).not.toMatch(/lastError|errorMessage|workflowName|"logs"/)
+
+	for (const key of Object.keys(snapshot)) {
+		expect(['workflowStatusCounts', 'activationMilestones']).toContain(key)
+	}
+	for (const row of snapshot.workflowStatusCounts) {
+		expect(Object.keys(row).sort()).toEqual(['count', 'status'])
+	}
+	for (const row of snapshot.activationMilestones) {
+		expect(Object.keys(row).sort()).toEqual([
+			'milestone',
+			'packageId',
+			'reachedAt',
+		])
 	}
 })
