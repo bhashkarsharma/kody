@@ -285,7 +285,7 @@ export type AdminUsageEntitlementResource =
 	| 'execute_calls_per_day'
 	| 'outbound_fetches_per_day'
 
-export type AdminPlanName = 'free' | 'partner' | 'pro' | 'max'
+export type AdminPlanName = 'free' | 'standard' | 'pro' | 'max'
 
 export type AdminUsageRollup = {
 	metric: AdminUsageMetric
@@ -1297,7 +1297,7 @@ export type AccountBillingLoaderData = {
 	cancelAt: string | null
 	/** Stripe subscription status from on-page refresh; null if unknown/unavailable. */
 	subscriptionStatus: string | null
-	checkoutAvailable: boolean
+	purchasablePlans: Array<'standard' | 'pro'>
 	/** Deep link to the account usage page (limits / consumption). */
 	usageHref: '/account/usage'
 	error?: string
@@ -1307,7 +1307,7 @@ export type AccountUsageEntitlementConsumption = {
 	resource: string
 	label: string
 	group: 'daily' | 'counts' | 'storage' | 'limits'
-	kind: 'counter' | 'boolean_allowance' | 'per_unit_max'
+	kind: 'counter' | 'per_unit_max'
 	whatCounts: string
 	howToReduce: string
 	current: number
