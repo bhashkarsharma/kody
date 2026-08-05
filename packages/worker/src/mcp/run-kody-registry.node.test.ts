@@ -588,6 +588,7 @@ function createJobMutationDatabase(input: {
 		['jobs', structuredClone(input.jobs)],
 		['entity_sources', structuredClone(input.entitySources)],
 		['repo_sessions', structuredClone(input.repoSessions ?? [])],
+		['user_storage_buckets', []],
 		[
 			'published_bundle_artifacts',
 			structuredClone(input.publishedBundleArtifacts ?? []),
@@ -754,6 +755,33 @@ function createJobMutationDatabase(input: {
 								'DELETE FROM user_storage_buckets WHERE user_id = ? AND storage_id = ?'
 							) {
 								return { meta: { changes: 0, last_row_id: 0 } }
+							}
+							if (
+								normalized.startsWith(
+									'DELETE FROM user_storage_buckets WHERE user_id = ? AND kind =',
+								)
+							) {
+								const sessionIds = new Set(
+									table('repo_sessions')
+										.filter(
+											(row) =>
+												row['user_id'] === params[2] &&
+												row['source_id'] === params[3],
+										)
+										.map((row) => `${String(params[1])}${String(row['id'])}`),
+								)
+								return {
+									meta: {
+										changes: deleteWhere(
+											'user_storage_buckets',
+											(row) =>
+												row['user_id'] === params[0] &&
+												row['kind'] === 'repo_session' &&
+												sessionIds.has(String(row['storage_id'])),
+										),
+										last_row_id: 0,
+									},
+								}
 							}
 							if (
 								normalized ===
