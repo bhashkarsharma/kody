@@ -24,3 +24,6 @@ behavior (see [documentation principles](../documentation.md)).
 - [0003 — Repos are the base primitive; packages are an explicit extension](./0003-repos-as-base-primitive.md)
 - [0004 — Status page as a separate worker with its own storage](./0004-status-page-separate-worker.md)
 - [0005 — MCP dual-lane serving with metrics-driven legacy retirement](./0005-mcp-dual-lane-stateless-migration.md)
+- [0006 — No repo/package CI primitive for now](./0006-no-repo-ci-primitive.md)
+- [0007 — Keep in-house feature flags; revisit Flagship at GA](./0007-keep-in-house-feature-flags.md)
+- [0008 — Declined ADLC primitives (traces, previews, browser runs, session mining)](./0008-declined-adlc-primitives.md)
