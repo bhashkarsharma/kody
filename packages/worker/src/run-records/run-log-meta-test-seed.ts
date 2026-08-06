@@ -1,5 +1,3 @@
-import type { RunLog } from './run-log-do.ts'
-
 type RunLogMetaMutator = {
 	setMeta(key: string, value: number): void
 }
@@ -9,13 +7,13 @@ type RunLogMetaMutator = {
  * stay coherent. Raw SQL inserts bypass `setMeta` and leave stale memos.
  */
 export function seedRunLogMeta(
-	instance: RunLog,
+	instance: object,
 	input: {
 		finishesSinceRetention?: number
 		runCount?: number
 	},
 ) {
-	const meta = instance as unknown as RunLogMetaMutator
+	const meta = instance as RunLogMetaMutator
 	if (typeof input.finishesSinceRetention === 'number') {
 		meta.setMeta('finishes_since_retention', input.finishesSinceRetention)
 	}
