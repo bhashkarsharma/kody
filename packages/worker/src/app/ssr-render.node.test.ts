@@ -568,8 +568,8 @@ test('renderAppPage renders the redesigned pricing page', async () => {
 	expect(html).toContain(String(planLimits.pro.maxSavedPackages))
 	expect(html).toContain(formatLimitBytes(planLimits.free.maxEmailMessageBytes))
 	expect(html).toContain(formatLimitBytes(planLimits.pro.maxStorageBytes))
-	// Invite/admin note
-	expect(html).toContain('invite-only plan')
+	// The Max plan is invite-only and intentionally has no mention on the page.
+	expect(html).not.toContain('invite-only plan')
 })
 
 test('renderAppPage renders the redesigned blog index', async () => {
