@@ -23,6 +23,7 @@ import {
 	type WorkflowProjectionUpsertInput,
 } from './workflow-projection.ts'
 import {
+	type RunErrorTriage,
 	type RunRecord,
 	type RunRecordContext,
 	type RunRecordFilter,
@@ -521,8 +522,42 @@ export async function listRunRecords(input: {
 		jobId: normalizeOptionalString(input.filter?.jobId),
 		name: normalizeOptionalString(input.filter?.name),
 		since: normalizeOptionalString(input.filter?.since),
+		errorTriage: input.filter?.errorTriage ?? null,
 		limit,
 		cursor: input.cursor ?? null,
+	})
+}
+
+export type UpdateRunErrorTriageOutcome =
+	| { ok: true; run: RunRecord }
+	| { ok: false; reason: 'not_found' }
+	| { ok: false; reason: 'not_error'; status: RunStatus; runId: string }
+	| { ok: false; reason: 'unavailable' }
+
+/**
+ * Soft-triage a retained error run (`ignored` / `resolved`) or clear triage
+ * (`errorTriage: null`). Non-destructive: error details stay on the record.
+ */
+export async function updateRunErrorTriage(input: {
+	env: Env
+	userId: string
+	runId: string
+	errorTriage: RunErrorTriage | null
+	triageNote?: string | null
+}): Promise<UpdateRunErrorTriageOutcome> {
+	if (!runLogBinding(input.env)) return { ok: false, reason: 'unavailable' }
+	// Treat omitted / undefined note as preserve. Pass an explicit boolean over
+	// DO RPC so we do not depend on `undefined` surviving structured clone.
+	const preserveTriageNote = input.triageNote === undefined
+	return await runLogRpc({
+		env: input.env,
+		userId: input.userId,
+	}).updateRunErrorTriage({
+		runId: input.runId,
+		errorTriage: input.errorTriage,
+		preserveTriageNote,
+		triageNote: preserveTriageNote ? null : (input.triageNote ?? null),
+		triagedBy: input.userId,
 	})
 }
 
@@ -802,6 +837,8 @@ export async function summarizeRunRecords(input: {
 			since,
 			total: 0,
 			errors: 0,
+			ignored: 0,
+			resolved: 0,
 			running: 0,
 			bySurface: [],
 		}

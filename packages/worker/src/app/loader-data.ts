@@ -1061,6 +1061,12 @@ export type AccountActivitySurfaceFilter =
 	| 'retriever'
 	| 'webhook'
 
+export type AccountActivityTriageFilter =
+	| 'open'
+	| 'ignored'
+	| 'resolved'
+	| 'all'
+
 export type AccountActivityRunListItem = {
 	id: string
 	surface: Exclude<AccountActivitySurfaceFilter, 'all'>
@@ -1071,6 +1077,7 @@ export type AccountActivityRunListItem = {
 	durationMs: number | null
 	errorName: string | null
 	errorMessage: string | null
+	errorTriage: 'ignored' | 'resolved' | null
 	packageId: string | null
 	jobId: string | null
 	logCount: number
@@ -1093,6 +1100,9 @@ export type AccountActivityRunDetail = AccountActivityRunListItem & {
 	sessionId: string | null
 	idempotencyKey: string | null
 	parentRunId: string | null
+	triageNote: string | null
+	triagedAt: string | null
+	triagedBy: string | null
 	metadata: { [key: string]: AccountLoaderJsonValue }
 	logs: Array<AccountActivityRunLog>
 }
@@ -1101,6 +1111,8 @@ export type AccountActivitySummary = {
 	since: string
 	total: number
 	errors: number
+	ignored: number
+	resolved: number
 	running: number
 }
 
@@ -1108,6 +1120,7 @@ export type AccountActivityLoaderData = {
 	ok: true
 	statusFilter: AccountActivityStatusFilter
 	surfaceFilter: AccountActivitySurfaceFilter
+	triageFilter: AccountActivityTriageFilter
 	summary: AccountActivitySummary
 	runs: Array<AccountActivityRunListItem>
 	nextCursor: string | null
