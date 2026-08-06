@@ -727,6 +727,22 @@ class RunLogBase extends DurableObject<Env> {
 		}
 	}
 
+	/**
+	 * `setMeta` updates counter memos eagerly so hot paths skip re-SELECTs.
+	 * When those writes run inside `transactionSync`, a later failure rolls
+	 * SQL back but would leave the memos ahead of storage — drop them before
+	 * rethrowing so the next read reloads.
+	 */
+	private transactionSyncWithMetaCache<T>(fn: () => T): T {
+		try {
+			return this.ctx.storage.transactionSync(fn)
+		} catch (error) {
+			this.runCountCache = null
+			this.finishesSinceRetentionCache = null
+			throw error
+		}
+	}
+
 	private ensureRunCountMeta() {
 		const existing = this.getMeta(metaRunCountKey)
 		if (existing != null) {
@@ -1660,7 +1676,7 @@ class RunLogBase extends DurableObject<Env> {
 		// One transaction for run upsert + logs + job observability + activation
 		// so a mid-unit SQL failure cannot leave a terminal run that suppresses
 		// missing derived side effects. Alarm / async retention stay outside.
-		this.ctx.storage.transactionSync(() => {
+		this.transactionSyncWithMetaCache(() => {
 			this.upsertRun(input.run, 'replace')
 			this.replaceLogs(input.run.id, input.logs)
 			if (!existed) {
@@ -1818,7 +1834,7 @@ class RunLogBase extends DurableObject<Env> {
 		// Alarm scheduling stays outside.
 		let ledgerUpdated = false
 		let current: PackageInvocationLedgerRecord | null = null
-		this.ctx.storage.transactionSync(() => {
+		this.transactionSyncWithMetaCache(() => {
 			current = this.getInvocationLedgerRowById(input.invocationId)
 			ledgerUpdated =
 				current != null &&
@@ -2176,32 +2192,20 @@ class RunLogBase extends DurableObject<Env> {
 			updatedAt,
 			creatingWorkflowProjectionStatus,
 		)
-		// Build from the write inputs — we already SELECT'd this id above and
-		// DO execution is serialized, so a second identical projection SELECT
-		// would only add redundant query spans.
-		const projection: WorkflowProjectionRecord = {
-			id: input.id,
-			bindingName: input.bindingName,
-			sourceType: input.sourceType,
-			packageId: input.packageId ?? null,
-			kodyId: input.kodyId ?? null,
-			sourceId: input.sourceId ?? null,
-			workflowName: input.workflowName,
-			exportName: input.exportName ?? null,
-			idempotencyKey: input.idempotencyKey,
-			runAt: input.runAt,
-			planDate: input.planDate ?? null,
-			status: creatingWorkflowProjectionStatus,
-			createdAt,
-			updatedAt,
-			completedAt: null,
-			lastError: null,
+		// Re-read: ON CONFLICT may no-op when status is not `creating` (e.g.
+		// null), and for existing creating rows only `updated_at` changes —
+		// so the persisted row is the source of truth, not `input`.
+		const projection = await this.getWorkflowProjection({ id: input.id })
+		if (!projection) {
+			throw new Error(
+				`Workflow projection "${input.id}" disappeared after reservation.`,
+			)
 		}
 		this.retentionIdleConfirmed = false
 		await this.ensureRetentionAlarm()
 		return {
 			countBeforeReservation,
-			reserved: true,
+			reserved: projection.status === creatingWorkflowProjectionStatus,
 			inserted,
 			projection,
 		}

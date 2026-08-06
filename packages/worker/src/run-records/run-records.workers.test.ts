@@ -967,6 +967,64 @@ test('run_log_meta counters reuse the in-isolate cache across repeated reads', a
 					.toArray()[0]?.value,
 			),
 		).toBe(4)
+
+		// Rolled-back setMeta must not leave the memo ahead of SQL.
+		const metaTx = instance as unknown as {
+			transactionSyncWithMetaCache: <T>(fn: () => T) => T
+			setMeta: (key: string, value: number) => void
+		}
+		expect(() =>
+			metaTx.transactionSyncWithMetaCache(() => {
+				metaTx.setMeta('run_count', 99)
+				throw new Error('force-rollback')
+			}),
+		).toThrow('force-rollback')
+		expect(
+			Number(
+				state.storage.sql
+					.exec<{ value: number }>(
+						`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+					)
+					.toArray()[0]?.value,
+			),
+		).toBe(10)
+
+		await instance.startRun({
+			run: {
+				id: 'meta-cache-after-rollback',
+				surface: 'job',
+				status: 'running',
+				name: 'meta-rollback',
+				packageId: null,
+				kodyId: null,
+				sourceId: null,
+				publishedCommit: null,
+				storageId: null,
+				jobId: null,
+				workflowId: null,
+				invocationId: null,
+				sessionId: null,
+				idempotencyKey: null,
+				parentRunId: null,
+				startedAt: new Date().toISOString(),
+				finishedAt: null,
+				durationMs: null,
+				errorName: null,
+				errorMessage: null,
+				metadataJson: '{}',
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			},
+		})
+		expect(
+			Number(
+				state.storage.sql
+					.exec<{ value: number }>(
+						`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+					)
+					.toArray()[0]?.value,
+			),
+		).toBe(11)
 	})
 })
 
