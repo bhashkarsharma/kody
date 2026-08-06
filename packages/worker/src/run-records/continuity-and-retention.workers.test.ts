@@ -4,6 +4,7 @@ import { expect, test } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { RunLog } from './run-log-do.ts'
+import { seedRunLogMeta } from './run-log-meta-test-seed.ts'
 import {
 	finishRunRecord,
 	beginRunRecord,
@@ -32,14 +33,11 @@ function silenceExpectedConsoleWarns(substrings: Array<string>) {
 
 async function armRetentionOnNextFinish(userId: string) {
 	const stub = env.RUN_LOG.get(env.RUN_LOG.idFromName(userId))
-	await runInDurableObject(stub, async (instance: RunLog, state) => {
+	await runInDurableObject(stub, async (instance: RunLog) => {
 		expect(instance).toBeInstanceOf(RunLog)
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			'finishes_since_retention',
-			runRecordRetentionEveryNFinishes - 1,
-		)
+		seedRunLogMeta(instance, {
+			finishesSinceRetention: runRecordRetentionEveryNFinishes - 1,
+		})
 	})
 }
 

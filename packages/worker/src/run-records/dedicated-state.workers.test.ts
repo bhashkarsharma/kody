@@ -4,6 +4,7 @@ import { expect, test } from 'vitest'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { RunLog } from './run-log-do.ts'
+import { seedRunLogMeta } from './run-log-meta-test-seed.ts'
 import {
 	beginRunRecord,
 	claimPackageInvocationRecord,
@@ -48,22 +49,12 @@ function silenceExpectedConsoleWarns(substrings: Array<string>) {
 
 async function armRetentionOnNextFinish(userId: string, runCount?: number) {
 	const stub = env.RUN_LOG.get(env.RUN_LOG.idFromName(userId))
-	await runInDurableObject(stub, async (instance: RunLog, state) => {
+	await runInDurableObject(stub, async (instance: RunLog) => {
 		expect(instance).toBeInstanceOf(RunLog)
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			'finishes_since_retention',
-			runRecordRetentionEveryNFinishes - 1,
-		)
-		if (typeof runCount === 'number') {
-			state.storage.sql.exec(
-				`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-				ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-				'run_count',
-				runCount,
-			)
-		}
+		seedRunLogMeta(instance, {
+			finishesSinceRetention: runRecordRetentionEveryNFinishes - 1,
+			runCount,
+		})
 	})
 }
 
@@ -852,11 +843,7 @@ test('retention prunes runs but never dedicated workflow/job/activation state', 
 		for (let i = 0; i < 5; i += 1) {
 			insertAgedRun(state, { id: `aged-${i}`, startedAt: agedStartedAt })
 		}
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES ('run_count', ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			5,
-		)
+		seedRunLogMeta(instance, { runCount: 5 })
 	})
 	await armRetentionOnNextFinish(userId, 5)
 
@@ -890,7 +877,7 @@ test('retention prunes runs but never dedicated workflow/job/activation state', 
 	])
 
 	// Excess-count prune also leaves dedicated state alone.
-	await runInDurableObject(stub, async (_instance: RunLog, state) => {
+	await runInDurableObject(stub, async (instance: RunLog, state) => {
 		const now = new Date().toISOString()
 		for (let i = 0; i < runRecordMaxRunsPerUser + 10; i += 1) {
 			insertAgedRun(state, {
@@ -898,16 +885,10 @@ test('retention prunes runs but never dedicated workflow/job/activation state', 
 				startedAt: now,
 			})
 		}
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES ('run_count', ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			runRecordMaxRunsPerUser + 10,
-		)
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES ('finishes_since_retention', ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			runRecordRetentionEveryNFinishes - 1,
-		)
+		seedRunLogMeta(instance, {
+			runCount: runRecordMaxRunsPerUser + 10,
+			finishesSinceRetention: runRecordRetentionEveryNFinishes - 1,
+		})
 	})
 	const excessHandle = beginRunRecord({
 		env,

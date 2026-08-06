@@ -461,6 +461,16 @@ class RunLogBase extends DurableObject<Env> {
 	 * row's due-time instead of trusting a stale idle conclusion.
 	 */
 	private retentionIdleConfirmed = false
+	/**
+	 * In-isolate memo for `run_log_meta` counters. Durable Object handlers are
+	 * single-threaded and these keys are only written through setMeta helpers
+	 * below, so repeated getRunCount / getFinishesSinceRetention in one jsrpc
+	 * (finish → retention → alarm arming) can reuse the loaded value instead of
+	 * re-issuing identical SELECTs (Sentry "Inefficient Database Queries").
+	 * Cleared on schema init / clearAll so SQL rebuild paths reload fresh.
+	 */
+	private runCountCache: number | null = null
+	private finishesSinceRetentionCache: number | null = null
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env)
@@ -475,6 +485,10 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	private initializeSchema() {
+		// Schema rebuild (clearAll / DR restore / warm-migration tests) may
+		// rewrite storage under us; drop counter memos so the next read reloads.
+		this.runCountCache = null
+		this.finishesSinceRetentionCache = null
 		this.ctx.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS run_log_meta (
 				key TEXT PRIMARY KEY NOT NULL,
@@ -707,10 +721,18 @@ class RunLogBase extends DurableObject<Env> {
 			key,
 			value,
 		)
+		if (key === metaRunCountKey) this.runCountCache = value
+		if (key === metaFinishesSinceRetentionKey) {
+			this.finishesSinceRetentionCache = value
+		}
 	}
 
 	private ensureRunCountMeta() {
-		if (this.getMeta(metaRunCountKey) != null) return
+		const existing = this.getMeta(metaRunCountKey)
+		if (existing != null) {
+			this.runCountCache = existing
+			return
+		}
 		const countRow = this.ctx.storage.sql
 			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs`)
 			.one()
@@ -720,7 +742,10 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	private getRunCount() {
-		return this.getMeta(metaRunCountKey) ?? 0
+		if (this.runCountCache == null) {
+			this.runCountCache = this.getMeta(metaRunCountKey) ?? 0
+		}
+		return this.runCountCache
 	}
 
 	private adjustRunCount(delta: number) {
@@ -729,7 +754,11 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	private getFinishesSinceRetention() {
-		return this.getMeta(metaFinishesSinceRetentionKey) ?? 0
+		if (this.finishesSinceRetentionCache == null) {
+			this.finishesSinceRetentionCache =
+				this.getMeta(metaFinishesSinceRetentionKey) ?? 0
+		}
+		return this.finishesSinceRetentionCache
 	}
 
 	private setFinishesSinceRetention(value: number) {
@@ -2147,17 +2176,32 @@ class RunLogBase extends DurableObject<Env> {
 			updatedAt,
 			creatingWorkflowProjectionStatus,
 		)
-		const projection = await this.getWorkflowProjection({ id: input.id })
-		if (!projection) {
-			throw new Error(
-				`Workflow projection "${input.id}" disappeared after reservation.`,
-			)
+		// Build from the write inputs — we already SELECT'd this id above and
+		// DO execution is serialized, so a second identical projection SELECT
+		// would only add redundant query spans.
+		const projection: WorkflowProjectionRecord = {
+			id: input.id,
+			bindingName: input.bindingName,
+			sourceType: input.sourceType,
+			packageId: input.packageId ?? null,
+			kodyId: input.kodyId ?? null,
+			sourceId: input.sourceId ?? null,
+			workflowName: input.workflowName,
+			exportName: input.exportName ?? null,
+			idempotencyKey: input.idempotencyKey,
+			runAt: input.runAt,
+			planDate: input.planDate ?? null,
+			status: creatingWorkflowProjectionStatus,
+			createdAt,
+			updatedAt,
+			completedAt: null,
+			lastError: null,
 		}
 		this.retentionIdleConfirmed = false
 		await this.ensureRetentionAlarm()
 		return {
 			countBeforeReservation,
-			reserved: projection.status === creatingWorkflowProjectionStatus,
+			reserved: true,
 			inserted,
 			projection,
 		}
@@ -2166,14 +2210,13 @@ class RunLogBase extends DurableObject<Env> {
 	async deleteWorkflowProjectionIfCreating(input: {
 		id: string
 	}): Promise<{ deleted: boolean }> {
-		this.ctx.storage.sql.exec(
+		const deleted = this.ctx.storage.sql.exec(
 			`DELETE FROM workflow_projections
 			WHERE id = ? AND COALESCE(status, '') = ?`,
 			input.id,
 			creatingWorkflowProjectionStatus,
-		)
-		const remaining = await this.getWorkflowProjection({ id: input.id })
-		return { deleted: remaining === null }
+		).rowsWritten
+		return { deleted: deleted > 0 }
 	}
 
 	async upsertJobRunObservability(
@@ -2869,6 +2912,8 @@ class RunLogBase extends DurableObject<Env> {
 		await this.ctx.storage.deleteAll()
 		this.retentionAlarmArmed = false
 		this.retentionIdleConfirmed = true
+		this.runCountCache = null
+		this.finishesSinceRetentionCache = null
 		this.initializeSchema()
 		this.setMeta(metaRunCountKey, 0)
 		this.setMeta(metaFinishesSinceRetentionKey, 0)
