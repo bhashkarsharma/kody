@@ -80,10 +80,13 @@ export async function startDevServer(
 		return startDevServerWithCloudflareMock(persistDir)
 	}
 
-	// These smoke tests do not exercise Cloudflare APIs. Leaving that client
+	// These smoke tests do not exercise Cloudflare APIs. Keeping that client
 	// unconfigured keeps MCP authentication independent of the email mock;
 	// test-runtime signup deliberately permits a skipped verification send,
 	// and createMcpClient marks the account verified before OAuth begins.
+	// The blank overrides matter: a developer's packages/worker/.env may hold
+	// real Cloudflare credentials, and without them signup would attempt a
+	// live Email API send and fail the run.
 	for (let attempt = 1; attempt <= maxPortBindRetries; attempt++) {
 		const port = await getPort({ host: localhost })
 		const origin = `http://${localhost}:${port}`
@@ -105,6 +108,12 @@ export async function startDevServer(
 				'error',
 				'--var',
 				`APP_BASE_URL:${origin}`,
+				'--var',
+				'CLOUDFLARE_API_BASE_URL:',
+				'--var',
+				'CLOUDFLARE_API_TOKEN:',
+				'--var',
+				'CLOUDFLARE_ACCOUNT_ID:',
 			],
 			cwd: projectRoot,
 			env: {
