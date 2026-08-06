@@ -21,6 +21,11 @@ registerFrame(COMMUNITY_DETAIL_TARGET, {
 		return renderCommunityDetailContentHtml({
 			listing: detail.listing,
 			ownerProfilePublic: detail.ownerProfilePublic,
+			loggedIn: detail.loggedIn,
+			viewerFollowsOwner: detail.viewerFollowsOwner,
+			viewerIsOwner: detail.viewerIsOwner,
+			returnTo: routes.communityDetail.href({ listingId }),
+			followError: new URL(request.url).searchParams.get('followError'),
 		})
 	},
 })
