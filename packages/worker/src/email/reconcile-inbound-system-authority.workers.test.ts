@@ -75,50 +75,55 @@ async function restoreSystemMarker() {
 	).run()
 }
 
-test('inbound reconciliation keeps user work moving when system authority is unavailable', async () => {
-	consoleWarn.mockImplementation(() => {})
-	await ensureEmailTestSchema(env.APP_DB)
+// Runs two full sweep passes over real mailbox DOs; needs headroom beyond the
+// 5s local default when the whole suite runs in parallel.
+test(
+	'inbound reconciliation keeps user work moving when system authority is unavailable',
+	{ timeout: 30_000 },
+	async () => {
+		consoleWarn.mockImplementation(() => {})
+		await ensureEmailTestSchema(env.APP_DB)
 
-	const userOnly = await seedStaleUserDelivery(
-		'user-only',
-		'2026-07-31T00:00:00.000Z',
-	)
-	await env.APP_DB.prepare(
-		`DELETE FROM system_email_graph_authority WHERE singleton = 1`,
-	).run()
+		const userOnly = await seedStaleUserDelivery(
+			'user-only',
+			'2026-07-31T00:00:00.000Z',
+		)
+		await env.APP_DB.prepare(
+			`DELETE FROM system_email_graph_authority WHERE singleton = 1`,
+		).run()
 
-	try {
-		const userOnlyResult = await sweepStaleInboundDeliveries({
-			env: { ...env, APP_BASE_URL: appBaseUrl },
-			now: sweepNow,
-		})
-		expect(userOnlyResult).toMatchObject({
-			usersProcessed: 1,
-			recovered: 0,
-			cleaned: 1,
-			pointersPruned: 0,
-			effectsProcessed: 0,
-			errors: 0,
-		})
-		expect(consoleWarn).not.toHaveBeenCalled()
-		expect(
-			await rpcFor(userOnly.userId).getInboundDelivery({
-				ownerId: userOnly.userId,
-				deliveryId: userOnly.deliveryId,
-			}),
-		).toMatchObject({ state: 'orphan-cleaned' })
-	} finally {
-		await restoreSystemMarker()
-	}
+		try {
+			const userOnlyResult = await sweepStaleInboundDeliveries({
+				env: { ...env, APP_BASE_URL: appBaseUrl },
+				now: sweepNow,
+			})
+			expect(userOnlyResult).toMatchObject({
+				usersProcessed: 1,
+				recovered: 0,
+				cleaned: 1,
+				pointersPruned: 0,
+				effectsProcessed: 0,
+				errors: 0,
+			})
+			expect(consoleWarn).not.toHaveBeenCalled()
+			expect(
+				await rpcFor(userOnly.userId).getInboundDelivery({
+					ownerId: userOnly.userId,
+					deliveryId: userOnly.deliveryId,
+				}),
+			).toMatchObject({ state: 'orphan-cleaned' })
+		} finally {
+			await restoreSystemMarker()
+		}
 
-	consoleWarn.mockClear()
-	const userAfterSystem = await seedStaleUserDelivery(
-		'user-after-system',
-		'2026-07-31T00:00:00.000Z',
-	)
-	const systemDeliveryId = `system-due-${crypto.randomUUID()}`
-	await env.APP_DB.prepare(
-		`INSERT INTO system_email_delivery_events (
+		consoleWarn.mockClear()
+		const userAfterSystem = await seedStaleUserDelivery(
+			'user-after-system',
+			'2026-07-31T00:00:00.000Z',
+		)
+		const systemDeliveryId = `system-due-${crypto.randomUUID()}`
+		await env.APP_DB.prepare(
+			`INSERT INTO system_email_delivery_events (
 			id, event_type, provider, detail_json, needs_effect_reconcile,
 			state, fingerprint, created_at, updated_at
 		) VALUES (
@@ -126,50 +131,51 @@ test('inbound reconciliation keeps user work moving when system authority is una
 			'pending', ?, '2026-07-30T00:00:00.000Z',
 			'2026-07-30T00:00:00.000Z'
 		)`,
-	)
-		.bind(systemDeliveryId, `system-fingerprint-${crypto.randomUUID()}`)
-		.run()
-	await env.APP_DB.prepare(
-		`DELETE FROM system_email_graph_authority WHERE singleton = 1`,
-	).run()
-
-	try {
-		const isolatedResult = await sweepStaleInboundDeliveries({
-			env: { ...env, APP_BASE_URL: appBaseUrl },
-			now: sweepNow,
-		})
-		expect(isolatedResult).toMatchObject({
-			recovered: 0,
-			cleaned: 1,
-			pointersPruned: 0,
-			effectsProcessed: 0,
-			errors: 1,
-		})
-		expect(isolatedResult.usersProcessed).toBeGreaterThanOrEqual(2)
-		expect(consoleWarn).toHaveBeenCalledTimes(1)
-		expect(consoleWarn).toHaveBeenCalledWith(
-			'inbound-email-user-reconciliation-failed',
-			systemEmailOwnerId,
-			expect.objectContaining({
-				message: expect.stringContaining(
-					'authority marker is missing or invalid',
-				),
-			}),
 		)
-		expect(
-			await rpcFor(userAfterSystem.userId).getInboundDelivery({
-				ownerId: userAfterSystem.userId,
-				deliveryId: userAfterSystem.deliveryId,
-			}),
-		).toMatchObject({ state: 'orphan-cleaned' })
-		expect(
-			await env.APP_DB.prepare(
-				`SELECT state FROM system_email_delivery_events WHERE id = ?`,
+			.bind(systemDeliveryId, `system-fingerprint-${crypto.randomUUID()}`)
+			.run()
+		await env.APP_DB.prepare(
+			`DELETE FROM system_email_graph_authority WHERE singleton = 1`,
+		).run()
+
+		try {
+			const isolatedResult = await sweepStaleInboundDeliveries({
+				env: { ...env, APP_BASE_URL: appBaseUrl },
+				now: sweepNow,
+			})
+			expect(isolatedResult).toMatchObject({
+				recovered: 0,
+				cleaned: 1,
+				pointersPruned: 0,
+				effectsProcessed: 0,
+				errors: 1,
+			})
+			expect(isolatedResult.usersProcessed).toBeGreaterThanOrEqual(2)
+			expect(consoleWarn).toHaveBeenCalledTimes(1)
+			expect(consoleWarn).toHaveBeenCalledWith(
+				'inbound-email-user-reconciliation-failed',
+				systemEmailOwnerId,
+				expect.objectContaining({
+					message: expect.stringContaining(
+						'authority marker is missing or invalid',
+					),
+				}),
 			)
-				.bind(systemDeliveryId)
-				.first(),
-		).toEqual({ state: 'pending' })
-	} finally {
-		await restoreSystemMarker()
-	}
-})
+			expect(
+				await rpcFor(userAfterSystem.userId).getInboundDelivery({
+					ownerId: userAfterSystem.userId,
+					deliveryId: userAfterSystem.deliveryId,
+				}),
+			).toMatchObject({ state: 'orphan-cleaned' })
+			expect(
+				await env.APP_DB.prepare(
+					`SELECT state FROM system_email_delivery_events WHERE id = ?`,
+				)
+					.bind(systemDeliveryId)
+					.first(),
+			).toEqual({ state: 'pending' })
+		} finally {
+			await restoreSystemMarker()
+		}
+	},
+)
