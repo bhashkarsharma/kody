@@ -461,6 +461,16 @@ class RunLogBase extends DurableObject<Env> {
 	 * row's due-time instead of trusting a stale idle conclusion.
 	 */
 	private retentionIdleConfirmed = false
+	/**
+	 * In-isolate memo for `run_log_meta` counters. Durable Object handlers are
+	 * single-threaded and these keys are only written through setMeta helpers
+	 * below, so repeated getRunCount / getFinishesSinceRetention in one jsrpc
+	 * (finish → retention → alarm arming) can reuse the loaded value instead of
+	 * re-issuing identical SELECTs (Sentry "Inefficient Database Queries").
+	 * Cleared on schema init / clearAll so SQL rebuild paths reload fresh.
+	 */
+	private runCountCache: number | null = null
+	private finishesSinceRetentionCache: number | null = null
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env)
@@ -475,6 +485,10 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	private initializeSchema() {
+		// Schema rebuild (clearAll / DR restore / warm-migration tests) may
+		// rewrite storage under us; drop counter memos so the next read reloads.
+		this.runCountCache = null
+		this.finishesSinceRetentionCache = null
 		this.ctx.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS run_log_meta (
 				key TEXT PRIMARY KEY NOT NULL,
@@ -707,10 +721,34 @@ class RunLogBase extends DurableObject<Env> {
 			key,
 			value,
 		)
+		if (key === metaRunCountKey) this.runCountCache = value
+		if (key === metaFinishesSinceRetentionKey) {
+			this.finishesSinceRetentionCache = value
+		}
+	}
+
+	/**
+	 * `setMeta` updates counter memos eagerly so hot paths skip re-SELECTs.
+	 * When those writes run inside `transactionSync`, a later failure rolls
+	 * SQL back but would leave the memos ahead of storage — drop them before
+	 * rethrowing so the next read reloads.
+	 */
+	private transactionSyncWithMetaCache<T>(fn: () => T): T {
+		try {
+			return this.ctx.storage.transactionSync(fn)
+		} catch (error) {
+			this.runCountCache = null
+			this.finishesSinceRetentionCache = null
+			throw error
+		}
 	}
 
 	private ensureRunCountMeta() {
-		if (this.getMeta(metaRunCountKey) != null) return
+		const existing = this.getMeta(metaRunCountKey)
+		if (existing != null) {
+			this.runCountCache = existing
+			return
+		}
 		const countRow = this.ctx.storage.sql
 			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs`)
 			.one()
@@ -720,7 +758,10 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	private getRunCount() {
-		return this.getMeta(metaRunCountKey) ?? 0
+		if (this.runCountCache == null) {
+			this.runCountCache = this.getMeta(metaRunCountKey) ?? 0
+		}
+		return this.runCountCache
 	}
 
 	private adjustRunCount(delta: number) {
@@ -729,7 +770,11 @@ class RunLogBase extends DurableObject<Env> {
 	}
 
 	private getFinishesSinceRetention() {
-		return this.getMeta(metaFinishesSinceRetentionKey) ?? 0
+		if (this.finishesSinceRetentionCache == null) {
+			this.finishesSinceRetentionCache =
+				this.getMeta(metaFinishesSinceRetentionKey) ?? 0
+		}
+		return this.finishesSinceRetentionCache
 	}
 
 	private setFinishesSinceRetention(value: number) {
@@ -1631,7 +1676,7 @@ class RunLogBase extends DurableObject<Env> {
 		// One transaction for run upsert + logs + job observability + activation
 		// so a mid-unit SQL failure cannot leave a terminal run that suppresses
 		// missing derived side effects. Alarm / async retention stay outside.
-		this.ctx.storage.transactionSync(() => {
+		this.transactionSyncWithMetaCache(() => {
 			this.upsertRun(input.run, 'replace')
 			this.replaceLogs(input.run.id, input.logs)
 			if (!existed) {
@@ -1789,7 +1834,7 @@ class RunLogBase extends DurableObject<Env> {
 		// Alarm scheduling stays outside.
 		let ledgerUpdated = false
 		let current: PackageInvocationLedgerRecord | null = null
-		this.ctx.storage.transactionSync(() => {
+		this.transactionSyncWithMetaCache(() => {
 			current = this.getInvocationLedgerRowById(input.invocationId)
 			ledgerUpdated =
 				current != null &&
@@ -2147,6 +2192,9 @@ class RunLogBase extends DurableObject<Env> {
 			updatedAt,
 			creatingWorkflowProjectionStatus,
 		)
+		// Re-read: ON CONFLICT may no-op when status is not `creating` (e.g.
+		// null), and for existing creating rows only `updated_at` changes —
+		// so the persisted row is the source of truth, not `input`.
 		const projection = await this.getWorkflowProjection({ id: input.id })
 		if (!projection) {
 			throw new Error(
@@ -2166,14 +2214,13 @@ class RunLogBase extends DurableObject<Env> {
 	async deleteWorkflowProjectionIfCreating(input: {
 		id: string
 	}): Promise<{ deleted: boolean }> {
-		this.ctx.storage.sql.exec(
+		const deleted = this.ctx.storage.sql.exec(
 			`DELETE FROM workflow_projections
 			WHERE id = ? AND COALESCE(status, '') = ?`,
 			input.id,
 			creatingWorkflowProjectionStatus,
-		)
-		const remaining = await this.getWorkflowProjection({ id: input.id })
-		return { deleted: remaining === null }
+		).rowsWritten
+		return { deleted: deleted > 0 }
 	}
 
 	async upsertJobRunObservability(
@@ -2869,6 +2916,8 @@ class RunLogBase extends DurableObject<Env> {
 		await this.ctx.storage.deleteAll()
 		this.retentionAlarmArmed = false
 		this.retentionIdleConfirmed = true
+		this.runCountCache = null
+		this.finishesSinceRetentionCache = null
 		this.initializeSchema()
 		this.setMeta(metaRunCountKey, 0)
 		this.setMeta(metaFinishesSinceRetentionKey, 0)

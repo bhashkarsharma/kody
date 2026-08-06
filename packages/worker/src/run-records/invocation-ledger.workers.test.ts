@@ -3,6 +3,7 @@ import { runInDurableObject } from 'cloudflare:test'
 import { expect, test } from 'vitest'
 import { silenceExpectedConsoleWarns } from '#worker/test-support/console-spies.ts'
 import { RunLog } from './run-log-do.ts'
+import { seedRunLogMeta } from './run-log-meta-test-seed.ts'
 import {
 	claimPackageInvocationRecord,
 	clearRunRecords,
@@ -371,13 +372,10 @@ test('DO-local retention prunes terminal ledger rows after 90 days and keeps in-
 	})
 
 	// Arm retention so the next finish runs a full pass.
-	await runInDurableObject(stub, async (_instance: RunLog, state) => {
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			'finishes_since_retention',
-			runRecordRetentionEveryNFinishes - 1,
-		)
+	await runInDurableObject(stub, async (instance: RunLog) => {
+		seedRunLogMeta(instance, {
+			finishesSinceRetention: runRecordRetentionEveryNFinishes - 1,
+		})
 	})
 	const claimed = await claimPackageInvocationRecord({
 		env,

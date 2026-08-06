@@ -7,6 +7,7 @@ import { buildKodyModuleBundle } from '#worker/package-runtime/module-graph.ts'
 import { consoleWarn } from '#worker/test-support/console-spies.ts'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
 import { RunLog } from './run-log-do.ts'
+import { seedRunLogMeta } from './run-log-meta-test-seed.ts'
 import {
 	abandonRunRecord,
 	beginRunRecord,
@@ -53,22 +54,12 @@ async function drainWaitUntil(pending: Array<Promise<unknown>>) {
 
 async function armRetentionOnNextFinish(userId: string, runCount?: number) {
 	const stub = env.RUN_LOG.get(env.RUN_LOG.idFromName(userId))
-	await runInDurableObject(stub, async (instance: RunLog, state) => {
+	await runInDurableObject(stub, async (instance: RunLog) => {
 		expect(instance).toBeInstanceOf(RunLog)
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			'finishes_since_retention',
-			runRecordRetentionEveryNFinishes - 1,
-		)
-		if (typeof runCount === 'number') {
-			state.storage.sql.exec(
-				`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-				ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-				'run_count',
-				runCount,
-			)
-		}
+		seedRunLogMeta(instance, {
+			finishesSinceRetention: runRecordRetentionEveryNFinishes - 1,
+			runCount,
+		})
 	})
 }
 
@@ -797,12 +788,7 @@ test('alarm lifecycle: fresh arm, self-termination when idle, re-arm after idle,
 			expiredStartedAt,
 			'first-run',
 		)
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-				ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			'finishes_since_retention',
-			0,
-		)
+		seedRunLogMeta(instance, { finishesSinceRetention: 0 })
 		await state.storage.deleteAlarm()
 		await instance.alarm()
 	})
@@ -847,12 +833,7 @@ test('alarm lifecycle: fresh arm, self-termination when idle, re-arm after idle,
 			expiredStartedAt,
 			runId,
 		)
-		state.storage.sql.exec(
-			`INSERT INTO run_log_meta (key, value) VALUES (?, ?)
-				ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-			'finishes_since_retention',
-			0,
-		)
+		seedRunLogMeta(instance, { finishesSinceRetention: 0 })
 		await state.storage.deleteAlarm()
 		await instance.alarm()
 	})
@@ -900,6 +881,151 @@ test('run recording degrades to a warning instead of failing the observed run', 
 	const page = await listRunRecords({ env, userId })
 	expect(page.runs).toHaveLength(1)
 	expect(page.runs[0]?.status).toBe('success')
+})
+
+test('run_log_meta counters reuse the in-isolate cache across repeated reads', async () => {
+	const userId = uniqueUserId('meta-cache')
+	const stub = env.RUN_LOG.get(env.RUN_LOG.idFromName(userId))
+
+	// Two finishes → run_count memo should be 2 after the second write path.
+	for (const label of ['a', 'b'] as const) {
+		const handle = beginRunRecord({
+			env,
+			userId,
+			context: baseContext({ surface: 'job', name: `meta-${label}` }),
+		})
+		await finishRunRecord({ env, handle, status: 'success' })
+	}
+
+	await runInDurableObject(stub, async (instance: RunLog, state) => {
+		expect(instance).toBeInstanceOf(RunLog)
+		const before = state.storage.sql
+			.exec<{ value: number }>(
+				`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+			)
+			.toArray()[0]
+		expect(Number(before?.value)).toBe(2)
+
+		// Corrupt storage under the memo. The next adjust must use the cached
+		// 2 (+1 → 3), not the corrupted SQL value.
+		state.storage.sql.exec(
+			`UPDATE run_log_meta SET value = 999999 WHERE key = 'run_count'`,
+		)
+
+		await instance.startRun({
+			run: {
+				id: 'meta-cache-third',
+				surface: 'job',
+				status: 'running',
+				name: 'meta-c',
+				packageId: null,
+				kodyId: null,
+				sourceId: null,
+				publishedCommit: null,
+				storageId: null,
+				jobId: null,
+				workflowId: null,
+				invocationId: null,
+				sessionId: null,
+				idempotencyKey: null,
+				parentRunId: null,
+				startedAt: new Date().toISOString(),
+				finishedAt: null,
+				durationMs: null,
+				errorName: null,
+				errorMessage: null,
+				metadataJson: '{}',
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			},
+		})
+
+		const after = state.storage.sql
+			.exec<{ value: number }>(
+				`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+			)
+			.toArray()[0]
+		expect(Number(after?.value)).toBe(3)
+
+		// Seeds go through setMeta so the memo and SQL stay aligned.
+		seedRunLogMeta(instance, { runCount: 10, finishesSinceRetention: 4 })
+		expect(
+			Number(
+				state.storage.sql
+					.exec<{ value: number }>(
+						`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+					)
+					.toArray()[0]?.value,
+			),
+		).toBe(10)
+		expect(
+			Number(
+				state.storage.sql
+					.exec<{ value: number }>(
+						`SELECT value FROM run_log_meta WHERE key = 'finishes_since_retention' LIMIT 1`,
+					)
+					.toArray()[0]?.value,
+			),
+		).toBe(4)
+
+		// Rolled-back setMeta must not leave the memo ahead of SQL.
+		const metaTx = instance as unknown as {
+			transactionSyncWithMetaCache: <T>(fn: () => T) => T
+			setMeta: (key: string, value: number) => void
+		}
+		expect(() =>
+			metaTx.transactionSyncWithMetaCache(() => {
+				metaTx.setMeta('run_count', 99)
+				throw new Error('force-rollback')
+			}),
+		).toThrow('force-rollback')
+		expect(
+			Number(
+				state.storage.sql
+					.exec<{ value: number }>(
+						`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+					)
+					.toArray()[0]?.value,
+			),
+		).toBe(10)
+
+		await instance.startRun({
+			run: {
+				id: 'meta-cache-after-rollback',
+				surface: 'job',
+				status: 'running',
+				name: 'meta-rollback',
+				packageId: null,
+				kodyId: null,
+				sourceId: null,
+				publishedCommit: null,
+				storageId: null,
+				jobId: null,
+				workflowId: null,
+				invocationId: null,
+				sessionId: null,
+				idempotencyKey: null,
+				parentRunId: null,
+				startedAt: new Date().toISOString(),
+				finishedAt: null,
+				durationMs: null,
+				errorName: null,
+				errorMessage: null,
+				metadataJson: '{}',
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			},
+		})
+		expect(
+			Number(
+				state.storage.sql
+					.exec<{ value: number }>(
+						`SELECT value FROM run_log_meta WHERE key = 'run_count' LIMIT 1`,
+					)
+					.toArray()[0]?.value,
+			),
+		).toBe(11)
+	})
 })
 
 test('clearRunRecords empties the Durable Object', async () => {
