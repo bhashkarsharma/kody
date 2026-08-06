@@ -219,13 +219,6 @@ export function PricingRoute(_handle: Handle) {
 					</table>
 				</div>
 			</section>
-
-			<section aria-label="Invite and admin plans" mix={css(planNoteCss)}>
-				<p>
-					Max is a finite, invite-only plan assigned by a Kody administrator; it
-					is not available for self-serve purchase.
-				</p>
-			</section>
 		</section>
 	)
 }
@@ -469,21 +462,5 @@ const limitsTableCss = {
 		whiteSpace: 'nowrap' as const,
 		fontVariantNumeric: 'tabular-nums',
 		color: colors.text,
-	},
-}
-
-/* ---------- invite/admin note ---------- */
-
-const planNoteCss = {
-	width: 'min(100%, 44rem)',
-	margin: 'clamp(2.5rem, 5vw, 3.5rem) auto 0',
-	textAlign: 'center' as const,
-	'& p': {
-		margin: 0,
-		marginInline: 'auto',
-		color: colors.textMuted,
-		fontSize: '0.95rem',
-		maxWidth: '56ch',
-		textWrap: 'pretty' as const,
 	},
 }
