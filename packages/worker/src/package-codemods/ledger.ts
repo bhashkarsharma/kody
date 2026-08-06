@@ -5,7 +5,11 @@ import {
 } from '@kody-internal/shared/backup-restore-safety.ts'
 import { type PackageCodemodFinding } from './types.ts'
 
-export type PackageCodemodRunStatus = 'running' | 'completed' | 'failed'
+export type PackageCodemodRunStatus =
+	| 'running'
+	| 'completed'
+	| 'failed'
+	| 'abandoned'
 
 export type PackageCodemodRunRecord = {
 	id: string
@@ -124,7 +128,10 @@ function mapRunRow(row: Record<string, unknown>): PackageCodemodRunRecord {
 		initiatedByUserId: String(row['initiated_by_user_id']),
 		filtersJson: String(row['filters_json'] ?? '{}'),
 		status:
-			status === 'completed' || status === 'failed' || status === 'running'
+			status === 'completed' ||
+			status === 'failed' ||
+			status === 'running' ||
+			status === 'abandoned'
 				? status
 				: 'failed',
 		revertOfRunId:
@@ -221,23 +228,59 @@ export async function createPackageCodemodRun(
 	}
 }
 
+/**
+ * Set a run's status. When `expectedStatus` is given the write only applies
+ * while the row still has that status, so a read-check-write caller (e.g. the
+ * admin stop endpoint) cannot overwrite a concurrent transition. Returns the
+ * number of rows changed.
+ */
 export async function updatePackageCodemodRunStatus(
 	db: D1Database,
 	input: {
 		id: string
 		status: PackageCodemodRunStatus
+		expectedStatus?: PackageCodemodRunStatus
 		updatedAt?: string
 	},
-) {
+): Promise<number> {
 	const updatedAt = input.updatedAt ?? new Date().toISOString()
-	await db
+	const statusCondition = input.expectedStatus != null ? ' AND status = ?' : ''
+	const params: Array<unknown> = [input.status, updatedAt, input.id]
+	if (input.expectedStatus != null) params.push(input.expectedStatus)
+	const result = await db
 		.prepare(
 			`UPDATE package_codemod_runs
 			SET status = ?, updated_at = ?
-			WHERE id = ?`,
+			WHERE id = ?${statusCondition}`,
 		)
-		.bind(input.status, updatedAt, input.id)
+		.bind(...params)
 		.run()
+	return result.meta.changes ?? 0
+}
+
+/**
+ * Mark `running` runs whose heartbeat (`updated_at`) predates the cutoff as
+ * `abandoned`. Completion only happens when a caller pages to the end, so
+ * runs whose caller stopped paging (closed tab, stopped agent) otherwise sit
+ * in `running` forever. Returns the number of runs marked.
+ */
+export async function markAbandonedPackageCodemodRuns(
+	db: D1Database,
+	input: {
+		updatedBefore: string
+		updatedAt?: string
+	},
+): Promise<number> {
+	const updatedAt = input.updatedAt ?? new Date().toISOString()
+	const result = await db
+		.prepare(
+			`UPDATE package_codemod_runs
+			SET status = 'abandoned', updated_at = ?
+			WHERE status = 'running' AND updated_at < ?`,
+		)
+		.bind(updatedAt, input.updatedBefore)
+		.run()
+	return result.meta.changes ?? 0
 }
 
 export async function getPackageCodemodRunById(
