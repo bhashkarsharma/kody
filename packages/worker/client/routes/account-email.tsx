@@ -29,9 +29,9 @@ import {
 	cardCss,
 	fieldCss,
 	fieldLabelCss,
-	getDangerButtonCss,
-	getSecondaryButtonCss,
-	inputCss,
+	getDangerPillCss,
+	getGhostButtonCss,
+	getSelectCss,
 } from '#client/styles/style-primitives.ts'
 import {
 	type AccountEmailLoaderData,
@@ -42,6 +42,8 @@ import {
 type PageStatus = 'loading' | 'ready' | 'error'
 type ClassifyState = 'idle' | 'saving'
 type ClassificationFilter = 'all' | 'quarantined'
+
+const selectCss = getSelectCss()
 
 const accountEmailApiPath = '/account/email.json'
 const emailRoute = createListDetailRoute('/account/email')
@@ -179,8 +181,8 @@ export function AccountEmailRoute(handle: Handle) {
 	let loadingDataKey: string | null = null
 	let lastFailedDataKey: string | null = null
 
-	const secondaryButtonCss = getSecondaryButtonCss()
-	const dangerButtonCss = getDangerButtonCss()
+	const secondaryButtonCss = getGhostButtonCss({ size: 'sm' })
+	const dangerButtonCss = getDangerPillCss({ size: 'sm' })
 
 	function getCurrentHref() {
 		return readCurrentRouterHref(handle)
@@ -460,6 +462,7 @@ export function AccountEmailRoute(handle: Handle) {
 										<label mix={css(fieldCss)}>
 											<span mix={css(fieldLabelCss)}>Filter</span>
 											<select
+												data-field-ring
 												value={classificationFilter}
 												aria-label="Filter messages by classification"
 												mix={[
@@ -472,7 +475,7 @@ export function AccountEmailRoute(handle: Handle) {
 															buildHrefWithClassification(nextFilter),
 														)
 													}),
-													css(inputCss),
+													css(selectCss),
 												]}
 											>
 												<option value="all">All messages</option>

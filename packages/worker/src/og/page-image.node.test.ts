@@ -12,21 +12,30 @@ function expectPngBytes(png: Uint8Array) {
 }
 
 test('renderPageOgImage returns valid PNG bytes for home and community', async () => {
-	const home = await renderPageOgImage({
-		page: publicOgPages.home,
-		label: 'heykody.dev',
-	})
+	const home = await renderPageOgImage({ page: publicOgPages.home })
 	expectPngBytes(home)
 
-	const community = await renderPageOgImage({
-		page: publicOgPages.community,
-		label: 'heykody.dev',
-	})
+	const community = await renderPageOgImage({ page: publicOgPages.community })
 	expectPngBytes(community)
 
-	const blog = await renderPageOgImage({
-		page: publicOgPages.blog,
-		label: 'heykody.dev',
-	})
+	const blog = await renderPageOgImage({ page: publicOgPages.blog })
 	expectPngBytes(blog)
+})
+
+test('renderPageOgImage renders each theme differently', async () => {
+	const light = await renderPageOgImage({
+		page: publicOgPages.home,
+		theme: 'light',
+	})
+	const dark = await renderPageOgImage({
+		page: publicOgPages.home,
+		theme: 'dark',
+	})
+	expectPngBytes(light)
+	expectPngBytes(dark)
+
+	// Valid PNG bytes alone would pass even if `theme` were ignored entirely,
+	// which is the regression worth catching: the palette, the pattern tint, and
+	// the halo all switch on it, so the two encodings cannot coincide.
+	expect(Buffer.from(light).equals(Buffer.from(dark))).toBe(false)
 })

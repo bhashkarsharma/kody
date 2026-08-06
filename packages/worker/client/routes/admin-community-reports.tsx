@@ -12,15 +12,15 @@ import {
 	descriptionCss,
 	fieldCss,
 	fieldLabelCss,
-	getDangerButtonCss,
-	getSecondaryButtonCss,
-	inputCss,
+	getDangerPillCss,
+	getGhostButtonCss,
 } from '#client/styles/style-primitives.ts'
 import {
 	AccountManagementLinkNav,
 	AccountManagementMessage,
 	AccountManagementShell,
 	AdminPageHeader,
+	accountInputCss,
 } from './account-management-components.tsx'
 import { type AdminCommunityReportsLoaderData } from '#app/loader-data.ts'
 import {
@@ -244,8 +244,8 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 		return true
 	}
 
-	const secondaryButtonCss = getSecondaryButtonCss()
-	const dangerButtonCss = getDangerButtonCss()
+	const secondaryButtonCss = getGhostButtonCss({ size: 'sm' })
+	const dangerButtonCss = getDangerPillCss({ size: 'sm' })
 
 	let lastSeenHref = ''
 
@@ -350,11 +350,12 @@ export function AdminCommunityReportsRoute(handle: Handle) {
 									<label mix={css(fieldCss)}>
 										<span mix={css(fieldLabelCss)}>Moderation note</span>
 										<input
+											data-field-ring
 											value={getNote(report.id)}
 											disabled={isMutating}
 											placeholder="Optional note for dismiss, delist, delete, or ban"
 											mix={[
-												css(inputCss),
+												css(accountInputCss),
 												on('input', (event) => {
 													setNote(
 														report.id,

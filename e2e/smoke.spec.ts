@@ -7,7 +7,18 @@ test('smoke test covers shell, auth redirect, and login', async ({ page }) => {
 	await page.context().clearCookies()
 
 	await page.goto('/')
-	await expect(page.getByRole('link', { name: 'Home' })).toBeVisible()
+	// The redesigned header has no "Home" link — the brand mark is the link
+	// home, so this is scoped to the header because the footer carries its own
+	// "Kody" brand link. The headline assertion goes with it, so the test
+	// covers the landing page rendering and not just the shell mounting.
+	await expect(
+		page.getByRole('navigation', { name: 'Main' }).getByRole('link', {
+			name: 'Kody',
+		}),
+	).toBeVisible()
+	await expect(
+		page.getByRole('heading', { name: /Your AI agent,\s*finally useful\./i }),
+	).toBeVisible()
 
 	await page.goto('/account')
 	await expect(page).toHaveURL(/\/login\?redirectTo=%2Faccount$/)
@@ -20,9 +31,12 @@ test('smoke test covers shell, auth redirect, and login', async ({ page }) => {
 	await page.getByRole('button', { name: 'Sign in', exact: true }).click()
 
 	await expect(page).toHaveURL(/\/account$/)
+	// Scoped to the header, and exact so the lowercase test username ("kody")
+	// does not also match the "Kody" brand links in the header and footer.
 	await expect(
-		page.getByRole('link', {
+		page.getByRole('navigation', { name: 'Main' }).getByRole('link', {
 			name: primaryTestUser.username,
+			exact: true,
 		}),
 	).toBeVisible()
 	await expect(
@@ -44,10 +58,16 @@ test('smoke test covers shell, auth redirect, and login', async ({ page }) => {
 	// the username and Log out button visible after logging out).
 	await page.getByRole('button', { name: 'Log out' }).click()
 	await expect(page).toHaveURL(/\/login$/)
-	await expect(page.getByRole('link', { name: 'Login' })).toBeVisible()
-	await expect(page.getByRole('button', { name: 'Log out' })).not.toBeVisible()
+	// The redesigned login screen renders without the site header, so the
+	// logged-out state shows the auth card instead of a header "Log in" link.
 	await expect(
-		page.getByRole('link', { name: primaryTestUser.username }),
+		page.getByRole('heading', { name: 'Welcome back' }),
+	).toBeVisible()
+	await expect(page.getByRole('button', { name: 'Log out' })).not.toBeVisible()
+	// Exact, so this asserts the username link is gone rather than tripping on
+	// the "Kody" brand link that a case-insensitive match would also find.
+	await expect(
+		page.getByRole('link', { name: primaryTestUser.username, exact: true }),
 	).not.toBeVisible()
 
 	await page.goto('/privacy')
@@ -60,10 +80,23 @@ test('smoke test covers shell, auth redirect, and login', async ({ page }) => {
 	).toBeVisible()
 
 	await page.goto('/pricing')
-	await expect(page.getByRole('heading', { name: 'Pricing' })).toBeVisible()
-	await expect(page.getByRole('heading', { name: 'Free' })).toBeVisible()
-	await expect(page.getByRole('heading', { name: 'Pro' })).toBeVisible()
 	await expect(
-		page.getByRole('row', { name: 'Saved packages 25 100' }),
+		page.getByRole('heading', { name: 'Start free. Pay when it earns it.' }),
+	).toBeVisible()
+	await expect(
+		page.getByRole('heading', { name: 'Free', exact: true }),
+	).toBeVisible()
+	await expect(
+		page.getByRole('heading', { name: 'Standard', exact: true }),
+	).toBeVisible()
+	await expect(
+		page.getByRole('heading', { name: 'Pro', exact: true }),
+	).toBeVisible()
+	await expect(
+		page.getByRole('heading', { name: 'Every limit is finite' }),
+	).toBeVisible()
+	// Three columns now (Free / Standard / Pro), so the row carries three values.
+	await expect(
+		page.getByRole('row', { name: 'Saved packages 25 100 200' }),
 	).toBeVisible()
 })

@@ -39,8 +39,8 @@ import {
 	descriptionCss,
 	fieldCss,
 	fieldLabelCss,
-	getDangerButtonCss,
-	getSecondaryButtonCss,
+	getDangerPillCss,
+	getGhostButtonCss,
 } from '#client/styles/style-primitives.ts'
 
 const accountMemoriesApiPath = '/account/memories.json'
@@ -160,8 +160,8 @@ export function AccountMemoriesRoute(handle: Handle) {
 	let deleteMode: DeleteMode = null
 	const loadLatch = createRouteLoadLatch()
 
-	const secondaryButtonCss = getSecondaryButtonCss()
-	const dangerButtonCss = getDangerButtonCss()
+	const secondaryButtonCss = getGhostButtonCss({ size: 'sm' })
+	const dangerButtonCss = getDangerPillCss({ size: 'sm' })
 
 	function getCurrentHref() {
 		return readCurrentRouterHref(handle)

@@ -33,6 +33,7 @@ import {
 	AccountManagementShell,
 	AccountManagementSidebar,
 	AccountPageHeader,
+	accountInputCss,
 } from '#client/routes/account-management-components.tsx'
 import { renderByokExplainer } from '#client/routes/byok-explainer.tsx'
 import {
@@ -47,7 +48,13 @@ import {
 	oauthAppDisplayName,
 } from '#client/routes/integration-filter.ts'
 import { matchesSearchQuery } from '#client/search-filter.ts'
-import { colors, radius, spacing, typography } from '#client/styles/tokens.ts'
+import {
+	colors,
+	radius,
+	spacing,
+	transitions,
+	typography,
+} from '#client/styles/tokens.ts'
 import {
 	cardCss,
 	cardTitleCss,
@@ -58,9 +65,9 @@ import {
 	detailValueCss,
 	fieldCss,
 	fieldLabelCss,
-	getDangerButtonCss,
-	getPrimaryButtonCss,
-	inputCss,
+	getDangerPillCss,
+	getPillButtonCss,
+	hoverMq,
 	insetCardCss,
 	primaryLinkCss,
 	sectionTitleCss,
@@ -113,6 +120,8 @@ function filterOauthApps(
 		]),
 	)
 }
+
+const dangerButtonCss = getDangerPillCss({ size: 'sm' })
 
 const providerCatalogGridCss = {
 	display: 'grid',
@@ -527,8 +536,18 @@ export function AccountIntegrationsRoute(handle: Handle) {
 																	color: colors.text,
 																	textAlign: 'left',
 																	cursor: 'pointer',
-																	'&:hover': {
-																		backgroundColor: colors.primarySoftest,
+																	transition: `background-color ${transitions.fast}, scale ${transitions.fast}`,
+																	// Selecting a connection swaps the panel
+																	// beside this list, which is easy to miss —
+																	// the press itself has to register.
+																	'&:active': { scale: '0.98' },
+																	[hoverMq]: {
+																		'&:hover': {
+																			backgroundColor: colors.primarySoftest,
+																		},
+																	},
+																	'@media (prefers-reduced-motion: reduce)': {
+																		'&:active': { scale: 'none' },
 																	},
 																}),
 															]}
@@ -648,8 +667,18 @@ export function AccountIntegrationsRoute(handle: Handle) {
 															color: colors.text,
 															textAlign: 'left',
 															cursor: 'pointer',
-															'&:hover': {
-																backgroundColor: colors.primarySoftest,
+															transition: `background-color ${transitions.fast}, scale ${transitions.fast}`,
+															// Selecting an app swaps the panel beside this
+															// list, which is easy to miss — the press itself
+															// has to register.
+															'&:active': { scale: '0.98' },
+															[hoverMq]: {
+																'&:hover': {
+																	backgroundColor: colors.primarySoftest,
+																},
+															},
+															'@media (prefers-reduced-motion: reduce)': {
+																'&:active': { scale: 'none' },
 															},
 														}),
 													]}
@@ -859,6 +888,7 @@ export function AccountIntegrationsRoute(handle: Handle) {
 											</span>
 											<input
 												type="text"
+												data-field-ring
 												name="oauthAppClientId"
 												value={rotateClientId}
 												{...passwordManagerIgnoreProps}
@@ -867,7 +897,7 @@ export function AccountIntegrationsRoute(handle: Handle) {
 														rotateClientId = event.currentTarget.value
 														handle.update()
 													}),
-													css(inputCss),
+													css(accountInputCss),
 												]}
 											/>
 										</label>
@@ -875,6 +905,7 @@ export function AccountIntegrationsRoute(handle: Handle) {
 											<span mix={css(fieldLabelCss)}>New client secret</span>
 											<input
 												type="password"
+												data-field-ring
 												name="oauthAppClientSecret"
 												value={rotateClientSecret}
 												{...passwordManagerIgnoreProps}
@@ -883,7 +914,7 @@ export function AccountIntegrationsRoute(handle: Handle) {
 														rotateClientSecret = event.currentTarget.value
 														handle.update()
 													}),
-													css(inputCss),
+													css(accountInputCss),
 												]}
 											/>
 										</label>
@@ -918,7 +949,7 @@ export function AccountIntegrationsRoute(handle: Handle) {
 											<button
 												type="submit"
 												disabled={rotateStatus === 'saving' || !rotateConfirmed}
-												mix={css(getDangerButtonCss())}
+												mix={css(dangerButtonCss)}
 											>
 												{rotateStatus === 'saving'
 													? 'Rotating...'
@@ -1048,7 +1079,7 @@ export function AccountIntegrationsRoute(handle: Handle) {
 										<a
 											href={connectHref}
 											mix={css({
-												...getPrimaryButtonCss(),
+												...getPillButtonCss({ size: 'sm' }),
 												display: 'inline-flex',
 												textDecoration: 'none',
 											})}
@@ -1149,7 +1180,8 @@ export function AccountIntegrationsRoute(handle: Handle) {
 												<CopyTextButton
 													value={buildIntegrationSetupPrompt(provider)}
 													idleLabel="Copy setup prompt"
-													variant="secondary"
+													variant="ghost"
+													size="sm"
 												/>
 											</div>
 										</div>
@@ -1178,7 +1210,8 @@ export function AccountIntegrationsRoute(handle: Handle) {
 											<CopyTextButton
 												value={buildCustomIntegrationSetupPrompt()}
 												idleLabel="Copy setup prompt"
-												variant="secondary"
+												variant="ghost"
+												size="sm"
 											/>
 										</div>
 									</div>

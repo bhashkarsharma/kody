@@ -76,9 +76,81 @@ function getCurrentDocumentPath() {
 	return `${window.location.pathname}${window.location.search}`
 }
 
-function notify() {
+let activeViewTransition: { skipTransition(): void } | null = null
+
+/**
+ * Areas whose pages sit inside a persistent shell (a sticky rail beside the
+ * content). Moving between them is tab switching, not page-to-page
+ * navigation: it is frequent, the chrome around the content does not change,
+ * and the rail is a full-height element whose box tracks the page — so a
+ * transition would scale its snapshot between two different heights and the
+ * rail would visibly squash. These navigations swap instantly.
+ */
+const shellAreas = ['/account', '/admin']
+
+function isWithinArea(pathname: string, area: string) {
+	return pathname === area || pathname.startsWith(`${area}/`)
+}
+
+/** Both paths may carry a search string; only the pathname decides the area. */
+export function isSameShellAreaNavigation(from: string | null, to: string) {
+	if (!from) return false
+	const fromPathname = from.split('?')[0] ?? ''
+	const toPathname = to.split('?')[0] ?? ''
+	return shellAreas.some(
+		(area) =>
+			isWithinArea(fromPathname, area) && isWithinArea(toPathname, area),
+	)
+}
+
+function swapDom(onSwapped?: () => void) {
 	lastNotifiedDocumentPath = getCurrentDocumentPath()
+	// First SPA swap onward: suppresses the [data-rise] page-open
+	// choreography (public/styles.css) — the view transition is the
+	// entrance for SPA navigations.
+	document.documentElement.setAttribute('data-spa-nav', '')
 	routerEvents.dispatchEvent(new Event('navigate'))
+	// Subscribers only enqueue handle.update(); the remix/ui scheduler
+	// flushes in a microtask. Resolve one microtask later so the DOM has
+	// actually swapped before the transition captures the new state.
+	return new Promise<void>((resolve) =>
+		queueMicrotask(() => {
+			// Resolve before notifying: `onSwapped` dispatches to arbitrary
+			// subscribers, and a throwing one would otherwise leave this promise
+			// forever pending — freezing the view transition on its old snapshot.
+			// The reaction still runs after this microtask, so the transition
+			// captures the swapped DOM either way.
+			resolve()
+			onSwapped?.()
+		}),
+	)
+}
+
+function notify(onSwapped?: () => void) {
+	const startViewTransition =
+		'startViewTransition' in document
+			? (
+					document as Document & {
+						startViewTransition: (callback: () => Promise<void>) => {
+							skipTransition(): void
+						}
+					}
+				).startViewTransition.bind(document)
+			: null
+	if (
+		!startViewTransition ||
+		matchMedia('(prefers-reduced-motion: reduce)').matches ||
+		isSameShellAreaNavigation(
+			lastNotifiedDocumentPath,
+			getCurrentDocumentPath(),
+		)
+	) {
+		void swapDom(onSwapped)
+		return
+	}
+	// A superseding navigation must not stack transitions.
+	activeViewTransition?.skipTransition()
+	activeViewTransition = startViewTransition(() => swapDom(onSwapped))
 }
 
 function createNavigationEventDetail(
@@ -423,13 +495,13 @@ function getCurrentPathWithSearchAndHash() {
 	return `${window.location.pathname}${window.location.search}${window.location.hash}`
 }
 
-function commitNavigation(nextPath: string) {
+function commitNavigation(nextPath: string, onSwapped?: () => void) {
 	window.history.pushState(
 		createScrollRestorationHistoryState(window.history.state),
 		'',
 		nextPath,
 	)
-	notify()
+	notify(onSwapped)
 }
 
 function commitImmediateNavigation(
@@ -546,12 +618,12 @@ async function runNavigationWithLoader(
 		// wiring.
 		applyDocumentHead(destination.pathname, loadedData)
 
+		const finish = () => dispatchNavigationEnd(navigationEndDetail)
 		if (options?.skipPushState) {
-			notify()
+			notify(finish)
 		} else {
-			commitNavigation(nextPath)
+			commitNavigation(nextPath, finish)
 		}
-		dispatchNavigationEnd(navigationEndDetail)
 	} catch {
 		if (signal.aborted) return
 		if (chunkLoadFailed) {
@@ -570,12 +642,12 @@ async function runNavigationWithLoader(
 		// refetch, so mark the destination stale for routes to consume.
 		markNavigationDataStale(nextPath)
 		applyDocumentHead(destination.pathname)
+		const finish = () => dispatchNavigationEnd(navigationEndDetail)
 		if (options?.skipPushState) {
-			notify()
+			notify(finish)
 		} else {
-			commitNavigation(nextPath)
+			commitNavigation(nextPath, finish)
 		}
-		dispatchNavigationEnd(navigationEndDetail)
 	} finally {
 		// A superseding navigation owns the marker now; only clear our own.
 		if (navigationAbortController === abortController) {

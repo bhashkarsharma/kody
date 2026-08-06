@@ -21,16 +21,16 @@ import {
 	AccountManagementMessage,
 	AccountManagementShell,
 	AccountPageHeader,
+	accountInputCss,
 } from '#client/routes/account-management-components.tsx'
 import { colors, spacing, typography } from '#client/styles/tokens.ts'
 import {
 	cardCss,
 	cardTitleCss,
 	descriptionCss,
-	getDangerButtonCss,
-	getPrimaryButtonCss,
-	getSecondaryButtonCss,
-	inputCss,
+	getDangerPillCss,
+	getGhostButtonCss,
+	getPillButtonCss,
 	layoutMaxWidths,
 	primaryLinkCss,
 } from '#client/styles/style-primitives.ts'
@@ -438,13 +438,14 @@ export function AccountPasskeysRoute(handle: Handle) {
 																Nickname
 															</span>
 															<input
+																data-field-ring
 																type="text"
 																value={renameDraft}
 																maxLength={80}
 																disabled={isBusy}
 																aria-label="Passkey nickname"
 																mix={[
-																	css(inputCss),
+																	css(accountInputCss),
 																	on('input', (event) => {
 																		renameDraft = (
 																			event.currentTarget as HTMLInputElement
@@ -569,6 +570,6 @@ export function AccountPasskeysRoute(handle: Handle) {
 	}
 }
 
-const primaryButtonCss = getPrimaryButtonCss()
-const secondaryButtonCss = getSecondaryButtonCss()
-const dangerButtonCss = getDangerButtonCss()
+const primaryButtonCss = getPillButtonCss({ size: 'sm' })
+const secondaryButtonCss = getGhostButtonCss({ size: 'sm' })
+const dangerButtonCss = getDangerPillCss({ size: 'sm' })
