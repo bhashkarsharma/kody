@@ -2,7 +2,9 @@ import { type Handle, css } from 'remix/ui'
 import { on } from '#client/event-mixin.ts'
 import {
 	getPillButtonCss,
+	hoverMq,
 	layoutMaxWidths,
+	mergeCss,
 	pageGutter,
 } from '#client/styles/style-primitives.ts'
 import { colors, transitions, typography } from '#client/styles/tokens.ts'
@@ -45,6 +47,7 @@ export function WaitlistBanner(handle: Handle) {
 
 	async function handleSubmit(event: SubmitEvent) {
 		event.preventDefault()
+		if (status === 'submitting') return
 		if (!(event.currentTarget instanceof HTMLFormElement)) return
 		const form = event.currentTarget
 
@@ -168,7 +171,8 @@ export function WaitlistBanner(handle: Handle) {
 									/>
 									<button
 										type="submit"
-										disabled={isSubmitting}
+										aria-disabled={isSubmitting ? 'true' : undefined}
+										aria-busy={isSubmitting ? 'true' : undefined}
 										mix={css(pillSubmitCss)}
 									>
 										{isSubmitting ? 'Joining…' : 'Join'}
@@ -343,16 +347,26 @@ const errorCss = {
 	textAlign: 'center' as const,
 }
 
-const pillSubmitCss = {
-	...getPillButtonCss(),
+const pillSubmitCss = mergeCss(getPillButtonCss(), {
 	fontSize: '0.9rem',
 	padding: '0.4rem 1.15rem',
 	whiteSpace: 'nowrap' as const,
+	'&[aria-disabled="true"]': {
+		cursor: 'progress',
+		opacity: 0.7,
+		transform: 'none',
+	},
+	[hoverMq]: {
+		'&[aria-disabled="true"]:hover, &[aria-disabled="true"]:active': {
+			transform: 'none',
+			boxShadow: 'none',
+		},
+	},
 	[stackMq]: {
 		gridColumn: '1 / -1',
 		justifyContent: 'center',
 	},
-}
+})
 
 const visuallyHiddenCss = {
 	position: 'absolute' as const,
