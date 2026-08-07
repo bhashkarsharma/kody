@@ -15,11 +15,16 @@ import {
 	AccountManagementShell,
 	AdminPageHeader,
 	MetadataGrid,
-	accountManagementTableCellCss,
-	accountManagementTableCss,
-	accountManagementTableNumericCellCss,
+	TimestampValue,
 } from './account-management-components.tsx'
+import {
+	RecordTable,
+	recordCellClamp,
+	recordStampCss,
+} from './record-table.tsx'
 import { type AdminSystemEmailLoaderData } from '#app/loader-data.ts'
+
+const clampedCellCss = css(recordCellClamp(30))
 import {
 	routeLoaderRedirect,
 	type RouteLoaderResult,
@@ -153,10 +158,6 @@ export function AdminSystemEmailRoute(handle: Handle) {
 		return true
 	}
 
-	const tableCss = accountManagementTableCss
-	const cellCss = accountManagementTableCellCss
-	const numericCellCss = accountManagementTableNumericCellCss
-
 	let lastSeenHref = ''
 
 	return () => {
@@ -192,7 +193,7 @@ export function AdminSystemEmailRoute(handle: Handle) {
 					description="Operator-owned inboxes for reserved platform addresses. These messages are not user account data."
 					currentHref={currentHref}
 				/>
-				{status === 'loading' ? (
+				{status === 'loading' && lastLoadedHref === '' ? (
 					<p mix={css({ color: colors.textMuted, margin: 0 })}>
 						Loading system email…
 					</p>
@@ -214,58 +215,67 @@ export function AdminSystemEmailRoute(handle: Handle) {
 									', ',
 								)}. Retention keeps ${data.limits.retentionDays} days and at most ${data.limits.maxStoredMessages} stored messages.`}
 						>
-							<div mix={css({ overflowX: 'auto' })}>
-								<table mix={css(tableCss)}>
-									<thead>
-										<tr>
-											<th mix={css(cellCss)}>Inbox</th>
-											<th mix={css(cellCss)}>From</th>
-											<th mix={css(cellCss)}>Subject</th>
-											<th mix={css(numericCellCss)}>Bytes</th>
-											<th mix={css(cellCss)}>Received</th>
-										</tr>
-									</thead>
-									<tbody>
-										{data.messages.map((systemMessage) => (
-											<tr key={systemMessage.id}>
-												<td mix={css(cellCss)}>
-													<a href={messageHref(systemMessage.id)}>
-														{systemMessage.inbox_local_part}
-													</a>
-												</td>
-												<td mix={css(cellCss)}>
-													{systemMessage.from_address ??
-														systemMessage.envelope_from ??
-														'Unknown'}
-												</td>
-												<td mix={css(cellCss)}>
-													{systemMessage.subject || '(no subject)'}
-												</td>
-												<td mix={css(numericCellCss)}>
-													{formatByteCount(systemMessage.raw_size)}
-												</td>
-												<td mix={css(cellCss)}>
-													{formatNullableTimestamp(
-														systemMessage.received_at ??
-															systemMessage.created_at,
-														'Unknown',
-													)}
-												</td>
-											</tr>
-										))}
-									</tbody>
-								</table>
-							</div>
-							{data.messages.length === 0 ? (
-								<p mix={css({ margin: 0, color: colors.textMuted })}>
-									No system mail has been stored.
-								</p>
-							) : null}
-							{totalPages > 1 ? (
-								<p mix={css({ margin: 0, color: colors.textMuted })}>
-									Page {data.page} of {totalPages}
-								</p>
-							) : null}
+							<RecordTable
+								mode="pane"
+								busy={status === 'loading'}
+								ariaLabel="System inbox messages"
+								selectedId={selectedMessage?.id ?? null}
+								countLabel={`${data.total} stored`}
+								emptyLabel="No system mail has been stored."
+								// The message opens in its own panel below rather than in
+								// this table's record slot, so the two panels keep the
+								// titles and audit-log framing they already carry.
+								scrollHeight="32rem"
+								columns={[
+									{ key: 'subject', label: 'Subject', primary: true },
+									{ key: 'inbox', label: 'Inbox' },
+									{ key: 'from', label: 'From', drop: 1 },
+									{ key: 'bytes', label: 'Bytes', align: 'end', drop: 2 },
+									{ key: 'received', label: 'Received' },
+								]}
+								rows={data.messages.map((systemMessage) => ({
+									id: systemMessage.id,
+									href: messageHref(systemMessage.id),
+									cells: {
+										subject: (
+											<span mix={clampedCellCss}>
+												{systemMessage.subject || '(no subject)'}
+											</span>
+										),
+										inbox: systemMessage.inbox_local_part,
+										from: (
+											<span mix={clampedCellCss}>
+												{systemMessage.from_address ??
+													systemMessage.envelope_from ??
+													'Unknown'}
+											</span>
+										),
+										bytes: formatByteCount(systemMessage.raw_size),
+										received: (
+											<span mix={css(recordStampCss)}>
+												{formatNullableTimestamp(
+													systemMessage.received_at ?? systemMessage.created_at,
+													'Unknown',
+												)}
+											</span>
+										),
+									},
+								}))}
+								footer={
+									totalPages > 1 ? (
+										<p
+											mix={css({
+												margin: 0,
+												textAlign: 'center',
+												color: colors.textMuted,
+												fontSize: typography.fontSize.xs,
+											})}
+										>
+											Page {data.page} of {totalPages}
+										</p>
+									) : null
+								}
+							/>
 						</AccountManagementPanel>
 
 						{selectedMessage ? (
@@ -274,7 +284,6 @@ export function AdminSystemEmailRoute(handle: Handle) {
 								description="Admin reads of message content are audit logged."
 							>
 								<MetadataGrid
-									columns={3}
 									items={[
 										{
 											label: 'Inbox',
@@ -289,10 +298,14 @@ export function AdminSystemEmailRoute(handle: Handle) {
 										},
 										{
 											label: 'Received',
-											value: formatNullableTimestamp(
-												selectedMessage.received_at ??
-													selectedMessage.created_at,
-												'Unknown',
+											value: (
+												<TimestampValue
+													value={
+														selectedMessage.received_at ??
+														selectedMessage.created_at
+													}
+													fallback="Unknown"
+												/>
 											),
 										},
 										{
