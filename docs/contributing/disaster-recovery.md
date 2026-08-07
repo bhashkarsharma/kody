@@ -45,15 +45,15 @@ recent evidence.
 
 | Date (UTC) | Lane proven                                                                                                                                                                                                                                                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-07 | Offline escrow unseal smoke test proven with the real `SECRET_ESCROW_PASSPHRASE` against `escrow/secret-store-key.v1.json` ([#1091](https://github.com/kentcdodds/kody/issues/1091)): recovered key matched production `SECRET_STORE_KEY`; wrong passphrase failed cleanly (auth-tag error, no partial output).                                                |
 | 2026-07-28 | Isolated restore drill green through the product UI against a sealed day (`PRAGMA quick_check` ok, table counts plausible, temp database cleaned up). Required [#1002](https://github.com/kentcdodds/kody/pull/1002): presigned D1 import uploads reject chunked bodies with HTTP 411, so stream uploads go through `FixedLengthStream`.                       |
 | 2026-07-28 | First sealed full-backup day (`daily/full/2026-07-28/manifest.json`). Required [#1000](https://github.com/kentcdodds/kody/pull/1000): bucket-lock rules reject puts on existing keys with error 10069 before conditionals are evaluated, and exporter resume became identity-driven after mid-window inventory drift produced duplicate storage-index entries. |
 | 2026-07-28 | First completed staging run (`staging/2026-07-28/exporter/summary.json`; 186 storage dumps, R2 indexes, artifacts index).                                                                                                                                                                                                                                      |
 | 2026-07-26 | First verified nightly D1 export (signed manifest, stored-object digest verified; ~118 MB).                                                                                                                                                                                                                                                                    |
 
 Still unproven live: graduated production restore into the production database
-(drill-level evidence only; it shares the `FixedLengthStream` upload path), the
-offline escrow unseal smoke test, and `weekly/` retention aging through its
-lifecycle.
+(drill-level evidence only; it shares the `FixedLengthStream` upload path), and
+`weekly/` retention aging through its lifecycle.
 
 ## Objectives
 
@@ -261,10 +261,10 @@ Restore rebuilds the derived stores below; do not treat them as recovery media:
   in-flight workflow state as lost and restart or reconcile affected workflows.
 - **`AUDIT_DB`** — the separate D1 database containing hashed security audit
   events with 180-day retention has no cross-account backup lane. This is
-  accepted-unprotected operator/security evidence, not user content. **Operator
-  confirmation required:** confirm that losing the retained audit trail in a DR
-  account-loss event remains acceptable, or open a follow-up for an independent
-  `AUDIT_DB` export before declaring the program complete.
+  **accepted-unprotected** operator/security evidence, not user content
+  (confirmed 2026-08-07): losing the retained audit trail in a DR account-loss
+  event is acceptable; new events accumulate again after restore. Revisit only
+  if forensics retention across account loss becomes a requirement.
 
 ### Honest gaps
 
@@ -634,10 +634,12 @@ Work top-to-bottom. Leave gates false until the matching gate item is done.
 
 ### 6. Escrow and ongoing drills
 
-- [ ] `SECRET_ESCROW_PASSPHRASE` in password manager + GitHub secret; run
+- [x] `SECRET_ESCROW_PASSPHRASE` in password manager + GitHub secret; run
       `dr-escrow.yml`; dashboard shows escrow present; run
       `node tools/disaster-recovery/unseal-escrow.ts --input <sealed-blob> --output <secure-path>`
-      against the sealed blob with the real passphrase, offline.
+      against the sealed blob with the real passphrase, offline (proven
+      2026-08-07 — see live evidence log /
+      [#1091](https://github.com/kentcdodds/kody/issues/1091)).
 - [ ] Set `DR_EXPORT_ENABLED=true` in production after staging path is proven.
 - [ ] Monthly: UI isolated D1 drill on a retained day; confirm alert paths for
       freshness failures.
@@ -662,8 +664,8 @@ Work top-to-bottom. Leave gates false until the matching gate item is done.
   never-pruned job observability and activation state are backed up
 - Automated Mailbox re-import (sealed dumps are manually recoverable)
 - Backup of UserMeter (reconciliation/restart is the accepted recovery path)
-- Backup of `AUDIT_DB` hashed audit events (180-day evidence; accepted pending
-  explicit operator confirmation)
+- Backup of `AUDIT_DB` hashed audit events (180-day evidence;
+  accepted-unprotected 2026-08-07 — operator confirmed no backup lane for now)
 - Plaintext `SECRET_STORE_KEY` or other credentials inside backup media
 - Using `tools/export-d1-remote-to-sqlite.sh` as DR
 
