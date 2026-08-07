@@ -48,7 +48,7 @@ import {
 import {
 	AccountManagementLayout,
 	AccountManagementList,
-	AccountManagementListItemButton,
+	AccountManagementListItemLink,
 	AccountManagementMessage,
 	AccountManagementSearchField,
 	AccountManagementShell,
@@ -931,23 +931,19 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 		}
 	}
 
-	function selectToken(token: AccountPackageInvocationTokenListItem) {
-		selectedTokenId = token.id
-		editorState = token.revokedAt
-			? createEmptyEditorState()
-			: createEditorStateFromToken(token)
-		lastNewTokenQueryKey = ''
+	/**
+	 * Local cleanup when a sidebar link starts navigating to another token.
+	 * Editor state is deliberately NOT seeded here: until the navigation
+	 * commits, the URL (and therefore `getCurrentSelectedTokenId`) still
+	 * points at the previous token, and a save during that window would write
+	 * the new token's editor fields onto the old token. `applyPayload`
+	 * initializes the editor from the committed payload instead.
+	 */
+	function resetTokenSelectionState() {
 		revokeConfirm = false
 		deleteTokenCheck.reset()
-		editMode = !token.revokedAt
 		message = null
 		messageTone = 'info'
-		syncRouterLocation(
-			packageInvocationTokensRoute.buildDetailHref(
-				token.id,
-				getCurrentSearch(),
-			),
-		)
 		handle.update()
 	}
 
@@ -1072,13 +1068,14 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 											const isSelected = effectiveSelectedTokenId === token.id
 											return (
 												<li key={token.id} mix={css({ minWidth: 0 })}>
-													<AccountManagementListItemButton
+													<AccountManagementListItemLink
+														href={packageInvocationTokensRoute.buildDetailHref(
+															token.id,
+															getCurrentSearch(),
+														)}
 														active={isSelected}
 														disabled={isMutating}
-														onClick={() => {
-															if (isMutating) return
-															selectToken(token)
-														}}
+														onNavigate={resetTokenSelectionState}
 													>
 														<div
 															mix={css({
@@ -1132,7 +1129,7 @@ export function AccountPackageInvocationTokensRoute(handle: Handle) {
 														>
 															Exports: {formatScope(token.exportNames)}
 														</span>
-													</AccountManagementListItemButton>
+													</AccountManagementListItemLink>
 												</li>
 											)
 										})}
