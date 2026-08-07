@@ -24,6 +24,8 @@ import {
 
 export type State = {
 	searchConversationIdsWithPreamble?: Array<string>
+	onboardingNoticeConversationIds?: Array<string>
+	onboardingNoticeLastShownAtMs?: number
 	rawFetchHostNudges?: RawFetchHostNudgeState
 }
 export type Props = McpServerProps
@@ -31,6 +33,7 @@ export type Props = McpServerProps
 class MCPBase extends McpAgent<Env, State, Props> {
 	initialState: State = {
 		searchConversationIdsWithPreamble: [],
+		onboardingNoticeConversationIds: [],
 		rawFetchHostNudges: {
 			conversationOrder: [],
 			byConversation: {},

@@ -12,10 +12,12 @@ import {
 	type RoleName,
 } from '#worker/identity/permissions.ts'
 import { type AdminFeatureFlag } from '#worker/feature-flags/types.ts'
+import { type OnboardingChecklistItemId } from '#worker/onboarding-checklist-types.ts'
 import { type SignupMode } from '#app/signup-mode.ts'
 
 export type { ProfileVisibility }
 export type { AdminFeatureFlag }
+export type { OnboardingChecklistItemId }
 
 export type BlogPostSummaryLoaderData = {
 	slug: string
@@ -665,11 +667,26 @@ export type OnboardingLoaderData = {
 	setupPrompt: string
 	/** Pre-connection "is Kody for me?" prompt; usable in any tool-calling agent. */
 	discoveryPrompt: string
+	/** First-win prompt: welcome email that invites a reply. */
+	introEmailPrompt: string
+	/** First-win prompt: tiny interview that seeds durable memories. */
+	memoryPrompt: string
 	hasMcpClient: boolean
 	emailVerified: boolean
 	needsOnboarding: boolean
 	/** Admin-featured trusted listings offered as one-click starter installs. */
 	featuredListings: Array<OnboardingFeaturedListing>
+	/** Derived progress checklist; null when logged out. */
+	checklist: OnboardingChecklistLoaderData | null
+}
+
+export type OnboardingChecklistLoaderData = {
+	items: Array<{
+		id: OnboardingChecklistItemId
+		done: boolean
+	}>
+	/** True when the user dismissed the checklist everywhere. */
+	dismissed: boolean
 }
 
 export type AccountTwoFactorLoaderData = {
