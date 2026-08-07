@@ -28,8 +28,11 @@ import {
 	radius,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
-import { getPillButtonCss, hoverMq } from '#client/styles/style-primitives.ts'
+} from '#universal/styles/tokens.ts'
+import {
+	getPillButtonCss,
+	hoverMq,
+} from '#universal/styles/style-primitives.ts'
 import { renderHighlightedCode } from '#client/syntax-highlight.tsx'
 
 type OnboardingMcpClientTabsProps = {

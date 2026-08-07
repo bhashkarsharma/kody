@@ -1,5 +1,5 @@
 import { type Handle, css, ref } from 'remix/ui'
-import { normalizeRedirectTo } from '#app/safe-redirect.ts'
+import { normalizeRedirectTo } from '#universal/safe-redirect.ts'
 import { CopyTextButton } from '#client/copy-text-button.tsx'
 import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { on } from '#client/event-mixin.ts'
@@ -15,8 +15,8 @@ import {
 	routeLoaderRedirect,
 	type RouteLoaderResult,
 } from '#client/route-loader.ts'
-import { type OnboardingChecklistLoaderData } from '#app/loader-data.ts'
-import { type OnboardingFeaturedListing } from '#app/community-public-types.ts'
+import { type OnboardingChecklistLoaderData } from '#universal/loader-data.ts'
+import { type OnboardingFeaturedListing } from '#universal/community-public-types.ts'
 import {
 	fetchOnboardingPayload,
 	onboardingApiPath,
@@ -39,7 +39,7 @@ import {
 	radius,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 import {
 	getAccentCalloutCss,
 	getGhostButtonCss,
@@ -47,7 +47,7 @@ import {
 	hoverMq,
 	inlineSpinnerCss,
 	primaryLinkCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 /**
  * Onboarding wizard, ported from the redesign prototype

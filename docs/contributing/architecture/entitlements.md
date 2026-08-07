@@ -6,13 +6,14 @@ account can consume. Stripe subscription billing lives in a separate module
 (`packages/worker/src/billing/`); see [Billing](#billing) below. Limit numbers
 in `planLimits` remain independently configured placeholders.
 
-Module: `packages/worker/src/entitlements/`
+Module: `packages/worker/src/entitlements/` plus the client-safe plan registry
+at `packages/worker/universal/plans.ts`.
 
-- `plans.ts` — plan names (`free`, `standard`, `pro`, `max`), the `PlanLimits`
-  config per plan, `max` email caps (`maxPlanEmailLimits`), the
-  `EntitlementResource` registry, `resolvePlanLimit(plan, resource)`,
-  `getPlanRank`, `parsePlanName` (strict, untrusted input),
-  `parseStoredPlanName` (stored-column reads), and
+- `plans.ts` (`#universal/plans.ts`) — plan names (`free`, `standard`, `pro`,
+  `max`), the `PlanLimits` config per plan, `max` email caps
+  (`maxPlanEmailLimits`), the `EntitlementResource` registry,
+  `resolvePlanLimit(plan, resource)`, `getPlanRank`, `parsePlanName` (strict,
+  untrusted input), `parseStoredPlanName` (stored-column reads), and
   `resolveEffectivePlan(manual, stripe)`.
 - `errors.ts` — the one typed error (`EntitlementLimitError`) and the one
   user-facing message builder every enforcement point uses.

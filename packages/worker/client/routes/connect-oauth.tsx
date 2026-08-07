@@ -5,7 +5,7 @@ import {
 import {
 	type AccountIntegrationDetailLoaderData,
 	type AccountSecretsLoaderData,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 import { type Handle, css } from 'remix/ui'
 import { CopyTextButton } from '#client/copy-text-button.tsx'
 import { on } from '#client/event-mixin.ts'
@@ -14,7 +14,12 @@ import {
 	buildHostApprovalRequestUrl,
 	submitApprovalRequest,
 } from '#client/routes/account-approval-shared.ts'
-import { colors, radius, spacing, typography } from '#client/styles/tokens.ts'
+import {
+	colors,
+	radius,
+	spacing,
+	typography,
+} from '#universal/styles/tokens.ts'
 import {
 	cardCss,
 	cardTitleCss,
@@ -37,7 +42,7 @@ import {
 	sectionTitleCss,
 	stackedPageCss,
 	inputCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 import {
 	type ConnectOauthConfig,
 	type ConnectOauthHostApprovalLink,

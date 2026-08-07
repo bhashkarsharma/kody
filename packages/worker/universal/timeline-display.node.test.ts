@@ -1,10 +1,10 @@
 import { expect, test } from 'vitest'
-import { type PublicCommunityActivityItem } from '#app/community-public-types.ts'
+import { type PublicCommunityActivityItem } from '#universal/community-public-types.ts'
 import {
 	formatTimelineDayLabel,
 	formatTimelineEventTime,
 	groupTimelineItems,
-} from '#app/timeline-display.ts'
+} from '#universal/timeline-display.ts'
 
 function makeItem(
 	overrides: Partial<PublicCommunityActivityItem> = {},

@@ -7,13 +7,13 @@ import {
 	spacing,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 import {
 	getAuthInputCss,
 	getSelectCss,
 	getSurfaceCardCss,
 	hoverMq,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 /*
  * The account and admin list/detail screens, as one table.

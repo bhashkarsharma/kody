@@ -3,16 +3,16 @@
 import { type Handle, css } from 'remix/ui'
 import { renderToString } from 'remix/ui/server'
 import { type PublicCommunityListing } from '#app/community-public.ts'
-import { formatCommunityAdaptationEffort } from '#app/community-display.ts'
-import { CommunityListingIcon } from '#app/community-listing-icon.tsx'
-import { renderCommunityListingName } from '#app/community-listing-name.tsx'
-import { routes } from '#app/routes.ts'
-import { colors, transitions } from '#client/styles/tokens.ts'
+import { formatCommunityAdaptationEffort } from '#universal/community-display.ts'
+import { CommunityListingIcon } from '#universal/community-listing-icon.tsx'
+import { renderCommunityListingName } from '#universal/community-listing-name.tsx'
+import { routes } from '#universal/routes.ts'
+import { colors, transitions } from '#universal/styles/tokens.ts'
 import {
 	getSurfaceCardCss,
 	mergeCss,
 	visuallyHiddenCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 /**
  * Server-rendered community listings (the `community-listings` frame),

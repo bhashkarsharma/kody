@@ -9,7 +9,7 @@ import { getValue, saveValue } from '#mcp/values/service.ts'
 import {
 	type OnboardingChecklistItem,
 	type OnboardingChecklistItemId,
-} from '#worker/onboarding-checklist-types.ts'
+} from '#universal/onboarding-checklist-types.ts'
 
 /**
  * Derived onboarding progress. Every item is computed from data the platform

@@ -7,7 +7,7 @@ import {
 	spacing,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 
 /**
  * Hover styles that move or lift must be gated on a real hover device —

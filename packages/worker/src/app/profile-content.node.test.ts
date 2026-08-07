@@ -3,7 +3,7 @@ import { renderProfileContentHtml } from '#app/profile-content.tsx'
 import {
 	type PublicCommunityProfile,
 	type PublicProfilePackageItem,
-} from '#app/community-public-types.ts'
+} from '#universal/community-public-types.ts'
 
 const profile = {
 	username: 'kody',

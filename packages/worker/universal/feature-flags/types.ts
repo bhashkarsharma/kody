@@ -1,7 +1,7 @@
 /**
  * Shared admin feature-flag shapes used by the worker service and client
- * loader/route types. Kept dependency-free so the client tsconfig can include
- * it without pulling in D1-typed modules.
+ * loader/route types. Kept dependency-free so the universal layer can ship
+ * them without pulling in D1-typed modules.
  */
 
 import { type FeatureFlagSuccessMetric } from './registry.ts'

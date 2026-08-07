@@ -1,7 +1,4 @@
-import {
-	type PermissionString,
-	type RoleName,
-} from '#worker/identity/permissions.ts'
+import { type PermissionString, type RoleName } from '#universal/permissions.ts'
 
 type PermissionRow = {
 	role_name: string

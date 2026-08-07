@@ -4,7 +4,7 @@ import {
 	resolvePlanLimit,
 	type EntitlementResource,
 	type PlanName,
-} from './plans.ts'
+} from '#universal/plans.ts'
 import {
 	accountUsageEntitlementResources,
 	entitlementResourceVisibility,

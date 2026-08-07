@@ -8,17 +8,17 @@ import {
 	formatCommunityPublishedDate,
 	formatCommunityStars,
 	shortCommunityCommit,
-} from '#app/community-display.ts'
-import { CommunityListingIcon } from '#app/community-listing-icon.tsx'
-import { renderCommunityListingName } from '#app/community-listing-name.tsx'
+} from '#universal/community-display.ts'
+import { CommunityListingIcon } from '#universal/community-listing-icon.tsx'
+import { renderCommunityListingName } from '#universal/community-listing-name.tsx'
 import {
 	communityBadgePillCss,
 	communityTagListCss,
 	communityTagPillCss,
 } from '#app/community-listings-content.tsx'
-import { routes } from '#app/routes.ts'
-import { visuallyHiddenCss } from '#client/styles/style-primitives.ts'
-import { colors } from '#client/styles/tokens.ts'
+import { routes } from '#universal/routes.ts'
+import { visuallyHiddenCss } from '#universal/styles/style-primitives.ts'
+import { colors } from '#universal/styles/tokens.ts'
 
 /**
  * Server-rendered community detail head (the `community-detail` frame),

@@ -1,8 +1,8 @@
 /** @jsxImportSource remix/ui */
 /** @jsxRuntime automatic */
 import { type Handle, css } from 'remix/ui'
-import { colors } from '#client/styles/tokens.ts'
-import { type PublicCommunityListing } from '#app/community-public-types.ts'
+import { colors } from '#universal/styles/tokens.ts'
+import { type PublicCommunityListing } from '#universal/community-public-types.ts'
 
 type CommunityListingIconProps = {
 	listing: Pick<PublicCommunityListing, 'iconUrl' | 'name'>

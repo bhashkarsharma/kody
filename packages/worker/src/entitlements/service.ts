@@ -9,7 +9,7 @@ import {
 	resolvePlanLimit,
 	type EntitlementResource,
 	type PlanName,
-} from './plans.ts'
+} from '#universal/plans.ts'
 import {
 	isDailyEntitlementResource,
 	type DailyEntitlementResource,

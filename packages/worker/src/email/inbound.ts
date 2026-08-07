@@ -6,7 +6,7 @@ import {
 	parseStoredPlanName,
 	resolveEffectivePlan,
 	resolvePlanLimit,
-} from '#worker/entitlements/plans.ts'
+} from '#universal/plans.ts'
 import {
 	assertWithinEntitlement,
 	assertWithinStorageBytesEntitlement,

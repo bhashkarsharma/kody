@@ -4,7 +4,7 @@ import {
 	normalizeRedirectTo,
 	resolvePostVerificationRedirect,
 	resolveVerifyEmailSuccessCta,
-} from '#app/safe-redirect.ts'
+} from '#universal/safe-redirect.ts'
 
 test('normalizeRedirectTo accepts same-origin paths and rejects open redirects', () => {
 	expect(normalizeRedirectTo('/oauth/authorize?client_id=1')).toBe(

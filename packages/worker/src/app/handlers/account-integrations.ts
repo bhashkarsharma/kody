@@ -23,7 +23,7 @@ import {
 	listJoinedIntegrations,
 	rotateOauthAppClientCredentials,
 } from '#worker/integrations/service.ts'
-import { type routes } from '#app/routes.ts'
+import { type routes } from '#universal/routes.ts'
 
 const rotateOauthAppCredentialsSchema = z
 	.object({

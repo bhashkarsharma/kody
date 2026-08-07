@@ -1,8 +1,8 @@
 import { type Handle, css } from 'remix/ui'
 import * as popover from 'remix/ui/popover'
-import { routes } from '#app/routes.ts'
-import { type OnboardingFeaturedListing } from '#app/community-public-types.ts'
-import { CommunityListingIcon } from '#app/community-listing-icon.tsx'
+import { routes } from '#universal/routes.ts'
+import { type OnboardingFeaturedListing } from '#universal/community-public-types.ts'
+import { CommunityListingIcon } from '#universal/community-listing-icon.tsx'
 import { writeClipboardText } from '#client/clipboard.ts'
 import { on } from '#client/event-mixin.ts'
 import { readJson } from '#client/routes/account-approval-shared.ts'
@@ -13,12 +13,12 @@ import {
 	spacing,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 import {
 	getGhostButtonCss,
 	getPillButtonCss,
 	hoverMq,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 type OnboardingStarterCardProps = {
 	listing: OnboardingFeaturedListing

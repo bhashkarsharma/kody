@@ -1,4 +1,4 @@
-import { type routes } from '#app/routes.ts'
+import { type routes } from '#universal/routes.ts'
 
 type AppRoute = (typeof routes)[keyof typeof routes]
 

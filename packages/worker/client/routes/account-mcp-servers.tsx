@@ -31,7 +31,12 @@ import {
 	recordBodyCss,
 	recordCellClamp,
 } from '#client/routes/record-table.tsx'
-import { colors, radius, spacing, typography } from '#client/styles/tokens.ts'
+import {
+	colors,
+	radius,
+	spacing,
+	typography,
+} from '#universal/styles/tokens.ts'
 import {
 	cardTitleCss,
 	descriptionCss,
@@ -40,7 +45,7 @@ import {
 	getDangerPillCss,
 	getGhostButtonCss,
 	getPillButtonCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 const clampedCellCss = css(recordCellClamp(26))
 

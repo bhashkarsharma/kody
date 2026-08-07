@@ -1,6 +1,6 @@
 import { Frame, type Handle, type RemixNode, css } from 'remix/ui'
-import { routes } from '#app/routes.ts'
-import { COMMUNITY_DETAIL_TARGET } from '#app/community-frame-constants.ts'
+import { routes } from '#universal/routes.ts'
+import { COMMUNITY_DETAIL_TARGET } from '#universal/community-frame-constants.ts'
 import {
 	listenToRouterNavigation,
 	readCurrentRouterHref,
@@ -19,7 +19,7 @@ import {
 	radius,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 import {
 	getGhostButtonCss,
 	getPillButtonCss,
@@ -29,14 +29,14 @@ import {
 	pageHeadCss,
 	proseCss,
 	visuallyHiddenCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 import {
 	type PublicCommunityListing,
 	type PublicCommunityStargazer,
-} from '#app/community-public-types.ts'
-import { type CommunityStargazersLoaderData } from '#app/loader-data.ts'
-import { formatCommunityPublishedDate } from '#app/community-display.ts'
-import { UserAvatar } from '#app/user-avatar.tsx'
+} from '#universal/community-public-types.ts'
+import { type CommunityStargazersLoaderData } from '#universal/loader-data.ts'
+import { formatCommunityPublishedDate } from '#universal/community-display.ts'
+import { UserAvatar } from '#universal/user-avatar.tsx'
 
 /**
  * Community detail, ported from the redesign prototype

@@ -12,8 +12,13 @@ import { infiniteScrollSentinel } from '#client/infinite-scroll.ts'
 import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
 import { consumeStaleNavigationData } from '#client/navigation-data.ts'
 import { readJson } from '#client/routes/account-approval-shared.ts'
-import { colors, radius, spacing, typography } from '#client/styles/tokens.ts'
-import { getGhostButtonCss } from '#client/styles/style-primitives.ts'
+import {
+	colors,
+	radius,
+	spacing,
+	typography,
+} from '#universal/styles/tokens.ts'
+import { getGhostButtonCss } from '#universal/styles/style-primitives.ts'
 import {
 	accountDisclosureCss,
 	AccountManagementMessage,
@@ -38,7 +43,7 @@ import {
 	type AccountPackagesAppFilter,
 	type AccountPackagesLoaderData,
 	type AccountPackagesSort,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 import {
 	routeLoaderRedirect,
 	type RouteLoaderResult,

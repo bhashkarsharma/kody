@@ -1,4 +1,4 @@
-import { type PublicCommunityActivityItem } from '#app/community-public-types.ts'
+import { type PublicCommunityActivityItem } from '#universal/community-public-types.ts'
 
 /**
  * How many events the timeline API returns (`loadTimelineData`). The page
@@ -79,7 +79,7 @@ export function groupTimelineItems(
  * Fixed locale, format, and time zone (UTC) — the timeline is server-rendered
  * from loader data and then hydrated, so a browser-local day boundary would
  * not merely reword a label: it would regroup the days and restructure the
- * whole feed after hydration. `src/app/blog-display.ts` sets the same
+ * whole feed after hydration. `#universal/blog-display.ts` sets the same
  * precedent for the blog's dates.
  */
 export function formatTimelineDayLabel(iso: string) {

@@ -6,7 +6,7 @@ import {
 	buildEntitlementUpgradeHint,
 	parseEntitlementLimitMessage,
 } from './errors.ts'
-import { parseStripePlanName, planLimits } from './plans.ts'
+import { parseStripePlanName, planLimits } from '#universal/plans.ts'
 import {
 	assertWithinEntitlement,
 	assertWithinStorageBytesEntitlement,

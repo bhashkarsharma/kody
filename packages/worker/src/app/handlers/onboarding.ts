@@ -9,13 +9,13 @@ import {
 import { normalizeRedirectTo } from '#app/auth-redirect.ts'
 import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import { loadOnboardingFeaturedListings } from '#app/community-data.ts'
-import { type OnboardingChecklistLoaderData } from '#app/loader-data.ts'
+import { type OnboardingChecklistLoaderData } from '#universal/loader-data.ts'
 import {
 	loadOnboardingData,
 	loadPublicOnboardingData,
 } from '#app/onboarding-data.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
-import { type routes } from '#app/routes.ts'
+import { type routes } from '#universal/routes.ts'
 
 /**
  * The checklist derives from existing signals (mailbox, memories,

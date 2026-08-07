@@ -6,7 +6,7 @@ import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import { requireAuthenticatedPageUser } from '#app/page-auth.ts'
 import { readTrimmedStringOrEmpty } from '#app/request-body.ts'
 import { renderAppPage } from '#app/ssr-render.tsx'
-import { type routes } from '#app/routes.ts'
+import { type routes } from '#universal/routes.ts'
 import { getAppBaseUrl } from '#worker/app-base-url.ts'
 import { createMcpClientHubClient } from '#worker/mcp-client/hub-client.ts'
 import {

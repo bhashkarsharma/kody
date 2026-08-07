@@ -5,7 +5,7 @@ import {
 	string,
 	type InferOutput,
 } from 'remix/data-schema'
-import { signupModes, type SignupMode } from '#app/signup-mode.ts'
+import { signupModes, type SignupMode } from '#universal/signup-mode.ts'
 
 const d1DatabaseSchema = createSchema<unknown, D1Database>((value, context) => {
 	if (value) {

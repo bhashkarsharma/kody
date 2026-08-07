@@ -8,7 +8,7 @@ import {
 	createPermissiveAccountWriteLeaseDbHooks,
 } from '#worker/test-support/user-meter.ts'
 import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
-import { planLimits } from '#worker/entitlements/plans.ts'
+import { planLimits } from '#universal/plans.ts'
 import { createStableUserIdFromEmail } from '#worker/user-id.ts'
 import { createCapabilitySecretAccessDeniedMessage } from '#mcp/secrets/errors.ts'
 import { saveSecret } from '#mcp/secrets/service.ts'
