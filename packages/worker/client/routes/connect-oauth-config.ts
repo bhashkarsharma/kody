@@ -6,7 +6,7 @@ import {
 	normalizeProviderKey,
 	safeParseHost,
 } from '@kody-internal/shared/url-hosts.ts'
-import { type AccountIntegrationListItem } from '#app/loader-data.ts'
+import { type AccountIntegrationListItem } from '#universal/loader-data.ts'
 
 export type OAuthFlow = 'pkce' | 'confidential'
 export type TokenExchangeStyle = 'form' | 'basic-json' | 'basic-form'

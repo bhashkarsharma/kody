@@ -1,9 +1,9 @@
 /**
  * The closed set of metered usage event types.
  *
- * Kept dependency-free (no `cloudflare:workers` import) so client-safe
+ * Kept dependency-free (no `cloudflare:workers` import) so other universal
  * modules — most notably the feature-flag registry, which declares success
- * metrics against these types — can import it under the client tsconfig.
+ * metrics against these types — can import it from the browser bundle.
  * The write path and event schema live in `record-usage.ts`.
  */
 

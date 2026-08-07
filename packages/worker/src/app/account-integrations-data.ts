@@ -1,7 +1,7 @@
 import {
 	type AccountIntegrationListItem,
 	type AccountOauthAppListItem,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 import { type readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import { toOauthAppPublic } from '#mcp/capabilities/integrations/oauth-app-shared.ts'
 import { canonicalIntegrationName } from '#mcp/capabilities/integrations/integration-shared.ts'

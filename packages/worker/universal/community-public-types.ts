@@ -1,7 +1,6 @@
 /**
  * Public listing shape shared by server loaders/handlers and client routes.
- * Keep this module dependency-free so the client TypeScript project can
- * include it without pulling in server-only modules.
+ * Keep this module dependency-free so it can live in the universal layer.
  */
 export type PublicCommunityListing = {
 	id: string

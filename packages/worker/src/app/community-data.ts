@@ -15,7 +15,7 @@ import {
 import {
 	type CommunityDetailLoaderData,
 	type CommunityIndexLoaderData,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 import { readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import { setRequestDataCacheLookup } from '#app/request-cache.ts'
 import {

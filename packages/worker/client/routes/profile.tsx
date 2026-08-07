@@ -1,11 +1,11 @@
 import { Frame, type Handle, css } from 'remix/ui'
-import { routes } from '#app/routes.ts'
-import { PROFILE_TARGET } from '#app/profile-frame-constants.ts'
+import { routes } from '#universal/routes.ts'
+import { PROFILE_TARGET } from '#universal/profile-frame-constants.ts'
 import {
 	type ProfileLoaderData,
 	type ProfileShellLoaderData,
 	type ProfileUnavailableLoaderData,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 import {
 	listenToRouterNavigation,
 	readCurrentRouterHref,
@@ -18,7 +18,7 @@ import { type RouteLoaderResult } from '#client/route-loader.ts'
 import { readRouterPathname } from '#client/router-location.tsx'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 import { readProfileSearchQueryFromHref } from '#client/routes/profile-search.ts'
-import { colors, spacing, typography } from '#client/styles/tokens.ts'
+import { colors, spacing, typography } from '#universal/styles/tokens.ts'
 import {
 	fieldCss,
 	fieldLabelCss,
@@ -29,7 +29,7 @@ import {
 	mutedLinkCss,
 	pageDescriptionCss,
 	stackedPageCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 function getUsernameFromPathname(pathname: string) {
 	if (!pathname.startsWith('/@')) return null

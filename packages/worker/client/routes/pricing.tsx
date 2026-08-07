@@ -1,7 +1,7 @@
 import { type Handle, css } from 'remix/ui'
-import { planLimits, type PlanLimits } from '#worker/entitlements/plans.ts'
+import { planLimits, type PlanLimits } from '#universal/plans.ts'
 import { reveal } from '#client/reveal.ts'
-import { colors, radius, typography } from '#client/styles/tokens.ts'
+import { colors, radius, typography } from '#universal/styles/tokens.ts'
 import {
 	getGhostButtonCss,
 	getPillButtonCss,
@@ -9,7 +9,7 @@ import {
 	layoutMaxWidths,
 	pageHeadCss,
 	visuallyHiddenCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 /**
  * Pricing page, ported from the redesign prototype (`landing/pricing.html`).

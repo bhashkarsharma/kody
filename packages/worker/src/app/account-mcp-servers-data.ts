@@ -1,4 +1,4 @@
-import { type AccountMcpServersLoaderData } from '#app/loader-data.ts'
+import { type AccountMcpServersLoaderData } from '#universal/loader-data.ts'
 import { type readAuthenticatedAppUser } from '#app/authenticated-user.ts'
 import {
 	buildMcpServerStatusView,

@@ -14,7 +14,7 @@
  * notice strongly recommending one everywhere else.
  */
 
-import { type UsageEventType } from '#worker/usage/event-types.ts'
+import { type UsageEventType } from '#universal/usage-event-types.ts'
 
 export type FeatureFlagSuccessMetricMeasure =
 	| 'event_count'
@@ -91,7 +91,7 @@ export const measuredFeatureFlagKeys: ReadonlySet<FeatureFlagKey> = new Set(
  * capability for registry flags that do not declare a success metric.
  */
 export const missingSuccessMetricNotice =
-	'No success metric declared. Strongly recommended: add a successMetric to this flag in packages/worker/src/feature-flags/registry.ts so exposures are recorded and the on/off cohort readout can show whether the flag is moving the metric it exists for.'
+	'No success metric declared. Strongly recommended: add a successMetric to this flag in packages/worker/universal/feature-flags/registry.ts so exposures are recorded and the on/off cohort readout can show whether the flag is moving the metric it exists for.'
 
 export function isFeatureFlagKey(value: string): value is FeatureFlagKey {
 	return featureFlagDefinitionByKey.has(value as FeatureFlagKey)

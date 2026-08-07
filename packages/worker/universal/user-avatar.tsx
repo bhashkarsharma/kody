@@ -1,7 +1,7 @@
 /** @jsxImportSource remix/ui */
 /** @jsxRuntime automatic */
 import { type Handle, css } from 'remix/ui'
-import { colors, radius, typography } from '#client/styles/tokens.ts'
+import { colors, radius, typography } from '#universal/styles/tokens.ts'
 
 export type UserAvatarProps = {
 	displayName: string

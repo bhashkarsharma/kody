@@ -1,18 +1,18 @@
 import { type Handle, css } from 'remix/ui'
-import { routes } from '#app/routes.ts'
+import { routes } from '#universal/routes.ts'
 import {
 	type OnboardingChecklistItemId,
 	type OnboardingChecklistLoaderData,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 import { on } from '#client/event-mixin.ts'
 import { ProviderIcon } from '#client/provider-icons.tsx'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 import { onboardingPath } from '#client/routes/onboarding-redirect.ts'
-import { colors, radius, typography } from '#client/styles/tokens.ts'
+import { colors, radius, typography } from '#universal/styles/tokens.ts'
 import {
 	getGhostButtonCss,
 	primaryLinkCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 export const onboardingChecklistItemLabels: Record<
 	OnboardingChecklistItemId,

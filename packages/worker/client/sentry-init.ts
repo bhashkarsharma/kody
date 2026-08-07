@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/browser'
 import { filterBrowserSentryEvent } from '#client/sentry-browser-filters.ts'
-import { type SentryClientConfig } from '#client/sentry-config.ts'
+import { type SentryClientConfig } from '#universal/sentry-config.ts'
 
 /**
  * Real browser Sentry SDK init. Loaded only via dynamic `import()` from

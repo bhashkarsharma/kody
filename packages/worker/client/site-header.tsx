@@ -7,12 +7,12 @@ import {
 	spacing,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 import {
 	hoverMq,
 	layoutMaxWidths,
 	pageGutter,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 export type SiteHeaderProps = {
 	loggedIn: boolean

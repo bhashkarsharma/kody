@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { adminGrantDiffersFromSubscription } from '#app/account-plan-display.ts'
+import { adminGrantDiffersFromSubscription } from '#universal/account-plan-display.ts'
 
 test('adminGrantDiffersFromSubscription hides the usual subscriber and free cases', () => {
 	expect(adminGrantDiffersFromSubscription('free', null)).toBe(false)

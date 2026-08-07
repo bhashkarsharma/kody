@@ -5,8 +5,8 @@ import {
 	type PublicCommunityProfile,
 	type PublicCommunityStargazer,
 	type PublicProfilePackageItem,
-} from '#app/community-public-types.ts'
-import { routes } from '#app/routes.ts'
+} from '#universal/community-public-types.ts'
+import { routes } from '#universal/routes.ts'
 import {
 	buildUserAvatarUrl,
 	getOwnerUsernameFromListingName,
@@ -22,7 +22,7 @@ import {
 export {
 	type OnboardingFeaturedListing,
 	type PublicCommunityListing,
-} from '#app/community-public-types.ts'
+} from '#universal/community-public-types.ts'
 export {
 	buildUserAvatarUrl,
 	getOwnerUsernameFromListingName,

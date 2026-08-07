@@ -2,7 +2,7 @@ import { type Handle, css } from 'remix/ui'
 import * as popover from 'remix/ui/popover'
 import { writeClipboardText } from '#client/clipboard.ts'
 import { on } from '#client/event-mixin.ts'
-import { colors, typography } from '#client/styles/tokens.ts'
+import { colors, typography } from '#universal/styles/tokens.ts'
 import {
 	starterCardCss,
 	starterGhostButtonCss,

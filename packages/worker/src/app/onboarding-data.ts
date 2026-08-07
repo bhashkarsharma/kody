@@ -1,9 +1,9 @@
 import { getAppBaseUrl } from '#worker/app-base-url.ts'
-import { type OnboardingFeaturedListing } from '#app/community-public-types.ts'
+import { type OnboardingFeaturedListing } from '#universal/community-public-types.ts'
 import {
 	type OnboardingChecklistLoaderData,
 	type OnboardingLoaderData,
-} from '#app/loader-data.ts'
+} from '#universal/loader-data.ts'
 
 const mcpServerPath = '/mcp'
 

@@ -12,9 +12,9 @@ import {
 	lazyRouteLoader,
 	onboardingArea,
 } from '#client/lazy-route.tsx'
-import { oauthPaths } from '#app/oauth-paths.ts'
-import { routePattern } from '#app/route-pattern.ts'
-import { routes } from '#app/routes.ts'
+import { oauthPaths } from '#universal/oauth-paths.ts'
+import { routePattern } from '#universal/route-pattern.ts'
+import { routes } from '#universal/routes.ts'
 import { HomeRoute, homeRouteLoader } from './home.tsx'
 import { LoginRoute, authProvidersRouteLoader } from './login.tsx'
 import {

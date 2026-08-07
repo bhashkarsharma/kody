@@ -96,7 +96,7 @@ token and then attaches it to an outbound request.
 - Worker entrypoint: `packages/worker/src/index.ts`
 - App request handler: `packages/worker/src/app/handler.ts`
 - Router and HTTP route mapping: `packages/worker/src/app/router.ts` and
-  `packages/worker/src/app/routes.ts`
+  `packages/worker/universal/routes.ts`
 - OAuth handlers: `packages/worker/src/oauth-handlers.ts`
 - MCP auth checks: `packages/worker/src/mcp-auth.ts`
 - MCP capability catalog: domain modules under

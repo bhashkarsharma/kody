@@ -1,5 +1,5 @@
-import { type OnboardingFeaturedListing } from '#app/community-public-types.ts'
-import { type OnboardingChecklistLoaderData } from '#app/loader-data.ts'
+import { type OnboardingFeaturedListing } from '#universal/community-public-types.ts'
+import { type OnboardingChecklistLoaderData } from '#universal/loader-data.ts'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 
 /**

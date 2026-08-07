@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { parseSentryClientConfig } from './sentry-config.ts'
+import { parseSentryClientConfig } from '#universal/sentry-config.ts'
 
 test('parseSentryClientConfig accepts complete configs and rejects unsafe tunnels', () => {
 	expect(

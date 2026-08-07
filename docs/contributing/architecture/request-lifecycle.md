@@ -123,7 +123,7 @@ configures session cookie signing (`COOKIE_SECRET`) before creating the app
 router.
 
 `packages/worker/src/app/router.ts` maps route patterns from
-`packages/worker/src/app/routes.ts` to handler modules (home, auth, account,
+`packages/worker/universal/routes.ts` to handler modules (home, auth, account,
 session, logout, password reset, health).
 
 ## Syntax highlighting
@@ -165,7 +165,7 @@ ordering contract.
 Route loaders are registered in `packages/worker/client/routes/index.tsx` under
 `clientRouteLoaders`, keyed by `routePattern(routes.<name>)`. The same keying
 scheme is used by `clientRoutes` and `document-head.ts`, so pathname renames
-flow from `packages/worker/src/app/routes.ts` instead of duplicated literal
+flow from `packages/worker/universal/routes.ts` instead of duplicated literal
 strings. OAuth authorize/callback are the exception: those shells use
 `oauthPaths.authorize` and `oauthPaths.callback` because the Cloudflare OAuth
 provider wrapper, not `routes.ts`, owns those pathnames. Loaders still match

@@ -6,14 +6,11 @@ import {
 	type PublicCommunityProfile,
 	type PublicCommunityStargazer,
 	type PublicProfilePackageItem,
-} from '#app/community-public-types.ts'
-import {
-	type PermissionString,
-	type RoleName,
-} from '#worker/identity/permissions.ts'
-import { type AdminFeatureFlag } from '#worker/feature-flags/types.ts'
-import { type OnboardingChecklistItemId } from '#worker/onboarding-checklist-types.ts'
-import { type SignupMode } from '#app/signup-mode.ts'
+} from '#universal/community-public-types.ts'
+import { type PermissionString, type RoleName } from '#universal/permissions.ts'
+import { type AdminFeatureFlag } from '#universal/feature-flags/types.ts'
+import { type OnboardingChecklistItemId } from '#universal/onboarding-checklist-types.ts'
+import { type SignupMode } from '#universal/signup-mode.ts'
 
 export type { ProfileVisibility }
 export type { AdminFeatureFlag }
@@ -1395,9 +1392,4 @@ export type AccountUsageLoaderData = {
 	today: string
 	entitlementConsumption: Array<AccountUsageEntitlementConsumption>
 	warnings: Array<AccountUsageEntitlementConsumption>
-}
-
-export function getRequestUrl(request: Request) {
-	const url = new URL(request.url)
-	return `${url.pathname}${url.search}${url.hash}`
 }

@@ -5,23 +5,23 @@ import { renderToString } from 'remix/ui/server'
 import {
 	communityActivityVerb,
 	formatCommunityActivityDate,
-} from '#app/community-activity-display.ts'
-import { formatCommunityPublishedDate } from '#app/community-display.ts'
-import { renderCommunityListingName } from '#app/community-listing-name.tsx'
+} from '#universal/community-activity-display.ts'
+import { formatCommunityPublishedDate } from '#universal/community-display.ts'
+import { renderCommunityListingName } from '#universal/community-listing-name.tsx'
 import {
 	type PublicCommunityActivityItem,
 	type PublicCommunityProfile,
 	type PublicProfilePackageItem,
-} from '#app/community-public-types.ts'
-import { routes } from '#app/routes.ts'
-import { UserAvatar } from '#app/user-avatar.tsx'
+} from '#universal/community-public-types.ts'
+import { routes } from '#universal/routes.ts'
+import { UserAvatar } from '#universal/user-avatar.tsx'
 import {
 	colors,
 	radius,
 	spacing,
 	transitions,
 	typography,
-} from '#client/styles/tokens.ts'
+} from '#universal/styles/tokens.ts'
 import {
 	cardCss,
 	descriptionCss,
@@ -30,7 +30,7 @@ import {
 	pageDescriptionCss,
 	pageHeaderCss,
 	pageTitleCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 export type ProfileContentProps = {
 	profile: PublicCommunityProfile

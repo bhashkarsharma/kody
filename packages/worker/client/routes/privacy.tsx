@@ -1,5 +1,5 @@
 import { type Handle, css } from 'remix/ui'
-import { colors, spacing, typography } from '#client/styles/tokens.ts'
+import { colors, spacing, typography } from '#universal/styles/tokens.ts'
 import {
 	cardCss,
 	cardTitleCss,
@@ -9,7 +9,7 @@ import {
 	pageHeaderCss,
 	pageTitleCss,
 	stackedPageCss,
-} from '#client/styles/style-primitives.ts'
+} from '#universal/styles/style-primitives.ts'
 
 export function PrivacyRoute(_handle: Handle) {
 	return () => (
