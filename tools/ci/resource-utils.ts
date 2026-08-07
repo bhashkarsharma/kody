@@ -32,9 +32,32 @@ export type CloudflareApiEnvelope<T> = {
 	result_info?: { total_pages?: number; cursor?: string }
 }
 
-type CloudflareQueue = {
+export type CloudflareQueue = {
 	queue_id: string
 	queue_name: string
+}
+
+const cloudflareApiRetryMaxAttempts = 4
+const cloudflareApiRetryBaseDelayMs = 250
+
+function sleep(ms: number) {
+	return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+export function isRetryableCloudflareApiError(error: unknown) {
+	if (!(error instanceof Error)) return false
+	if (error.name === 'AbortError') return true
+	const message = error.message
+	return (
+		message.includes('Malformed Cloudflare response') ||
+		message.includes('upstream connect error') ||
+		message.includes('Cloudflare API request failed (429)') ||
+		/Cloudflare API request failed \(5\d\d\)/.test(message) ||
+		message.includes('fetch failed') ||
+		message.includes('ECONNRESET') ||
+		message.includes('ETIMEDOUT') ||
+		message.includes('socket hang up')
+	)
 }
 
 type CloudflareEventSubscription = {
@@ -284,7 +307,7 @@ export function deleteR2Bucket({
 	console.error(`Deleted R2 bucket: ${name}`)
 }
 
-export async function cloudflareApiRequest<T>(input: {
+type CloudflareApiRequestInput = {
 	accountId: string
 	apiToken: string
 	pathname: string
@@ -292,14 +315,17 @@ export async function cloudflareApiRequest<T>(input: {
 	body?: Record<string, unknown>
 	apiBaseUrl?: string
 	fetcher?: typeof fetch
-}) {
+	sleep?: (ms: number) => Promise<void>
+	maxAttempts?: number
+}
+
+async function cloudflareApiRequestOnce<T>(input: CloudflareApiRequestInput) {
 	const baseUrl = input.apiBaseUrl ?? 'https://api.cloudflare.com/client/v4'
 	const url = `${baseUrl.replace(/\/$/, '')}/accounts/${encodeURIComponent(input.accountId)}${input.pathname}`
 	const abortController = new AbortController()
 	const timeout = setTimeout(() => abortController.abort(), 30_000)
-	let response: Response
 	try {
-		response = await (input.fetcher ?? fetch)(url, {
+		const response = await (input.fetcher ?? fetch)(url, {
 			method: input.method ?? 'GET',
 			headers: {
 				Authorization: `Bearer ${input.apiToken}`,
@@ -309,28 +335,71 @@ export async function cloudflareApiRequest<T>(input: {
 			...(input.body ? { body: JSON.stringify(input.body) } : {}),
 			signal: abortController.signal,
 		})
+		const text = await response.text()
+		const preview = text.trim().slice(0, 200) || '(empty body)'
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(text)
+		} catch {
+			throw new Error(
+				`Malformed Cloudflare response (${response.status}) for ${input.pathname}: ${preview}`,
+			)
+		}
+		if (
+			parsed === null ||
+			typeof parsed !== 'object' ||
+			Array.isArray(parsed)
+		) {
+			throw new Error(
+				`Malformed Cloudflare response (${response.status}) for ${input.pathname}: ${preview}`,
+			)
+		}
+		const payload = parsed as CloudflareApiEnvelope<T>
+		if (
+			!response.ok ||
+			payload.success !== true ||
+			payload.result === undefined
+		) {
+			const error = payload.errors?.[0]
+			throw new Error(
+				`Cloudflare API request failed (${response.status}): ${error?.message ?? error?.code ?? input.pathname}`,
+			)
+		}
+		return payload
 	} finally {
 		clearTimeout(timeout)
 	}
-	const payload = (await response.json()) as CloudflareApiEnvelope<T>
-	if (
-		!response.ok ||
-		payload.success !== true ||
-		payload.result === undefined
-	) {
-		const error = payload.errors?.[0]
-		throw new Error(
-			`Cloudflare API request failed (${response.status}): ${error?.message ?? error?.code ?? input.pathname}`,
-		)
-	}
-	return payload
 }
 
-async function listCloudflareQueues(input: {
+export async function cloudflareApiRequest<T>(
+	input: CloudflareApiRequestInput,
+) {
+	const maxAttempts = input.maxAttempts ?? cloudflareApiRetryMaxAttempts
+	const wait = input.sleep ?? sleep
+	let lastError: unknown
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		try {
+			return await cloudflareApiRequestOnce<T>(input)
+		} catch (error) {
+			lastError = error
+			if (!isRetryableCloudflareApiError(error) || attempt === maxAttempts) {
+				throw error
+			}
+			console.error(
+				`Retrying Cloudflare API ${input.method ?? 'GET'} ${input.pathname} (attempt ${attempt + 1}/${maxAttempts})`,
+			)
+			await wait(cloudflareApiRetryBaseDelayMs * 2 ** (attempt - 1))
+		}
+	}
+	throw lastError
+}
+
+export async function listCloudflareQueues(input: {
 	accountId: string
 	apiToken: string
 	apiBaseUrl?: string
 	fetcher?: typeof fetch
+	sleep?: (ms: number) => Promise<void>
 }) {
 	const queues: Array<CloudflareQueue> = []
 	let page = 1
@@ -354,31 +423,54 @@ export async function ensureCloudflareQueue(input: {
 	dryRun: boolean
 	apiBaseUrl?: string
 	fetcher?: typeof fetch
+	sleep?: (ms: number) => Promise<void>
+	existingQueues?: Array<CloudflareQueue>
 }) {
 	if (input.dryRun) {
 		console.error(`[dry-run] ensure Queue: ${input.name}`)
 		return { id: `dry-run-${input.name}`, name: input.name }
 	}
-	const existing = (await listCloudflareQueues(input)).find(
-		(queue) => queue.queue_name === input.name,
-	)
+	const queues = input.existingQueues ?? (await listCloudflareQueues(input))
+	const existing = queues.find((queue) => queue.queue_name === input.name)
 	if (existing) {
 		console.error(`Queue exists: ${existing.queue_name} (${existing.queue_id})`)
 		return { id: existing.queue_id, name: existing.queue_name }
 	}
-	const payload = await cloudflareApiRequest<CloudflareQueue>({
-		...input,
-		pathname: '/queues',
-		method: 'POST',
-		body: { queue_name: input.name },
-	})
-	if (!payload.result?.queue_id || !payload.result.queue_name) {
-		throw new Error(`Cloudflare created Queue without an id: ${input.name}`)
+	try {
+		const payload = await cloudflareApiRequest<CloudflareQueue>({
+			...input,
+			pathname: '/queues',
+			method: 'POST',
+			body: { queue_name: input.name },
+		})
+		if (!payload.result?.queue_id || !payload.result.queue_name) {
+			throw new Error(`Cloudflare created Queue without an id: ${input.name}`)
+		}
+		input.existingQueues?.push(payload.result)
+		console.error(
+			`Created Queue: ${payload.result.queue_name} (${payload.result.queue_id})`,
+		)
+		return { id: payload.result.queue_id, name: payload.result.queue_name }
+	} catch (error) {
+		let refreshed: Array<CloudflareQueue>
+		try {
+			refreshed = await listCloudflareQueues(input)
+		} catch {
+			throw error
+		}
+		const created = refreshed.find((queue) => queue.queue_name === input.name)
+		if (!created) throw error
+		if (
+			input.existingQueues &&
+			!input.existingQueues.some((queue) => queue.queue_id === created.queue_id)
+		) {
+			input.existingQueues.push(created)
+		}
+		console.error(
+			`Queue exists after create retry: ${created.queue_name} (${created.queue_id})`,
+		)
+		return { id: created.queue_id, name: created.queue_name }
 	}
-	console.error(
-		`Created Queue: ${payload.result.queue_name} (${payload.result.queue_id})`,
-	)
-	return { id: payload.result.queue_id, name: payload.result.queue_name }
 }
 
 async function listCloudflareEventSubscriptions(input: {
