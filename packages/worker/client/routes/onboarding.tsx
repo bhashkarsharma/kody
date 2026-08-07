@@ -41,6 +41,7 @@ import {
 	typography,
 } from '#client/styles/tokens.ts'
 import {
+	getAccentCalloutCss,
 	getGhostButtonCss,
 	getPillButtonCss,
 	hoverMq,
@@ -59,6 +60,9 @@ import {
  */
 
 type OnboardingStep = 1 | 2 | 3
+
+/** Sub-steps of the See-it-work mini-wizard: Send, Reply, Remember. */
+type FirstWinSubStep = 1 | 2 | 3
 
 const onboardingSteps = [
 	{ number: 1, label: 'Connect your agent', hash: 'connect-agent' },
@@ -117,8 +121,8 @@ export function OnboardingRoute(handle: Handle) {
 	let setupPrompt = ''
 	let introEmailPrompt = ''
 	let introEmailLookupPrompt = ''
-	let memoryPrompt = ''
 	let hasMcpClient = false
+	let hasSentWelcomeEmail = false
 	let hasFirstHello = false
 	let hasSavedMemory = false
 	let hasFirstWin = false
@@ -133,16 +137,40 @@ export function OnboardingRoute(handle: Handle) {
 	let panelAnimationArmed = false
 	const loadLatch = createRouteLoadLatch()
 
+	function firstWinSubStep(): FirstWinSubStep {
+		if (!hasSentWelcomeEmail) return 1
+		if (!hasFirstHello) return 2
+		return 3
+	}
+
+	/**
+	 * Footer Back/Next let people walk the mini-wizard manually; null means
+	 * "follow the signals". Signal-driven advances reset it so the flow
+	 * snaps back to the real current sub-step.
+	 */
+	let viewedFirstWinStep: FirstWinSubStep | null = null
+
+	function shownFirstWinStep(): FirstWinSubStep {
+		return viewedFirstWinStep ?? firstWinSubStep()
+	}
+
+	function selectFirstWinStep(step: FirstWinSubStep) {
+		viewedFirstWinStep = step
+		scrollToNav('first-win-steps-nav')
+		handle.update()
+	}
+
 	function applyPayload(payload: OnboardingPayload) {
 		const wasConnected = hasMcpClient
 		const wasFirstWin = hasFirstWin
+		const previousSubStep = firstWinSubStep()
 		loggedIn = payload.loggedIn
 		mcpServerUrl = payload.mcpServerUrl
 		setupPrompt = payload.setupPrompt
 		introEmailPrompt = payload.introEmailPrompt
 		introEmailLookupPrompt = payload.introEmailLookupPrompt
-		memoryPrompt = payload.memoryPrompt
 		hasMcpClient = payload.hasMcpClient
+		hasSentWelcomeEmail = payload.hasSentWelcomeEmail
 		hasFirstHello = isOnboardingChecklistItemDone(
 			payload.checklist,
 			'first-hello',
@@ -151,7 +179,9 @@ export function OnboardingRoute(handle: Handle) {
 			payload.checklist,
 			'save-memory',
 		)
-		hasFirstWin = hasFirstHello && hasSavedMemory
+		// Cumulative on purpose: the win is the whole loop, so a memory or
+		// reply that arrived outside it never skips the earlier sub-steps.
+		hasFirstWin = hasSentWelcomeEmail && hasFirstHello && hasSavedMemory
 		featuredListings = payload.featuredListings ?? []
 		checklist = payload.checklist
 		if (payload.checklist?.dismissed) checklistHidden = true
@@ -164,11 +194,36 @@ export function OnboardingRoute(handle: Handle) {
 			panelAnimationArmed = true
 			activeStep = 2
 			updateStepHash(2)
+			scrollToNav('onboarding-steps-nav')
 		} else if (!wasFirstWin && hasFirstWin) {
+			// The Remember sub-step finishing completes the whole first win.
 			panelAnimationArmed = true
 			activeStep = 3
 			updateStepHash(3)
+			scrollToNav('onboarding-steps-nav')
+		} else if (activeStep === 2 && firstWinSubStep() !== previousSubStep) {
+			// Mini-wizard auto-advance (email sent, reply landed): snap back
+			// to the signal-driven sub-step and keep the person anchored on
+			// the pills.
+			viewedFirstWinStep = null
+			scrollToNav('first-win-steps-nav')
 		}
+	}
+
+	/**
+	 * Advancing (click or auto) scrolls back to the relevant steps nav so
+	 * people always see where they are in the flow.
+	 */
+	function scrollToNav(id: string) {
+		if (typeof document === 'undefined') return
+		requestAnimationFrame(() => {
+			document.getElementById(id)?.scrollIntoView({
+				behavior: matchMedia('(prefers-reduced-motion: reduce)').matches
+					? 'auto'
+					: 'smooth',
+				block: 'start',
+			})
+		})
 	}
 
 	function updateStepHash(step: OnboardingStep) {
@@ -185,15 +240,140 @@ export function OnboardingRoute(handle: Handle) {
 	function selectStep(step: OnboardingStep) {
 		panelAnimationArmed = true
 		activeStep = step
+		// Entering a step fresh always shows the signal-driven sub-step.
+		viewedFirstWinStep = null
 		updateStepHash(step)
+		scrollToNav('onboarding-steps-nav')
 		void handle.update().then((signal) => {
 			if (signal.aborted) return
 			const stepDefinition = onboardingSteps.find(
 				(candidate) => candidate.number === step,
 			)
 			if (!stepDefinition) return
-			document.getElementById(stepDefinition.hash)?.querySelector('h2')?.focus()
+			// The nav scroll owns the viewport position; focus must not yank
+			// it back down to the panel heading.
+			document
+				.getElementById(stepDefinition.hash)
+				?.querySelector('h2')
+				?.focus({ preventScroll: true })
 		})
+	}
+
+	/** Cumulative, matching `hasFirstWin`: a later pill never shows done
+	 * while an earlier one is still waiting. */
+	function firstWinSubStepDone(step: FirstWinSubStep): boolean {
+		if (step === 1) return hasSentWelcomeEmail
+		if (step === 2) return hasSentWelcomeEmail && hasFirstHello
+		return hasSentWelcomeEmail && hasFirstHello && hasSavedMemory
+	}
+
+	/**
+	 * The mini-wizard pills: Send – – – Reply – – – Remember, joined by
+	 * dashed connectors. The sub-step we are waiting on swaps its number for
+	 * a spinner (signals arrive via the progress poll); finished sub-steps
+	 * show a check.
+	 */
+	function renderFirstWinSteps() {
+		const waitingStep = firstWinSubStep()
+		const shown = shownFirstWinStep()
+		return (
+			<ol
+				id="first-win-steps-nav"
+				aria-label="See it work sub-steps"
+				mix={css(firstWinStepsCss)}
+			>
+				{firstWinSubStepDefinitions.map((step) => {
+					const done = firstWinSubStepDone(step.number)
+					const waiting = loggedIn && step.number === waitingStep && !done
+					return (
+						<li key={step.number}>
+							<span
+								mix={css(firstWinStepPillCss)}
+								data-state={done ? 'done' : waiting ? 'waiting' : undefined}
+								aria-current={step.number === shown ? 'step' : undefined}
+							>
+								<span mix={css(firstWinStepMarkCss)} aria-hidden="true">
+									{done ? (
+										'✓'
+									) : waiting ? (
+										<span
+											mix={css(firstWinStepSpinnerCss)}
+											data-testid={`first-win-waiting-${step.number}`}
+										/>
+									) : (
+										step.number
+									)}
+								</span>
+								<span>{step.label}</span>
+							</span>
+						</li>
+					)
+				})}
+			</ol>
+		)
+	}
+
+	/** The shown sub-step's instructions — the "do" half, unlabeled. */
+	function renderFirstWinContent() {
+		if (hasFirstWin && viewedFirstWinStep === null) {
+			return (
+				<p mix={css(firstWinDoneCss)} data-testid="onboarding-first-win-done">
+					Done — Kody introduced itself, you replied, and your answers are saved
+					as memories.
+				</p>
+			)
+		}
+		const current = shownFirstWinStep()
+		if (current === 1) {
+			return (
+				<div mix={css(firstWinContentCss)}>
+					<p mix={css(firstWinGuidanceCss)}>
+						Paste this into your connected agent — Kody emails you from your own
+						Kody address within a minute.
+					</p>
+					<figure mix={css(promptBlockCss)}>
+						<blockquote>{introEmailPrompt}</blockquote>
+					</figure>
+					<CopyTextButton
+						value={introEmailPrompt}
+						idleLabel="Copy send prompt"
+						variant="pill"
+					/>
+				</div>
+			)
+		}
+		if (current === 2) {
+			return (
+				<div mix={css(firstWinContentCss)}>
+					<p mix={css(firstWinGuidanceCss)}>
+						Email sent. Open it and reply with your answers — about thirty
+						seconds. This page moves on when your reply lands.
+					</p>
+					<p mix={css(firstWinGuidanceCss)}>
+						<a href="/account/email" mix={css(primaryLinkCss)}>
+							Open your Kody inbox
+						</a>{' '}
+						to see the stored copy.
+					</p>
+				</div>
+			)
+		}
+		return (
+			<div mix={css(firstWinContentCss)}>
+				<p mix={css(firstWinGuidanceCss)}>
+					Reply received. Paste this so your agent reads it and saves what
+					matters.
+				</p>
+				<figure mix={css(promptBlockCss)}>
+					<blockquote>{introEmailLookupPrompt}</blockquote>
+				</figure>
+				<CopyTextButton
+					value={introEmailLookupPrompt}
+					idleLabel="Copy remember prompt"
+					variant="pill"
+				/>
+			</div>
+		)
 	}
 
 	/**
@@ -288,6 +468,7 @@ export function OnboardingRoute(handle: Handle) {
 			const payload = await fetchOnboardingPayload(handle.signal)
 			if (handle.signal.aborted || !payload) return
 			const nextHasMcpClient = payload.hasMcpClient
+			const nextHasSentWelcomeEmail = payload.hasSentWelcomeEmail
 			const nextHasFirstHello = isOnboardingChecklistItemDone(
 				payload.checklist,
 				'first-hello',
@@ -298,6 +479,7 @@ export function OnboardingRoute(handle: Handle) {
 			)
 			if (
 				nextHasMcpClient === hasMcpClient &&
+				nextHasSentWelcomeEmail === hasSentWelcomeEmail &&
 				nextHasFirstHello === hasFirstHello &&
 				nextHasSavedMemory === hasSavedMemory
 			) {
@@ -404,7 +586,11 @@ export function OnboardingRoute(handle: Handle) {
 
 				{status === 'ready' ? (
 					<>
-						<nav aria-label="Onboarding steps" mix={css(wizardStepsCss)}>
+						<nav
+							id="onboarding-steps-nav"
+							aria-label="Onboarding steps"
+							mix={css(wizardStepsCss)}
+						>
 							{onboardingSteps.map((step) => {
 								const isActive = activeStep === step.number
 								const isComplete =
@@ -525,92 +711,43 @@ export function OnboardingRoute(handle: Handle) {
 									/>
 								</div>
 								<p mix={css(panelLedeCss)}>
-									Paste these into your connected agent — Kody stores what
-									lands, and your agent reads it back when you ask. This step
-									checks off once both are done.
+									One quick loop — Kody emails you, you reply, your agent
+									remembers. About a minute end to end.
 								</p>
-								<div mix={css(firstWinGridCss)}>
-									<article mix={css(firstWinCardCss)}>
-										<div mix={css(firstWinCardHeadCss)}>
-											<h3 mix={css(firstWinCardTitleCss)}>Say hello</h3>
-											{loggedIn ? (
-												<div
-													mix={css(connectStatusCss)}
-													role="status"
-													aria-live="polite"
-													data-connected={hasFirstHello ? 'true' : undefined}
-													data-testid="onboarding-first-hello-status"
-												>
-													{connectStatusContent({
-														connected: hasFirstHello,
-														connectedLabel: 'Reply received',
-														waitingLabel: 'Waiting for your reply…',
-													})}
-												</div>
-											) : null}
-										</div>
-										<p mix={css(firstWinGuidanceCss)}>
-											1. Paste the first prompt so Kody emails you from your own
-											Kody address. 2. Reply to that email. 3. Paste the second
-											prompt so your agent looks up your reply — Kody stores
-											mail; nothing answers by itself until you ask.
-										</p>
-										<figure mix={css(promptBlockCss)}>
-											<blockquote>{introEmailPrompt}</blockquote>
-										</figure>
-										<CopyTextButton
-											value={introEmailPrompt}
-											idleLabel="Copy hello prompt"
-											variant="pill"
-										/>
-										<figure mix={css(promptBlockCss)}>
-											<blockquote>{introEmailLookupPrompt}</blockquote>
-										</figure>
-										<CopyTextButton
-											value={introEmailLookupPrompt}
-											idleLabel="Copy lookup prompt"
-											variant="pill"
-										/>
-									</article>
-									<article mix={css(firstWinCardCss)}>
-										<div mix={css(firstWinCardHeadCss)}>
-											<h3 mix={css(firstWinCardTitleCss)}>
-												Teach Kody about you
-											</h3>
-											{loggedIn ? (
-												<div
-													mix={css(connectStatusCss)}
-													role="status"
-													aria-live="polite"
-													data-connected={hasSavedMemory ? 'true' : undefined}
-													data-testid="onboarding-save-memory-status"
-												>
-													{connectStatusContent({
-														connected: hasSavedMemory,
-														connectedLabel: 'Memory saved',
-														waitingLabel: 'Waiting for a saved memory…',
-													})}
-												</div>
-											) : null}
-										</div>
-										<p mix={css(firstWinGuidanceCss)}>
-											Paste this into your connected agent. It will ask a couple
-											of questions and save durable memories that follow you
-											across every agent connected to your account.
-										</p>
-										<figure mix={css(promptBlockCss)}>
-											<blockquote>{memoryPrompt}</blockquote>
-										</figure>
-										<CopyTextButton
-											value={memoryPrompt}
-											idleLabel="Copy memory prompt"
-											variant="pill"
-										/>
-									</article>
-								</div>
+								{renderFirstWinSteps()}
+								{renderFirstWinContent()}
+								<aside
+									aria-label="How it works"
+									mix={css(howItWorksCss)}
+									data-testid="onboarding-how-it-works"
+								>
+									<p mix={css(howItWorksLabelCss)}>How it works</p>
+									<p>
+										Kody stores mail and memories on your account. Nothing
+										answers by itself — your agent reads the inbox and writes
+										memories when you ask, and what it saves follows you into
+										every agent you connect.
+									</p>
+								</aside>
 								<WizardNavigation
 									activeStep={activeStep}
 									onSelectStep={selectStep}
+									onBack={() => {
+										const shown = shownFirstWinStep()
+										if (shown > 1) {
+											selectFirstWinStep((shown - 1) as FirstWinSubStep)
+											return
+										}
+										selectStep(1)
+									}}
+									onNext={() => {
+										const shown = shownFirstWinStep()
+										if (shown < 3) {
+											selectFirstWinStep((shown + 1) as FirstWinSubStep)
+											return
+										}
+										selectStep(3)
+									}}
 								/>
 							</section>
 						) : null}
@@ -710,6 +847,13 @@ function WizardNavigation(
 	handle: Handle<{
 		activeStep: OnboardingStep
 		onSelectStep: (step: OnboardingStep) => void
+		/**
+		 * Override for steps that own inner navigation (the See-it-work
+		 * mini-wizard): when provided, the buttons delegate instead of
+		 * stepping the outer wizard.
+		 */
+		onBack?: () => void
+		onNext?: () => void
 	}>,
 ) {
 	return () => {
@@ -721,15 +865,17 @@ function WizardNavigation(
 			handle.props.activeStep < 3
 				? ((handle.props.activeStep + 1) as OnboardingStep)
 				: null
+		const { onBack, onNext } = handle.props
 
 		return (
 			<footer mix={css(wizardNavCss)}>
 				<button
 					type="button"
-					disabled={previousStep == null}
+					disabled={!onBack && previousStep == null}
 					mix={[
 						css(wizardBackButtonCss),
 						on('click', () => {
+							if (onBack) return onBack()
 							if (previousStep) handle.props.onSelectStep(previousStep)
 						}),
 					]}
@@ -738,10 +884,11 @@ function WizardNavigation(
 				</button>
 				<button
 					type="button"
-					disabled={nextStep == null}
+					disabled={!onNext && nextStep == null}
 					mix={[
 						css(wizardNextButtonCss),
 						on('click', () => {
+							if (onNext) return onNext()
 							if (nextStep) handle.props.onSelectStep(nextStep)
 						}),
 					]}
@@ -1053,36 +1200,106 @@ const promptBlockCss = {
 	},
 }
 
-const firstWinGridCss = {
-	display: 'grid',
-	gridTemplateColumns: 'repeat(auto-fit, minmax(min(16rem, 100%), 1fr))',
-	gap: '0.9rem',
+/** Mini-wizard pill definitions: three sub-steps inside "See it work". */
+const firstWinSubStepDefinitions = [
+	{ number: 1, label: 'Send' },
+	{ number: 2, label: 'Reply' },
+	{ number: 3, label: 'Remember' },
+] as const satisfies ReadonlyArray<{ number: FirstWinSubStep; label: string }>
+
+/* Pills joined by dashed connectors: 1 Send – – – 2 Reply – – – 3 Remember. */
+const firstWinStepsCss = {
+	listStyle: 'none',
+	margin: 0,
+	padding: 0,
+	display: 'flex',
+	alignItems: 'center',
+	'& li': {
+		display: 'flex',
+		alignItems: 'center',
+		flex: 1,
+		minWidth: 0,
+	},
+	'& li:first-child': {
+		flex: 'none',
+	},
+	'& li:not(:first-child)::before': {
+		content: '""',
+		flex: 1,
+		borderTop: `2px dashed ${colors.border}`,
+		marginInline: '0.7rem',
+	},
 }
 
-const firstWinCardCss = {
-	display: 'grid',
-	gap: '0.75rem',
-	padding: '1rem 1.1rem',
+const firstWinStepPillCss = {
+	display: 'inline-flex',
+	alignItems: 'center',
+	gap: '0.55rem',
+	padding: '0.45rem 0.9rem 0.45rem 0.5rem',
+	font: `600 0.94rem/1.2 ${typography.fontFamilyBody}`,
+	color: colors.textMuted,
 	backgroundColor: colors.background,
 	border: `1.5px solid ${colors.border}`,
-	borderRadius: radius.card,
-	minWidth: 0,
-	// Parent grid stretches both cards to equal height. Keep auto tracks at
-	// content size so leftover space does not inflate pills/buttons in the
-	// shorter column.
-	alignContent: 'start',
+	borderRadius: '999px',
+	whiteSpace: 'nowrap' as const,
+	'&[data-state="waiting"]': {
+		borderColor: colors.primary,
+		color: colors.text,
+	},
+	'&[data-state="done"]': {
+		borderColor: `oklch(from ${colors.primary} l c h / 0.5)`,
+		color: colors.primaryText,
+	},
 }
 
-const firstWinCardHeadCss = {
-	display: 'grid',
-	gap: '0.65rem',
-}
-
-const firstWinCardTitleCss = {
-	margin: 0,
-	fontSize: '1.02rem',
+const firstWinStepMarkCss = {
+	display: 'inline-flex',
+	alignItems: 'center',
+	justifyContent: 'center',
+	width: '1.5rem',
+	height: '1.5rem',
+	flex: 'none',
+	borderRadius: '50%',
+	backgroundColor: `oklch(from ${colors.primary} l c h / 0.14)`,
+	fontSize: '0.85rem',
 	fontWeight: 700,
-	lineHeight: 1.3,
+	color: colors.primaryText,
+}
+
+const firstWinStepSpinnerCss = {
+	...inlineSpinnerCss,
+	width: '0.95rem',
+	height: '0.95rem',
+}
+
+const firstWinContentCss = {
+	display: 'grid',
+	gap: '0.75rem',
+	justifyItems: 'start',
+}
+
+const firstWinDoneCss = {
+	margin: 0,
+	color: colors.primaryText,
+	fontWeight: 600,
+}
+
+/* The "learn" half lives here, labeled and out of the instructions' way. */
+const howItWorksCss = {
+	...getAccentCalloutCss(),
+	'& p': {
+		margin: 0,
+		color: colors.textMuted,
+		fontSize: '0.92rem',
+		lineHeight: 1.55,
+	},
+}
+
+const howItWorksLabelCss = {
+	font: `700 0.78rem/1 ${typography.fontFamilyBody}`,
+	letterSpacing: '0.06em',
+	textTransform: 'uppercase' as const,
+	color: colors.primaryText,
 }
 
 const firstWinGuidanceCss = {
