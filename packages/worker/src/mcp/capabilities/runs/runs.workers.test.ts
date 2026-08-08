@@ -257,6 +257,31 @@ test(
 			ignored: 1,
 			resolved: 2,
 		})
+
+		// Reopening explicit ids updates only triaged rows; an already-open
+		// error is not counted as a match or update.
+		const reopened = await runUpdateBulkCapability.handler(
+			{
+				run_ids: ['job-b-same-message', 'job-a-other-error'],
+				triage: 'open',
+			},
+			{ env, callerContext: ownerContext },
+		)
+		expect(reopened).toMatchObject({
+			matched_run_ids: ['job-b-same-message'],
+			updated_count: 1,
+			has_more: false,
+		})
+		const afterReopen = await runSummaryCapability.handler(
+			{},
+			{ env, callerContext: ownerContext },
+		)
+		expect(afterReopen).toMatchObject({
+			total: 5,
+			errors: 2,
+			ignored: 0,
+			resolved: 2,
+		})
 	},
 	runLogSuiteTimeoutMs,
 )

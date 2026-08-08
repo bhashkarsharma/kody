@@ -54,7 +54,7 @@ const inputSchema = z
 		),
 		note: runTriageNoteSchema,
 		limit: runListLimitSchema.describe(
-			'Maximum matching rows for a filtered update (default/max 100).',
+			'Maximum rows updated in one call for both run_ids and filter selectors (default/max 100).',
 		),
 		dry_run: z
 			.boolean()

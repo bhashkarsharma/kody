@@ -2805,6 +2805,11 @@ class RunLogBase extends DurableObject<Env> {
 		const limit = normalizePageSize(input.limit, runRecordMaxPageSize)
 		const clauses = [`status = 'error'`]
 		const params: Array<SqlStorageValue> = []
+		// Reopening already-open rows is a no-op and must not inflate matched or
+		// updated counts, regardless of selector type.
+		if (input.errorTriage == null) {
+			clauses.push('error_triage IS NOT NULL')
+		}
 		const runIds = (input.runIds ?? [])
 			.map((id) => id.trim())
 			.filter(Boolean)
