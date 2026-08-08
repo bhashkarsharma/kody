@@ -10,6 +10,8 @@ import {
 	type JobRunObservabilityUpsertInput,
 } from './job-run-observability.ts'
 import {
+	type BulkUpdateRunErrorTriageFilter,
+	type BulkUpdateRunErrorTriageResult,
 	type PackageInvocationClaimInput,
 	type PackageInvocationLedgerKey,
 	type PackageInvocationLedgerRecord,
@@ -558,6 +560,44 @@ export async function updateRunErrorTriage(input: {
 		preserveTriageNote,
 		triageNote: preserveTriageNote ? null : (input.triageNote ?? null),
 		triagedBy: input.userId,
+	})
+}
+
+export type BulkUpdateRunErrorTriageOutcome =
+	| BulkUpdateRunErrorTriageResult
+	| { reason: 'unavailable' }
+
+/**
+ * Soft-triage a bounded set of retained errors selected by ids or exact-match
+ * filters. Execution outcomes and error details are never rewritten.
+ */
+export async function bulkUpdateRunErrorTriage(input: {
+	env: Env
+	userId: string
+	runIds?: Array<string> | null
+	filter?: BulkUpdateRunErrorTriageFilter | null
+	errorTriage: RunErrorTriage | null
+	triageNote?: string | null
+	limit?: number | null
+	dryRun?: boolean
+}): Promise<BulkUpdateRunErrorTriageOutcome> {
+	if (!runLogBinding(input.env)) return { reason: 'unavailable' }
+	const preserveTriageNote = input.triageNote === undefined
+	return await runLogRpc({
+		env: input.env,
+		userId: input.userId,
+	}).bulkUpdateRunErrorTriage({
+		runIds: input.runIds ?? null,
+		filter: input.filter ?? null,
+		errorTriage: input.errorTriage,
+		preserveTriageNote,
+		triageNote: preserveTriageNote ? null : (input.triageNote ?? null),
+		triagedBy: input.userId,
+		limit: Math.min(
+			Math.max(input.limit ?? runRecordMaxPageSize, 1),
+			runRecordMaxPageSize,
+		),
+		dryRun: input.dryRun ?? false,
 	})
 }
 
