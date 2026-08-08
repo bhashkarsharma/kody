@@ -65,6 +65,27 @@ async function createWorkflowsProxyForTest(runtimeBridge: unknown) {
 	}
 }
 
+async function collectQueryParamNamesForTest(url: URL) {
+	const sourceText = await readFile(
+		new URL('./package-app.ts', import.meta.url),
+		'utf8',
+	)
+	const start = sourceText.indexOf('function collectQueryParamNames(url) {')
+	const end = sourceText.indexOf('\n\nasync function startRuntimeRun', start)
+	if (start < 0 || end < 0) {
+		throw new Error('collectQueryParamNames source was not found.')
+	}
+	const functionSource = sourceText
+		.slice(start, end)
+		.replaceAll('\\\\', '\\')
+		.replaceAll('\\`', '`')
+		.replaceAll('\\${', '${')
+	return new Function(
+		'url',
+		`${functionSource}; return collectQueryParamNames(url);`,
+	)(url) as Array<string>
+}
+
 test('package app kody proxy supports remote namespace calls', async () => {
 	const calls: Array<{ name: string; args: unknown }> = []
 	const kody = await createKodyProxyForTest({
@@ -585,6 +606,89 @@ test('buildPackageAppWorker aligns dynamic worker compatibility with shared opti
 	expect(factory?.()).toMatchObject(createDynamicWorkerCompatibilityOptions())
 })
 
+test('package app worker exposes its public mount and records fetch query and response status', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockResolvedValue(
+		{
+			row: {
+				id: 'artifact-row-public-context',
+				artifactName: null,
+				entryPoint: 'app.js',
+			},
+			artifact: {
+				mainModule: 'dist/app.js',
+				modules: {
+					'dist/app.js':
+						'export default { fetch() { return new Response("ok", { status: 201 }) } }',
+				},
+				dependencies: [],
+				dynamicDependencies: [],
+			},
+		},
+	)
+
+	await buildPackageAppWorker({
+		env,
+		baseUrl: 'https://app.kody.test',
+		userId: 'user-public-context',
+		savedPackage: {
+			id: 'package-public-context',
+			kodyId: 'renamed-app',
+			name: '@current-owner/renamed-app',
+			sourceId: 'source-1',
+			publishedCommit: 'commit-1',
+			manifestPath: 'package.json',
+			sourceRoot: '/',
+		},
+		source: createPackageAppTestSource(),
+		manifest: createPackageAppTestManifest(),
+		runtime: {
+			callerContext: {
+				user: {
+					email: 'owner@example.com',
+					displayName: 'Owner',
+				},
+			} as never,
+			servingUsername: 'serving-owner',
+			hostedOrigin: 'https://packages.kody.test',
+		},
+	})
+
+	const loader = env.APP_LOADER as unknown as {
+		get: ReturnType<typeof vi.fn>
+	}
+	const factory = loader.get.mock.calls[0]?.[1] as
+		| (() => {
+				env: Record<string, unknown>
+				modules: Record<string, string>
+		  })
+		| undefined
+	const workerOptions = factory?.()
+	expect(workerOptions?.env['__kodyPackageContext']).toEqual({
+		packageId: 'package-public-context',
+		kodyId: 'renamed-app',
+		sourceId: 'source-1',
+		publishedCommit: 'commit-1',
+		appBasePath: '/@serving-owner/packages/renamed-app',
+		hostedUrl: 'https://packages.kody.test/@serving-owner/packages/renamed-app',
+	})
+	const wrapperSource = workerOptions?.modules['package-app-entry.js']
+	expect(wrapperSource).toContain(
+		'queryParamNames: collectQueryParamNames(requestUrl)',
+	)
+	expect(wrapperSource).toContain('httpStatus: response.status')
+
+	const queryParamNames = await collectQueryParamNamesForTest(
+		new URL(
+			'https://packages.kody.test/callback?audio=1&code=oauth-code-secret&state=oauth-state-secret&audio=2',
+		),
+	)
+	expect(queryParamNames).toEqual(['audio', 'code', 'state'])
+	expect(JSON.stringify(queryParamNames)).not.toContain('oauth-code-secret')
+	expect(JSON.stringify(queryParamNames)).not.toContain('oauth-state-secret')
+})
+
 test('createPackageAppWorkerId changes when compatibility settings change', async () => {
 	const cacheKey = JSON.stringify([
 		'user-compat-id',
@@ -905,6 +1009,50 @@ test('package app runtime bridge redacts resolved secrets from run record logs a
 	}
 	expect(JSON.stringify(finishInput.logs)).not.toContain(secretValue)
 	expect(finishInput.error.message).not.toContain(secretValue)
+})
+
+test('package app runtime bridge adds response status to finish metadata', async () => {
+	resetPackageAppRuntimeMocks()
+	const { bridge, waitUntilTasks } = createPackageAppRuntimeBridgeForTest()
+	const runHandle = {
+		id: 'run-status',
+		userId: 'user-1',
+		startedAt: '2026-07-26T00:00:00.000Z',
+		persistence: 'eager' as const,
+		context: {
+			surface: 'app_fetch' as const,
+			packageId: 'package-1',
+			metadata: {
+				method: 'GET',
+				queryParamNames: ['audio', 'code', 'state'],
+			},
+		},
+	}
+
+	await bridge.packageRuntimeRunFinish({
+		run: runHandle,
+		status: 'success',
+		metadata: { httpStatus: 201 },
+	})
+	await Promise.all(waitUntilTasks)
+
+	expect(packageAppRuntimeMock.finishRunRecord).toHaveBeenCalledWith({
+		env: {},
+		handle: {
+			...runHandle,
+			context: {
+				...runHandle.context,
+				metadata: {
+					method: 'GET',
+					queryParamNames: ['audio', 'code', 'state'],
+					httpStatus: 201,
+				},
+			},
+		},
+		status: 'success',
+		error: undefined,
+		logs: undefined,
+	})
 })
 
 test('package app runtime bridge redacts secrets from Error instances in finish payload', async () => {
