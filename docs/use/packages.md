@@ -264,9 +264,10 @@ package-mounted secrets (`kody.secretMounts`), and its own `packages` helper.
 
 **Unsupported helpers:** `packages.invokeChecked`, `packages.check`, and literal
 dynamic `import("kody:@...")` are not available. Package publish checks reject
-them permanently, and runtime teaching errors name the supported replacement.
-`packages.invoke` performs the contract check inline, and the static/dynamic
-rules above cover literal dynamic import cases. The
+all three with the supported replacement named. At runtime, the `packages`
+helper exposes only `invoke`, so accessing `check` or `invokeChecked` throws a
+normal `TypeError`. `packages.invoke` performs the contract check inline, and
+the static/dynamic rules above cover literal dynamic import cases. The
 `0002-static-first-invocation` package codemod remains available to repair
 `invokeChecked` call sites mechanically.
 
