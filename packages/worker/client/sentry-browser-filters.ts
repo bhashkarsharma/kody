@@ -229,7 +229,7 @@ export function filterBrowserInjectedGlobalNoiseSentryEvent<
  * app code.
  */
 const fathomRemoveChildNullMessage =
-	/^(?:TypeError:\s*)?Cannot read propert(?:y|ies) of null \(reading ['"]removeChild['"]\)$/
+	/^(?:(?:TypeError:\s*)?Cannot read propert(?:y|ies) of null \(reading ['"]removeChild['"]\)|(?:TypeError:\s*)?null is not an object \(evaluating '[^']*\.removeChild[^']*'\))$/
 
 const fathomAnalyticsHostname = 'cdn.usefathom.com'
 
