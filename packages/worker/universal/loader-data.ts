@@ -758,6 +758,17 @@ export type AccountIntegrationListItem = {
 		scopeSeparator?: string | null
 		extraAuthorizeParams?: Record<string, string>
 	} | null
+	/**
+	 * True when this connection (or prefill) uses a platform built-in OAuth
+	 * app: the operator owns the client registration, the shared client secret
+	 * stays server-side, and the connect UI skips the client-credentials setup
+	 * step entirely.
+	 */
+	platform?: boolean
+	/** Scope menu for platform apps: the superset an operator verified. */
+	platformAllowedScopes?: Array<string>
+	/** Relative serving path of the operator-uploaded provider logo. */
+	platformLogoPath?: string | null
 	createdAt: string
 	updatedAt: string
 }
