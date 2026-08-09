@@ -144,6 +144,16 @@ exhaustive.
   package's name is known when the code is written. Static imports are typed,
   publish-verified, dependency-graph-visible, and add zero per-call platform
   cost.
+- **Platform (built-in) scopes resolve live without forking.** When a scope's
+  username belongs to a platform account (for example `@kody`), a static import
+  such as `import gh from 'kody:@kody/github/issues'` resolves the platform
+  account's current published version even though you do not own a copy. The
+  code runs in **your** runtime against your secrets and grants; your own copy
+  of the same name always wins, so forking to customize keeps working. Platform
+  package code cannot use `packageStorage()` in your account, and dynamic
+  `import("kody:@kody/…")` is unsupported — use the static form. Platform
+  packages appear in `search` results alongside your own (marked with their
+  platform scope), so agents discover them without knowing the name in advance.
 - Static `kody:@...` imports in saved package code are bundled into published
   runtime artifacts as snapshots of the imported package's published bundle.
   Republishing the imported package does not change already-published
@@ -255,7 +265,9 @@ Static package imports from ad hoc MCP `execute` code, such as
 `kody:@scope/package/export`, do not get a package runtime context. They run as
 library imports in the execute caller's runtime, where `packageStorage()` still
 reaches the declaring package's own storage bucket (see
-[Package storage](#package-storage)), and `{{secret:...}}` placeholders for
+[Package storage](#package-storage)) — for **caller-owned** packages only:
+platform (built-in) dependencies receive no `packageStorage()` grant and the
+call fails closed inside live platform code. `{{secret:...}}` placeholders for
 user-scope secrets still resolve at the fetch gateway under the calling user —
 so secret-backed packages such as `github` work fully via plain static import.
 Use keyless `packages.invoke` from execute when you need to enter a saved
