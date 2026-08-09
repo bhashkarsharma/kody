@@ -58,8 +58,10 @@ import {
 	type PersistedJobCallerContext,
 } from './types.ts'
 import { createJobStorageId, storageRunnerRpc } from '#worker/storage-runner.ts'
+import { isEntitlementLimitError } from '#worker/entitlements/errors.ts'
 import {
 	assertWithinEntitlement,
+	consumeDailyEntitlement,
 	readEntitlementResourceUsage,
 } from '#worker/entitlements/service.ts'
 import { resolveBackgroundMcpUser } from '#worker/identity/background-mcp-user.ts'
@@ -1248,6 +1250,16 @@ export async function executeJobOnce(input: {
 						},
 						repoContext: input.callerContext.repoContext ?? null,
 					}
+					// Daily job-run quota before sandbox work so over-limit
+					// ticks cost nothing. Failed attempts still count.
+					await consumeDailyEntitlement({
+						db: input.env.APP_DB,
+						env: input.env,
+						userId: input.job.userId,
+						email: backgroundUser.email,
+						resource: 'job_runs_per_day',
+						waitUntil: input.waitUntil,
+					})
 					const result = await runRepoBackedJob({
 						env: input.env,
 						job: input.job,
@@ -1286,7 +1298,13 @@ export async function executeJobOnce(input: {
 					error: formatJobError(error),
 					logs: [],
 				}
-				completedOccurrence = true
+				// Daily job-run quota denials happen before sandbox work.
+				// Still return an error outcome so schedules advance, but do
+				// not emit job_run usage or else every post-limit tick
+				// inflates rollups while the UserMeter counter stays capped.
+				if (!isEntitlementLimitError(error)) {
+					completedOccurrence = true
+				}
 			} finally {
 				finished = new Date()
 				durationMs = Math.max(0, finished.valueOf() - started.valueOf())
