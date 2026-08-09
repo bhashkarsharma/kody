@@ -15,7 +15,10 @@ import {
 	routeLoaderRedirect,
 	type RouteLoaderResult,
 } from '#client/route-loader.ts'
-import { type OnboardingChecklistLoaderData } from '#universal/loader-data.ts'
+import {
+	type OnboardingBuiltInProvider,
+	type OnboardingChecklistLoaderData,
+} from '#universal/loader-data.ts'
 import { type OnboardingFeaturedListing } from '#universal/community-public-types.ts'
 import {
 	fetchOnboardingPayload,
@@ -127,6 +130,7 @@ export function OnboardingRoute(handle: Handle) {
 	let hasSavedMemory = false
 	let hasFirstWin = false
 	let featuredListings: Array<OnboardingFeaturedListing> = []
+	let builtInProviders: Array<OnboardingBuiltInProvider> = []
 	let checklist: OnboardingChecklistLoaderData | null = null
 	let checklistHidden = false
 	let activeStep: OnboardingStep = 1
@@ -183,6 +187,7 @@ export function OnboardingRoute(handle: Handle) {
 		// reply that arrived outside it never skips the earlier sub-steps.
 		hasFirstWin = hasSentWelcomeEmail && hasFirstHello && hasSavedMemory
 		featuredListings = payload.featuredListings ?? []
+		builtInProviders = payload.builtInProviders ?? []
 		checklist = payload.checklist
 		if (payload.checklist?.dismissed) checklistHidden = true
 		status = 'ready'
@@ -797,6 +802,47 @@ export function OnboardingRoute(handle: Handle) {
 										mix={css(panelArtCss)}
 									/>
 								</div>
+								{builtInProviders.length > 0 ? (
+									<div
+										data-testid="onboarding-built-in-integrations"
+										mix={css(builtInCalloutCss)}
+									>
+										<p mix={css(builtInLabelCss)}>Use a built-in integration</p>
+										<p mix={css(builtInLedeCss)}>
+											Connect in one click — Kody hosts the provider app, so
+											there is nothing to register.
+										</p>
+										<ul mix={css(builtInListCss)}>
+											{builtInProviders.map((provider) => (
+												<li key={provider.slug}>
+													<a
+														href={`/connect/oauth?provider=${encodeURIComponent(provider.slug)}`}
+														mix={css(builtInLinkCss)}
+													>
+														{provider.logoPath ? (
+															<img
+																src={provider.logoPath}
+																alt=""
+																width={20}
+																height={20}
+																loading="lazy"
+																mix={css(builtInLogoCss)}
+															/>
+														) : null}
+														{provider.label}
+													</a>
+												</li>
+											))}
+										</ul>
+										<p mix={css(builtInByoCss)}>
+											Want scopes or rate limits Kody's app does not offer?{' '}
+											<a href="/connect/oauth" mix={css(primaryLinkCss)}>
+												Bring your own OAuth app
+											</a>{' '}
+											for more power.
+										</p>
+									</div>
+								) : null}
 								<p mix={css(panelLedeCss)}>
 									{featuredListings.length > 0
 										? 'These packages were reviewed by an admin and support one-click install here. After install, use Copy prompt so your agent can finish any remaining setup — or pick Choose your own adventure to explore with your agent instead.'
@@ -844,7 +890,7 @@ export function OnboardingRoute(handle: Handle) {
 
 						{/* Outside the wizard panels on purpose: the prototype keeps the
 					    BYOK disclosure visible on every step. */}
-						{renderByokDetails()}
+						{renderByokDetails(builtInProviders.length > 0)}
 
 						{loggedIn ? null : (
 							<p mix={css(authLinksCss)}>
@@ -927,7 +973,7 @@ function WizardNavigation(
  * prototype's onboarding-specific framing ("Why there's no one-click
  * connect"); the integrations page keeps its own `byok-explainer` copy.
  */
-function renderByokDetails() {
+function renderByokDetails(hasBuiltIns: boolean) {
 	return (
 		<details mix={css(byokDetailsCss)}>
 			<summary mix={css(byokSummaryCss)}>Bring your own API keys</summary>
@@ -945,12 +991,14 @@ function renderByokDetails() {
 				/>
 				<div>
 					<h2 id="byok-note-title" mix={css(byokTitleCss)}>
-						Why there&apos;s no one-click connect
+						{hasBuiltIns
+							? 'Why bring your own keys?'
+							: "Why there's no one-click connect"}
 					</h2>
 					<p mix={css(byokCopyCss)}>
-						Kody never asks a company for access on your behalf. You create the
-						connection yourself, and your agent walks you through it, so it is
-						completely yours: your app, your scopes, no middleman.
+						{hasBuiltIns
+							? 'Built-in integrations run on an app Kody hosts, for a fast start. For everything else — or for full control — you create the connection yourself, and your agent walks you through it, so it is completely yours: your app, your scopes, no middleman.'
+							: 'Kody never asks a company for access on your behalf. You create the connection yourself, and your agent walks you through it, so it is completely yours: your app, your scopes, no middleman.'}
 					</p>
 					<dl mix={css(byokCompareCss)}>
 						<div>
@@ -1426,6 +1474,69 @@ function connectStatusContent(input: {
 		/>,
 		<strong key="label">{input.waitingLabel}</strong>,
 	]
+}
+
+/* Built-in integrations: an accent well above the starter grid so the
+   one-click path reads first, with BYO as the power-user footnote. */
+const builtInCalloutCss = {
+	...getAccentCalloutCss(),
+	display: 'grid',
+	gap: '0.55rem',
+}
+
+const builtInLabelCss = {
+	margin: 0,
+	font: `700 0.78rem/1 ${typography.fontFamilyBody}`,
+	letterSpacing: '0.06em',
+	textTransform: 'uppercase' as const,
+	color: colors.primaryText,
+}
+
+const builtInLedeCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: '0.94rem',
+	lineHeight: 1.55,
+}
+
+const builtInListCss = {
+	listStyle: 'none',
+	margin: 0,
+	padding: 0,
+	display: 'flex',
+	flexWrap: 'wrap' as const,
+	gap: '0.6rem',
+}
+
+const builtInLinkCss = {
+	display: 'inline-flex',
+	alignItems: 'center',
+	gap: '0.45rem',
+	padding: '0.5rem 0.95rem',
+	borderRadius: radius.full,
+	backgroundColor: colors.surface,
+	boxShadow: `inset 0 0 0 1.5px ${colors.border}`,
+	color: colors.text,
+	fontWeight: 600,
+	textDecoration: 'none',
+	transition: `box-shadow ${transitions.fast}, transform ${transitions.fast}`,
+	[hoverMq]: {
+		'&:hover': {
+			boxShadow: `inset 0 0 0 1.5px ${colors.primary}`,
+			transform: 'translateY(-1px)',
+		},
+	},
+}
+
+const builtInLogoCss = {
+	display: 'block',
+	borderRadius: '4px',
+}
+
+const builtInByoCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: '0.9rem',
 }
 
 /* Starter packages: compact centered cards; the DIY card breaks the grid
