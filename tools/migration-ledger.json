@@ -27,6 +27,10 @@
 		{
 			"filename": "0006-platform-oauth-app-description.sql",
 			"sha256": "546c2d705915aa098dd3642d65d0e6fed48e8f201b71afb4725b8e10fbdf3728"
+		},
+		{
+			"filename": "0007-saved-package-search-index-debt.sql",
+			"sha256": "62922faee72e96170009bd0410649a9404fc1678f571438d78f62aaaba89ac07"
 		}
 	]
 }

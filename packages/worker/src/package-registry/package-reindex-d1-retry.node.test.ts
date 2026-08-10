@@ -14,6 +14,8 @@ const mockModule = vi.hoisted(() => ({
 	isCapabilitySearchOffline: vi.fn(),
 	listSavedPackagesPage: vi.fn(),
 	loadPublishedEntityManifest: vi.fn(),
+	clearSavedPackageSearchIndexDebt: vi.fn(),
+	getSavedPackageSearchIndexDebtGeneration: vi.fn(),
 }))
 
 vi.mock('#worker/vectorize/embedding.ts', () => ({
@@ -47,6 +49,13 @@ vi.mock('./repo.ts', () => ({
 	savedPackageVectorId: (packageId: string) => `package_${packageId}`,
 }))
 
+vi.mock('./search-index-debt.ts', () => ({
+	clearSavedPackageSearchIndexDebt: (...args: Array<unknown>) =>
+		mockModule.clearSavedPackageSearchIndexDebt(...args),
+	getSavedPackageSearchIndexDebtGeneration: (...args: Array<unknown>) =>
+		mockModule.getSavedPackageSearchIndexDebtGeneration(...args),
+}))
+
 const { reindexSavedPackageVectors } = await import('./package-reindex.ts')
 
 const exportError = () => new Error(`D1_ERROR: ${d1LongRunningExportMessage}.`)
@@ -58,6 +67,10 @@ function resetMocks() {
 	mockModule.getEntitySourceById.mockReset()
 	mockModule.isCapabilitySearchOffline.mockReset()
 	mockModule.listSavedPackagesPage.mockReset()
+	mockModule.clearSavedPackageSearchIndexDebt.mockReset()
+	mockModule.clearSavedPackageSearchIndexDebt.mockResolvedValue(undefined)
+	mockModule.getSavedPackageSearchIndexDebtGeneration.mockReset()
+	mockModule.getSavedPackageSearchIndexDebtGeneration.mockResolvedValue(null)
 	mockModule.loadPublishedEntityManifest.mockReset()
 }
 
@@ -167,6 +180,7 @@ test('saved package reindex retries transient D1 export errors then reports exha
 					error: `D1_ERROR: ${d1LongRunningExportMessage}.`,
 				},
 			],
+			failedIds: ['package_pkg-1'],
 			error: '1 saved package vector(s) failed to reindex',
 		})
 		for (let attempt = 1; attempt < d1LockRetryMaxAttempts; attempt++) {

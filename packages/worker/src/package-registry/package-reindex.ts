@@ -14,6 +14,10 @@ import { runD1WithRetry } from '#worker/d1-retry.ts'
 import { getErrorMessage } from '@kody-internal/shared/error-message.ts'
 import { buildSavedPackageEmbedText } from './embed.ts'
 import { listSavedPackagesPage, savedPackageVectorId } from './repo.ts'
+import {
+	clearSavedPackageSearchIndexDebt,
+	getSavedPackageSearchIndexDebtGeneration,
+} from './search-index-debt.ts'
 import { loadPackageManifestBySourceId } from './source.ts'
 
 // Saved packages are reindexed in keyset-paged batches so memory stays
@@ -83,17 +87,47 @@ export async function reindexSavedPackageVectors(
 				upserted: 0,
 				failed: loadFailures.length,
 				failures: loadFailures,
+				failedIds: loadFailures.map((failure) => failure.id),
 			})
 		}
 		if (candidates.length > 0) {
-			pageResults.push(
-				await reindexVectorCandidates({
-					env,
-					index,
-					kind: 'saved package',
-					candidates,
-				}),
+			// Snapshot debt generations before upsert so a concurrent publish
+			// that bumps generation is not wiped by post-page cleanup.
+			const debtGenerations = new Map<string, number>()
+			for (const row of rows) {
+				const generation = await getSavedPackageSearchIndexDebtGeneration({
+					db: env.APP_DB,
+					packageId: row.id,
+				})
+				if (generation !== null) {
+					debtGenerations.set(row.id, generation)
+				}
+			}
+			const pageResult = await reindexVectorCandidates({
+				env,
+				index,
+				kind: 'saved package',
+				candidates,
+			})
+			pageResults.push(pageResult)
+			// Prefer uncapped failedIds (failures is a capped sample for messages).
+			const failedIds = new Set(
+				pageResult.failedIds ??
+					(pageResult.failures ?? []).map((failure) => failure.id),
 			)
+			// Self-heal deferred upsert debt observed before this page upsert.
+			for (const row of rows) {
+				const vectorId = savedPackageVectorId(row.id)
+				if (failedIds.has(vectorId)) continue
+				if (loadFailures.some((failure) => failure.id === vectorId)) continue
+				const generation = debtGenerations.get(row.id)
+				if (generation === undefined) continue
+				await clearSavedPackageSearchIndexDebt({
+					db: env.APP_DB,
+					packageId: row.id,
+					generation,
+				})
+			}
 		}
 		if (rows.length < reindexPageSize) break
 		afterId = rows[rows.length - 1]!.id

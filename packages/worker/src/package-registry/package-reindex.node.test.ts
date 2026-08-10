@@ -12,6 +12,8 @@ const mockModule = vi.hoisted(() => ({
 	isCapabilitySearchOffline: vi.fn(),
 	listSavedPackagesPage: vi.fn(),
 	loadPackageManifestBySourceId: vi.fn(),
+	clearSavedPackageSearchIndexDebt: vi.fn(),
+	getSavedPackageSearchIndexDebtGeneration: vi.fn(),
 }))
 
 vi.mock('#worker/vectorize/embedding.ts', () => ({
@@ -39,6 +41,13 @@ vi.mock('./source.ts', () => ({
 		mockModule.loadPackageManifestBySourceId(...args),
 }))
 
+vi.mock('./search-index-debt.ts', () => ({
+	clearSavedPackageSearchIndexDebt: (...args: Array<unknown>) =>
+		mockModule.clearSavedPackageSearchIndexDebt(...args),
+	getSavedPackageSearchIndexDebtGeneration: (...args: Array<unknown>) =>
+		mockModule.getSavedPackageSearchIndexDebtGeneration(...args),
+}))
+
 const { reindexSavedPackageVectors } = await import('./package-reindex.ts')
 
 function resetMocks() {
@@ -48,6 +57,10 @@ function resetMocks() {
 	mockModule.isCapabilitySearchOffline.mockReset()
 	mockModule.listSavedPackagesPage.mockReset()
 	mockModule.loadPackageManifestBySourceId.mockReset()
+	mockModule.clearSavedPackageSearchIndexDebt.mockReset()
+	mockModule.clearSavedPackageSearchIndexDebt.mockResolvedValue(undefined)
+	mockModule.getSavedPackageSearchIndexDebtGeneration.mockReset()
+	mockModule.getSavedPackageSearchIndexDebtGeneration.mockResolvedValue(null)
 }
 
 function buildSavedPackage(id: string) {
@@ -212,6 +225,7 @@ test('saved package reindex skips failed manifest loads and continues the batch'
 				error: 'manifest missing',
 			},
 		],
+		failedIds: ['package_pkg-bad'],
 		warning: '1 saved package vector(s) failed to reindex',
 	})
 
@@ -229,6 +243,33 @@ test('saved package reindex skips failed manifest loads and continues the batch'
 			},
 		},
 	])
+})
+
+test('saved package reindex keeps debt for failed vectors beyond the failure sample cap', async () => {
+	resetMocks()
+	consoleError.mockImplementation(() => {})
+	mockModule.getCapabilityVectorIndex.mockReturnValue({ upsert: vi.fn() })
+	mockModule.isCapabilitySearchOffline.mockReturnValue(false)
+	mockModule.loadPackageManifestBySourceId.mockResolvedValue({
+		manifest: { name: '@user/pkg' },
+	})
+	mockModule.buildSavedPackageEmbedText.mockReturnValue('manifest embed')
+	mockModule.embedTextsForVectorize.mockRejectedValue(new Error('ai down'))
+	const packages = Array.from({ length: 25 }, (_, index) =>
+		buildSavedPackage(`pkg-${String(index).padStart(2, '0')}`),
+	)
+	mockModule.listSavedPackagesPage.mockResolvedValue(packages)
+
+	await expect(
+		reindexSavedPackageVectors({ APP_DB: {} } as Env, {
+			baseUrl: 'https://kody.example.com',
+		}),
+	).resolves.toMatchObject({
+		upserted: 0,
+		failed: 25,
+	})
+
+	expect(mockModule.clearSavedPackageSearchIndexDebt).not.toHaveBeenCalled()
 })
 
 test('saved package reindex retries a transient D1 export error on page listing', async () => {

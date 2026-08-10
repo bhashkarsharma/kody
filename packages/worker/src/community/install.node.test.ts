@@ -106,7 +106,20 @@ test('install publishes clean forks, keeps failed checks inert, and propagates e
 		userEmail: 'userb@example.com',
 		packageId: 'package-1',
 		sourceId: 'source-1',
+		waitUntil: undefined,
 	})
+
+	const waitUntil = vi.fn()
+	mockModule.forkCommunityListing.mockResolvedValue(forkResult())
+	mockModule.runRepoChecks.mockResolvedValue({
+		ok: true,
+		results: [{ kind: 'manifest', ok: true, message: 'ok' }],
+	})
+	mockModule.refreshSavedPackageProjection.mockClear()
+	await installCommunityListing({ ...installInput(), waitUntil })
+	expect(mockModule.refreshSavedPackageProjection).toHaveBeenCalledWith(
+		expect.objectContaining({ waitUntil }),
+	)
 
 	mockModule.forkCommunityListing.mockResolvedValue({
 		...forkResult(),
