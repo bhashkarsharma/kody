@@ -4,6 +4,7 @@ import {
 	errorFields,
 	logMcpEvent,
 } from '#mcp/observability.ts'
+import { McpCallerError } from '#mcp/caller-error.ts'
 import {
 	type Capability,
 	type CapabilityDefinition,
@@ -118,7 +119,12 @@ export function defineCapability<
 			try {
 				parsedArgs = inputParser(args) as InferCapabilitySchema<TInputSchema>
 			} catch (error) {
-				const { errorName, errorMessage } = errorFields(error)
+				const callerError = createCapabilityValidationError(
+					error,
+					definition.name,
+					'input',
+				)
+				const { errorName, errorMessage } = errorFields(callerError)
 				logMcpEvent({
 					category: 'mcp',
 					tool: 'capability',
@@ -131,9 +137,9 @@ export function defineCapability<
 					failurePhase: 'parse_input',
 					errorName,
 					errorMessage,
-					cause: error,
+					cause: callerError,
 				})
-				throw error
+				throw callerError
 			}
 
 			let result: Awaited<ReturnType<typeof definition.handler>>
@@ -172,7 +178,12 @@ export function defineCapability<
 				})
 				return finalized
 			} catch (error) {
-				const { errorName, errorMessage } = errorFields(error)
+				const validationError = createCapabilityValidationError(
+					error,
+					definition.name,
+					'output',
+				)
+				const { errorName, errorMessage } = errorFields(validationError)
 				logMcpEvent({
 					category: 'mcp',
 					tool: 'capability',
@@ -185,12 +196,40 @@ export function defineCapability<
 					failurePhase: 'parse_output',
 					errorName,
 					errorMessage,
-					cause: error,
+					cause: validationError,
 				})
-				throw error
+				throw validationError
 			}
 		},
 	}
+}
+
+function createCapabilityValidationError(
+	error: unknown,
+	capabilityName: string,
+	valueKind: 'input' | 'output',
+) {
+	if (!(error instanceof z.ZodError)) return error
+
+	if (valueKind === 'input') {
+		return new McpCallerError(
+			[
+				`Invalid input for capability "${capabilityName}".`,
+				z.prettifyError(error),
+				`Repair: Call search({ entity: "${capabilityName}:capability" }) for the exact input shape.`,
+			].join('\n'),
+			{ cause: error },
+		)
+	}
+
+	return new Error(
+		[
+			`Capability "${capabilityName}" returned an invalid output shape.`,
+			z.prettifyError(error),
+			'This is a capability implementation error; changing the input shape will not repair it.',
+		].join('\n'),
+		{ cause: error },
+	)
 }
 
 function mergeKeywords(
