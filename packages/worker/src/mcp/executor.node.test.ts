@@ -15,6 +15,7 @@ import {
 	createKodyProviderProxySource,
 	createExecuteExecutor,
 	createExecutorModuleSource,
+	createExecutorSandboxTimeoutMessage,
 	createToolDispatchers,
 	extractRawContent,
 	formatExecutionOutput,
@@ -300,7 +301,9 @@ test('generated kody provider source avoids bundle-scoped __name helpers', () =>
 		shadowGlobalThis: false,
 		timeoutMs: 1_000,
 	})
-	expect(moduleSource).toContain(JSON.stringify(executorSandboxTimeoutMessage))
+	expect(moduleSource).toContain(
+		JSON.stringify(createExecutorSandboxTimeoutMessage(1_000)),
+	)
 	assertGeneratedExecutorSourceIsBundleSafe(moduleSource)
 })
 
@@ -526,7 +529,8 @@ test('createExecuteExecutor returns sandbox timeout when Loader evaluate hangs',
 		gatewayProps: createGatewayProps('hang-user'),
 		timeoutMs: 40,
 	}).execute('async () => "never"', [{ name: 'kody', fns: {} }])
-	expect(result.error).toBe(executorSandboxTimeoutMessage)
+	expect(result.error).toBe(createExecutorSandboxTimeoutMessage(40))
+	expect(result.error).toContain('Execution timed out after 40ms:')
 	expect(result.result).toBeUndefined()
 	expect(Date.now() - startedAtMs).toBeLessThan(500)
 })
@@ -574,7 +578,7 @@ test('createExecuteExecutor aborts an in-flight abort-aware dispatcher on timeou
 		} as never,
 	])
 
-	expect(result.error).toBe(executorSandboxTimeoutMessage)
+	expect(result.error).toBe(createExecutorSandboxTimeoutMessage(40))
 	expect(observedSignal?.aborted).toBe(true)
 })
 
@@ -629,7 +633,7 @@ test('createExecuteExecutor drops queued evaluations when the host deadline expi
 			timeoutMs: 40,
 		}).execute('async () => "queued"', providers)
 
-		expect(queuedResult.error).toBe(executorSandboxTimeoutMessage)
+		expect(queuedResult.error).toBe(createExecutorSandboxTimeoutMessage(40))
 		expect(evaluateStarts).toBe(4)
 
 		releaseHolders()
@@ -1548,6 +1552,52 @@ test('executor maps secret errors, formats guidance, extracts raw content, and t
 		nextStep: expect.stringContaining('safely blocked'),
 		suggestedAction: { type: 'retry' },
 	})
+
+	// A sandbox timeout is terminal for the identical call: the hint steers
+	// toward durable workflows (or smaller calls) instead of a futile retry,
+	// and reports the budget the executor baked into the message.
+	expect(
+		getExecutionErrorDetails(
+			new Error(createExecutorSandboxTimeoutMessage(90_000)),
+		),
+	).toMatchObject({
+		kind: 'execution_timed_out',
+		timedOutAfterMs: 90_000,
+		nextStep: expect.stringContaining('workflows.create'),
+		suggestedAction: { type: 'fix_code' },
+	})
+	expect(
+		getExecutionErrorDetails(
+			new Error(createExecutorSandboxTimeoutMessage(270_000)),
+		)?.nextStep,
+	).toContain('270s')
+	// Legacy budget-less messages (older stored responses, non-Error abort
+	// reasons) still classify, without a parsed budget — both the current
+	// explanation-carrying form and the bare pre-explanation form.
+	expect(getExecutionErrorDetails(executorSandboxTimeoutMessage)).toMatchObject(
+		{ kind: 'execution_timed_out', timedOutAfterMs: null },
+	)
+	expect(getExecutionErrorDetails('Execution timed out')).toMatchObject({
+		kind: 'execution_timed_out',
+		timedOutAfterMs: null,
+	})
+	// Nested package invocations wrap the message with an
+	// `[execution_failed]` prefix in a cause.
+	expect(
+		getExecutionErrorDetails(
+			new Error('Nested execute failed.', {
+				cause: new Error(
+					`[execution_failed] ${createExecutorSandboxTimeoutMessage(90_000)}`,
+				),
+			}),
+		),
+	).toMatchObject({ kind: 'execution_timed_out', timedOutAfterMs: 90_000 })
+	// Messages that merely mention timing out mid-sentence stay unhinted.
+	expect(
+		getExecutionErrorDetails(
+			new Error('Upstream reported: Execution timed out unexpectedly'),
+		),
+	).toBeNull()
 
 	const errors = [
 		capabilityError,

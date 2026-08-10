@@ -8,6 +8,8 @@ import {
 	durableObjectIsolateMemoryResetMessage,
 	durableObjectStorageOperationTimeoutResetMessage,
 	executorSandboxTimeoutMessage,
+	executorSandboxTimeoutMessageExplanation,
+	executorSandboxTimeoutMessagePrefix,
 	filterSentryEvent,
 	isDurableObjectIsolateResourceLimitResetMessage,
 } from './sentry-options.ts'
@@ -140,6 +142,22 @@ test('filterSentryEvent drops expected platform and caller noise and keeps real 
 	expect(filterSentryEvent(sandboxTimeout)).toBeNull()
 	expect(
 		filterSentryEvent({ message: executorSandboxTimeoutMessage }),
+	).toBeNull()
+	// The executor injects the enforced budget after the leading phrase; both
+	// budget spellings stay filtered, as does the bare legacy form emitted by
+	// older deployments.
+	expect(
+		filterSentryEvent({
+			message: `${executorSandboxTimeoutMessagePrefix} after 90s${executorSandboxTimeoutMessageExplanation}`,
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({
+			message: `${executorSandboxTimeoutMessagePrefix} after 40ms${executorSandboxTimeoutMessageExplanation}`,
+		}),
+	).toBeNull()
+	expect(
+		filterSentryEvent({ message: executorSandboxTimeoutMessagePrefix }),
 	).toBeNull()
 
 	expect(
