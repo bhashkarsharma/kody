@@ -7,6 +7,9 @@ import {
 	type AuthSession,
 } from '#app/auth-session.ts'
 import { createAccountHandler } from '#app/handlers/account.ts'
+import { createAccountPasskeysHandler } from '#app/handlers/account-passkeys.ts'
+import { createAccountTwoFactorHandler } from '#app/handlers/account-two-factor.ts'
+import { createHomeHandler } from '#app/handlers/home.ts'
 import { createCommunityHandler } from '#app/handlers/community.tsx'
 import { createCommunityDetailHandler } from '#app/handlers/community-detail.tsx'
 import { createOnboardingHandler } from '#app/handlers/onboarding.ts'
@@ -340,6 +343,31 @@ test('SSR HTML routes render page content and embedded loader data', async () =>
 	expect(accountHtml).not.toContain('Connect your AI agent')
 	expect(accountHtml).toContain('/pending-verification')
 
+	// Two-factor and passkeys embed the same payload their .json endpoints
+	// serve, so the page server-renders its real state instead of a loading
+	// placeholder plus a client fetch.
+	const twoFactorResponse = await runHtmlHandler(
+		createAccountTwoFactorHandler(env),
+		new Request('https://example.com/account/two-factor', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(twoFactorResponse.status).toBe(200)
+	const twoFactorHtml = await readResponseText(twoFactorResponse)
+	expect(twoFactorHtml).toContain('Two-factor authentication is disabled')
+	expect(twoFactorHtml).not.toContain('Loading two-factor status')
+
+	const passkeysResponse = await runHtmlHandler(
+		createAccountPasskeysHandler(env),
+		new Request('https://example.com/account/passkeys', {
+			headers: { Cookie: accountCookie },
+		}),
+	)
+	expect(passkeysResponse.status).toBe(200)
+	const passkeysHtml = await readResponseText(passkeysResponse)
+	expect(passkeysHtml).toContain('No passkeys yet')
+	expect(passkeysHtml).not.toContain('Loading passkeys')
+
 	const accountLinkedResponse = await runHtmlHandler(
 		createAccountHandler(env),
 		new Request('https://example.com/account?oauthLinked=google', {
@@ -586,6 +614,121 @@ test('renderAppPage server-renders signed-in oauth authorize without a session c
 	expect(html).not.toContain('Loading authorization details')
 })
 
+test('renderAppPage server-renders connect-oauth provider visits without a loading flash', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+
+	// A stored user-lane confidential google connection whose client secret
+	// already exists: the page must SSR straight into "ready to connect"
+	// with the Redirect URI card, not "Loading provider configuration…".
+	const response = await renderAppPage({
+		request: new Request('https://example.com/connect/oauth?provider=google'),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: 'google',
+				integration: {
+					name: 'google',
+					appSlug: 'google',
+					provider: 'google',
+					appLabel: 'Google',
+					accountLabel: null,
+					tokenUrl: 'https://oauth2.googleapis.com/token',
+					apiBaseUrl: 'https://www.googleapis.com',
+					flow: 'confidential',
+					usePkce: false,
+					clientId: 'google-client-id-value',
+					clientSecretSecretName: 'googleClientSecret',
+					accessTokenSecretName: 'googleAccessToken',
+					refreshTokenSecretName: 'googleRefreshToken',
+					requiredHosts: ['oauth2.googleapis.com', 'www.googleapis.com'],
+					authorization: {
+						authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+						scopes: ['openid', 'email', 'profile'],
+						scopeSeparator: null,
+						extraAuthorizeParams: { access_type: 'offline' },
+					},
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+				builtInAvailable: false,
+				hasStoredClientSecret: true,
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	expect(html).toContain('Connect google')
+	expect(html).toContain(
+		'Loaded your existing integration config and client credentials. Ready to connect.',
+	)
+	expect(html).toContain('https://example.com/connect/oauth')
+	expect(html).toContain('https://accounts.google.com/o/oauth2/v2/auth')
+	expect(html).not.toContain('Loading provider configuration')
+	// Ready state renders the plain Connect button (also proves the
+	// replace-state assertion below is not vacuous about serialization).
+	expect(html).toContain('>Connect google</button>')
+
+	// A built-in connect that would replace a user-lane connection under the
+	// same name server-renders the replace confirmation and withholds the
+	// plain Connect button (the client also skips auto-start in this state).
+	const replaceResponse = await renderAppPage({
+		request: new Request(
+			'https://example.com/connect/oauth?provider=google&platform=1',
+		),
+		env,
+		loaderData: {
+			connectOauth: {
+				ok: true,
+				provider: 'google',
+				integration: {
+					name: 'google',
+					appSlug: 'google',
+					provider: 'google',
+					appLabel: 'Google',
+					accountLabel: null,
+					tokenUrl: 'https://oauth2.googleapis.com/token',
+					apiBaseUrl: 'https://www.googleapis.com',
+					flow: 'pkce',
+					usePkce: true,
+					clientId: 'platform-google-client',
+					clientSecretSecretName: null,
+					accessTokenSecretName: 'googleAccessToken',
+					refreshTokenSecretName: 'googleRefreshToken',
+					requiredHosts: ['oauth2.googleapis.com'],
+					authorization: {
+						authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+						scopes: ['openid'],
+						scopeSeparator: null,
+						extraAuthorizeParams: {},
+					},
+					platform: true,
+					platformAllowedScopes: ['openid'],
+					platformDescription: 'Send-only Gmail access.',
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+				builtInAvailable: false,
+				existingConnection: { lane: 'user', appSlug: 'google' },
+				hasStoredClientSecret: false,
+				redirectUri: 'https://example.com/connect/oauth',
+			},
+		},
+	})
+	expect(replaceResponse.status).toBe(200)
+	const replaceHtml = await readResponseText(replaceResponse)
+	expect(replaceHtml).toContain('data-testid="connect-replace-confirm"')
+	expect(replaceHtml).toContain('your own OAuth app')
+	// Operator-authored description renders under the provider name.
+	expect(replaceHtml).toContain('Send-only Gmail access.')
+	expect(replaceHtml).not.toContain('Loading provider configuration')
+	expect(replaceHtml).not.toContain('>Connect google</button>')
+})
+
 test('renderAppPage renders the redesigned landing page shell', async () => {
 	resetDataCacheForTests()
 	setAuthSessionSecret(testCookieSecret)
@@ -605,6 +748,18 @@ test('renderAppPage renders the redesigned landing page shell', async () => {
 	expect(html).toContain('aria-label="Footer"')
 	expect(html).toContain('aria-label="Dark mode"')
 	expect(html).toContain('id="invite"')
+
+	// The anonymous home handler embeds the public onboarding payload, so
+	// the hero's discovery-prompt copy renders server-side instead of
+	// popping in after a client /onboarding.json fetch.
+	const anonymousHomeResponse = await runHtmlHandler(
+		createHomeHandler(env),
+		new Request('https://example.com/'),
+	)
+	expect(anonymousHomeResponse.status).toBe(200)
+	const anonymousHomeHtml = await readResponseText(anonymousHomeResponse)
+	expect(anonymousHomeHtml).toContain('Copy the discovery prompt')
+	expect(anonymousHomeHtml).toContain('Join the waiting list')
 })
 
 test('renderAppPage renders the redesigned pricing page', async () => {

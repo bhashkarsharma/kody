@@ -4,7 +4,6 @@ import {
 } from '@kody-internal/shared/url-hosts.ts'
 import {
 	type AccountIntegrationDetailLoaderData,
-	type AccountSecretsLoaderData,
 	type ConnectOauthExistingConnection,
 	type ConnectOauthLoaderData,
 } from '#universal/loader-data.ts'
@@ -149,6 +148,10 @@ export async function connectOauthRouteLoader(
 				response.ok && payload?.ok
 					? (payload.existingConnection ?? null)
 					: null,
+			hasStoredClientSecret:
+				response.ok && payload?.ok
+					? (payload.hasStoredClientSecret ?? false)
+					: false,
 		},
 	}
 }
@@ -172,7 +175,9 @@ export function ConnectOauthRoute(handle: Handle) {
 
 	// The real status arrives once the query config and any stored/built-in
 	// provider config resolve; starting on "Ready to connect." flashed a
-	// misleading state on slow connections.
+	// misleading state on slow connections. Provider visits resolve during
+	// render from SSR-embedded / SPA-preloaded loader data, so this fallback
+	// only shows on callback returns and loader-failure refetches.
 	let statusMessage = 'Loading provider configuration…'
 	let statusTone: StatusTone = 'info'
 	let currentStep: 'setup' | 'connect' | 'callback' | 'success' = 'setup'
@@ -210,11 +215,49 @@ export function ConnectOauthRoute(handle: Handle) {
 	let approvingAllHosts = false
 	let submitting = false
 	let initialLoadStarted = false
+	let routeDataApplied = false
+	/**
+	 * Normalized pathname+search the current resolution state belongs to.
+	 * SPA navigations to a different connect URL (another provider, a
+	 * platform lane switch) reset and re-resolve instead of keeping the
+	 * previous provider's config on screen.
+	 */
+	let resolvedHref: string | null = null
+	/** Server-computed redirect URI so SSR renders the card `window` builds. */
+	let ssrRedirectUri: string | null = null
 	let clientIdInput = ''
 	let clientSecretInput = ''
 	let hasStoredClientId = false
 	let hasStoredClientSecret = false
 	let revealStoredClientSecretField = false
+
+	const normalizeConnectHref = (href: string) => {
+		const url = new URL(href, 'https://kody.local')
+		return `${url.pathname}${url.search}`
+	}
+
+	// Back to the pre-resolution defaults so a new connect URL resolves from
+	// scratch (loader data first, fallback fetch otherwise).
+	const resetResolutionState = () => {
+		routeDataApplied = false
+		initialLoadStarted = false
+		resolvedHref = null
+		config = null
+		existingIntegrationConfig = null
+		existingConnection = null
+		builtInAvailable = false
+		hasStoredClientSecret = false
+		hasConfigError = false
+		replaceConfirmed = false
+		renameInput = ''
+		hostApprovalLinks = []
+		nextSteps = null
+		accessTokenSaved = false
+		refreshTokenSaved = false
+		currentStep = 'setup'
+		statusMessage = 'Loading provider configuration…'
+		statusTone = 'info'
+	}
 
 	const update = () => handle.update()
 
@@ -271,10 +314,13 @@ export function ConnectOauthRoute(handle: Handle) {
 		}
 	}
 
-	const readQueryConfig = (): ConnectOauthQueryConfig | null => {
-		hasConfigError = false
-		if (typeof window === 'undefined') return null
-		const url = new URL(window.location.href)
+	type QueryConfigResult =
+		| { ok: true; value: ConnectOauthQueryConfig }
+		| { ok: false; error: string }
+
+	// Pure so it can run during render (SSR included) without touching
+	// component state; callers apply the error to status themselves.
+	const readQueryConfig = (url: URL): QueryConfigResult => {
 		const readRequired = (key: string) => {
 			const value = url.searchParams.get(key)
 			return value && value.trim() ? value.trim() : null
@@ -288,21 +334,18 @@ export function ConnectOauthRoute(handle: Handle) {
 		const tokenUrl = readOptional('tokenUrl')
 		const apiBaseUrl = parseOptionalUrl(readOptional('apiBaseUrl'))
 		if (!provider) {
-			hasConfigError = true
-			setStatus('Missing required OAuth configuration parameters.', 'error')
-			return null
+			return {
+				ok: false,
+				error: 'Missing required OAuth configuration parameters.',
+			}
 		}
 		const authorizeHost = authorizeUrl ? safeParseHost(authorizeUrl) : null
 		if (authorizeUrl && (!isSafeExternalUrl(authorizeUrl) || !authorizeHost)) {
-			hasConfigError = true
-			setStatus('Authorize URL must be valid.', 'error')
-			return null
+			return { ok: false, error: 'Authorize URL must be valid.' }
 		}
 		const tokenHost = tokenUrl ? safeParseHost(tokenUrl) : null
 		if (tokenUrl && !tokenHost) {
-			hasConfigError = true
-			setStatus('Token URL must be valid when provided.', 'error')
-			return null
+			return { ok: false, error: 'Token URL must be valid when provided.' }
 		}
 		const rawFlow = readOptional('flow')?.toLowerCase() ?? null
 		const flow: OAuthFlow | null =
@@ -322,9 +365,7 @@ export function ConnectOauthRoute(handle: Handle) {
 		const dashboardUrl = parseOptionalUrl(readOptional('dashboardUrl'))
 		const providerKey = normalizeProviderKey(provider)
 		if (!providerKey) {
-			hasConfigError = true
-			setStatus('Provider must contain letters or numbers.', 'error')
-			return null
+			return { ok: false, error: 'Provider must contain letters or numbers.' }
 		}
 		const providerSetupInstructions = parseProviderSetupInstructions(
 			readOptional('providerSetupInstructions'),
@@ -334,21 +375,24 @@ export function ConnectOauthRoute(handle: Handle) {
 			...parseAllowedHosts(readOptional('allowedHosts')),
 		])
 		return {
-			provider,
-			providerKey,
-			authorizeHost,
-			authorizeUrl,
-			tokenUrl,
-			apiBaseUrl,
-			scopes,
-			flow,
-			usePkce,
-			tokenExchangeStyle,
-			scopeSeparator,
-			extraAuthorizeParams,
-			providerSetupInstructions,
-			dashboardUrl,
-			allowedHosts,
+			ok: true,
+			value: {
+				provider,
+				providerKey,
+				authorizeHost,
+				authorizeUrl,
+				tokenUrl,
+				apiBaseUrl,
+				scopes,
+				flow,
+				usePkce,
+				tokenExchangeStyle,
+				scopeSeparator,
+				extraAuthorizeParams,
+				providerSetupInstructions,
+				dashboardUrl,
+				allowedHosts,
+			},
 		}
 	}
 
@@ -366,7 +410,7 @@ export function ConnectOauthRoute(handle: Handle) {
 	}
 
 	const getRedirectUri = (): string => {
-		if (typeof window === 'undefined') return ''
+		if (typeof window === 'undefined') return ssrRedirectUri ?? ''
 		return `${window.location.origin}${window.location.pathname}`
 	}
 
@@ -461,29 +505,13 @@ export function ConnectOauthRoute(handle: Handle) {
 		return true
 	}
 
-	const listSecrets = async () => {
-		const response = await fetch('/account/secrets.json', {
-			method: 'GET',
-			headers: {
-				Accept: 'application/json',
-			},
-			credentials: 'include',
-		})
-		if (redirectToLoginOn401(response)) return null
-		const payload = (await response.json().catch(() => null)) as Pick<
-			AccountSecretsLoaderData,
-			'ok' | 'secrets'
-		> | null
-		if (
-			!response.ok ||
-			payload?.ok !== true ||
-			!Array.isArray(payload.secrets)
-		) {
-			return null
-		}
-		return payload.secrets
-	}
-
+	/**
+	 * Fallback fetch mirroring the loader/SSR payload — only runs when a
+	 * navigation committed without loader data (loader failure, or callback
+	 * returns that lost their sessionStorage snapshot). Captures the
+	 * built-in flag and stored-secret existence the same way the loader
+	 * data path does.
+	 */
 	const readExistingIntegrationConfig = async (
 		queryConfig: ConnectOauthQueryConfig,
 	): Promise<StoredIntegrationConfig | null> => {
@@ -508,25 +536,22 @@ export function ConnectOauthRoute(handle: Handle) {
 		if (!response.ok || payload?.ok !== true) return null
 		builtInAvailable = payload.builtInAvailable ?? false
 		existingConnection = payload.existingConnection ?? null
+		hasStoredClientSecret = payload.hasStoredClientSecret === true
 		if (!payload.integration) return null
 		return toStoredIntegrationConfig(payload.integration)
 	}
 
-	const initializeSetupState = async (nextConfig: ConnectOauthConfig) => {
-		const secrets = nextConfig.clientSecretSecretName
-			? await listSecrets()
-			: null
+	// Sync so provider visits can render their real setup / ready state in
+	// the same pass that resolved `config` (SSR included). Callers set
+	// `hasStoredClientSecret` from server data beforehand.
+	const applySetupState = (nextConfig: ConnectOauthConfig) => {
 		clientIdInput = nextConfig.clientId
 		clientSecretInput = ''
 		hasStoredClientId = Boolean(nextConfig.clientId.trim())
-		hasStoredClientSecret = Boolean(
-			nextConfig.clientSecretSecretName &&
-			secrets?.some(
-				(secret) =>
-					secret.scope === 'user' &&
-					secret.name === nextConfig.clientSecretSecretName,
-			),
-		)
+		// Existence is only meaningful when this connection actually uses a
+		// user-held client secret (confidential, non-platform).
+		hasStoredClientSecret =
+			Boolean(nextConfig.clientSecretSecretName) && hasStoredClientSecret
 		revealStoredClientSecretField = false
 		const setupStatus = summarizeStoredSetupState({
 			flow: nextConfig.flow,
@@ -535,23 +560,21 @@ export function ConnectOauthRoute(handle: Handle) {
 			platform: Boolean(nextConfig.platformAppSlug),
 		})
 		if (setupStatus.isReady) {
-			setStatus(
-				nextConfig.platformAppSlug
-					? 'Built-in integration — no OAuth app setup needed. Ready to connect.'
-					: existingIntegrationConfig
-						? 'Loaded your existing integration config and client credentials. Ready to connect.'
-						: 'Loaded your existing OAuth client configuration. Ready to connect.',
-			)
-			setStep('connect')
+			statusMessage = nextConfig.platformAppSlug
+				? 'Built-in integration — no OAuth app setup needed. Ready to connect.'
+				: existingIntegrationConfig
+					? 'Loaded your existing integration config and client credentials. Ready to connect.'
+					: 'Loaded your existing OAuth client configuration. Ready to connect.'
+			statusTone = 'info'
+			currentStep = 'connect'
 			return
 		}
 		const missingDetails = formatMissingSetupFields(setupStatus.missingFields)
-		setStatus(
-			existingIntegrationConfig
-				? `Loaded your existing integration config. ${missingDetails}`
-				: missingDetails,
-		)
-		setStep('setup')
+		statusMessage = existingIntegrationConfig
+			? `Loaded your existing integration config. ${missingDetails}`
+			: missingDetails
+		statusTone = 'info'
+		currentStep = 'setup'
 	}
 
 	const saveSecret = async (
@@ -828,8 +851,9 @@ export function ConnectOauthRoute(handle: Handle) {
 								mix={[
 									on('click', () => {
 										const name = renameInput.trim() || renameSuggestion
-										// Full document load: the connect flow
-										// initializes per document load.
+										// Full document load: the renamed connect
+										// auto-starts the provider redirect, which is
+										// simplest from a fresh document.
 										window.location.assign(
 											`/connect/oauth?provider=${encodeURIComponent(name)}&platform=${encodeURIComponent(config!.platformAppSlug!)}`,
 										)
@@ -863,10 +887,9 @@ export function ConnectOauthRoute(handle: Handle) {
 					href={`/connect/oauth?provider=${encodeURIComponent(config.providerKey)}&platform=1`}
 					mix={[
 						css(primaryLinkCss),
-						// Full document load on purpose: this page's init
-						// (config resolution, built-in auto-start) runs per
-						// document load, and a same-route SPA swap reuses the
-						// mounted instance without re-running it.
+						// Full document load on purpose: switching lanes may
+						// auto-start the provider redirect, and that is
+						// simplest to reason about from a fresh document.
 						on('click', (event) => {
 							event.preventDefault()
 							window.location.assign(event.currentTarget.href)
@@ -1157,48 +1180,87 @@ export function ConnectOauthRoute(handle: Handle) {
 		)
 	}
 
-	handle.queueTask(async () => {
+	/**
+	 * Resolve config from SSR-embedded / SPA-preloaded loader data during
+	 * render, so the page paints its final layout in the same pass that
+	 * receives the data — server render included — instead of flashing
+	 * "Loading provider configuration…" and shifting content after a
+	 * client-side fetch. Callback returns (`code`/`error`) restore their
+	 * config from sessionStorage in the queued task; only the redirect URI,
+	 * built-in flag, and existing-connection summary apply here.
+	 */
+	const applyRouteLoaderData = (currentHref: string) => {
+		if (routeDataApplied) return
+		const url = new URL(currentHref, 'https://kody.local')
+		const routeData = tryConsumeRouteLoaderData(
+			handle,
+			'connectOauth',
+			currentHref,
+		)
+		if (!routeData) return
+		routeDataApplied = true
+		ssrRedirectUri = routeData.redirectUri ?? null
+		builtInAvailable = routeData.builtInAvailable ?? false
+		existingConnection = routeData.existingConnection ?? null
+		if (url.searchParams.get('code') || url.searchParams.get('error')) {
+			return
+		}
+		const parsed = readQueryConfig(url)
+		if (!parsed.ok) {
+			hasConfigError = true
+			statusMessage = parsed.error
+			statusTone = 'error'
+			return
+		}
+		const storedIntegration =
+			routeData.provider === parsed.value.providerKey && routeData.integration
+				? toStoredIntegrationConfig(routeData.integration)
+				: null
+		existingIntegrationConfig = storedIntegration
+		const nextConfig = mergeConnectOauthConfig({
+			queryConfig: parsed.value,
+			storedIntegration,
+		})
+		if (!nextConfig) {
+			hasConfigError = true
+			statusMessage = 'Missing required OAuth configuration parameters.'
+			statusTone = 'error'
+			return
+		}
+		config = nextConfig
+		hasStoredClientSecret = routeData.hasStoredClientSecret === true
+		applySetupState(nextConfig)
+	}
+
+	// Queued from render (once per resolved href): callback handling, the
+	// loader-failure fallback refetch, and the built-in auto-start.
+	const initializeVisit = async () => {
 		if (initialLoadStarted) return
 		initialLoadStarted = true
+		// Bail after awaits when the user has SPA-navigated to a different
+		// connect URL mid-flight: the reset re-queues a fresh task for it.
+		const taskHref = resolvedHref
+		const hrefStillCurrent = () =>
+			taskHref === normalizeConnectHref(readCurrentRouterHref(handle))
 		try {
-			// SSR-embedded on direct visits, loader-prefetched on SPA
-			// navigations; the integrations fetch below only runs as a
-			// fallback (e.g. callback returns that lost sessionStorage).
-			const routeData = tryConsumeRouteLoaderData(
-				handle,
-				'connectOauth',
-				readCurrentRouterHref(handle),
-			)
-			if (routeData) {
-				builtInAvailable = routeData.builtInAvailable ?? false
-				existingConnection = routeData.existingConnection ?? null
-			}
-			const preloadedIntegrationFor = (providerKey: string) =>
-				routeData && routeData.provider === providerKey
-					? routeData.integration
-					: undefined
-			const resolveExistingIntegration = async (
-				queryConfig: ConnectOauthQueryConfig,
-			): Promise<StoredIntegrationConfig | null> => {
-				const preloaded = preloadedIntegrationFor(queryConfig.providerKey)
-				if (preloaded !== undefined) {
-					return preloaded ? toStoredIntegrationConfig(preloaded) : null
-				}
-				return readExistingIntegrationConfig(queryConfig)
-			}
 			const callback = readCallback()
 			if (callback.kind === 'success' || callback.kind === 'error') {
 				const storedConfig = readStoredConfig()
-				const queryConfig = storedConfig ? null : readQueryConfig()
-				const nextConfig =
-					storedConfig ??
-					(queryConfig
+				let nextConfig = storedConfig
+				if (!nextConfig) {
+					// The sessionStorage snapshot was lost; rebuild from the
+					// query (when the provider redirect kept it) plus the
+					// stored integration record.
+					const parsed = readQueryConfig(new URL(window.location.href))
+					nextConfig = parsed.ok
 						? mergeConnectOauthConfig({
-								queryConfig,
-								storedIntegration:
-									await resolveExistingIntegration(queryConfig),
+								queryConfig: parsed.value,
+								storedIntegration: await readExistingIntegrationConfig(
+									parsed.value,
+								),
 							})
-						: null)
+						: null
+				}
 				if (!nextConfig) {
 					setStatus('Missing required OAuth configuration parameters.', 'error')
 					return
@@ -1210,24 +1272,34 @@ export function ConnectOauthRoute(handle: Handle) {
 				}
 				return
 			}
-			const queryConfig = readQueryConfig()
-			if (!queryConfig) {
-				setStatus('Missing required OAuth configuration parameters.', 'error')
-				return
+			if (!config && !hasConfigError) {
+				// The navigation committed without loader data (loader
+				// failure or an aborted prefetch): fall back to the same
+				// fetch the loader performs.
+				const parsed = readQueryConfig(new URL(window.location.href))
+				if (!parsed.ok) {
+					hasConfigError = true
+					setStatus(parsed.error, 'error')
+					return
+				}
+				const existingIntegration = await readExistingIntegrationConfig(
+					parsed.value,
+				)
+				if (!hrefStillCurrent()) return
+				existingIntegrationConfig = existingIntegration
+				const nextConfig = mergeConnectOauthConfig({
+					queryConfig: parsed.value,
+					storedIntegration: existingIntegration,
+				})
+				if (!nextConfig) {
+					hasConfigError = true
+					setStatus('Missing required OAuth configuration parameters.', 'error')
+					return
+				}
+				config = nextConfig
+				applySetupState(nextConfig)
+				update()
 			}
-			const existingIntegration = await resolveExistingIntegration(queryConfig)
-			existingIntegrationConfig = existingIntegration
-			const nextConfig = mergeConnectOauthConfig({
-				queryConfig,
-				storedIntegration: existingIntegration,
-			})
-			if (!nextConfig) {
-				hasConfigError = true
-				setStatus('Missing required OAuth configuration parameters.', 'error')
-				return
-			}
-			config = nextConfig
-			await initializeSetupState(nextConfig)
 			// Built-in integrations have nothing for the user to review or
 			// fill in, so a plain ?provider=<slug> visit (the onboarding
 			// cards, docs links) goes straight into the provider's authorize
@@ -1237,15 +1309,16 @@ export function ConnectOauthRoute(handle: Handle) {
 			// different-app connection never auto-starts: the user confirms
 			// or renames first.
 			if (
-				nextConfig.platformAppSlug &&
+				hrefStillCurrent() &&
+				config?.platformAppSlug &&
 				currentStep === 'connect' &&
 				!wouldReplaceDifferentApp()
 			) {
-				setStatus(`Redirecting to ${nextConfig.provider} to authorize…`)
+				setStatus(`Redirecting to ${config.provider} to authorize…`)
 				await handleConnect()
 			}
 		} catch (error) {
-			// Initial integration/secrets reads use fetch(); a transient network
+			// Initial integration reads use fetch(); a transient network
 			// failure must not escape queueTask as unhandledrejection.
 			setStatus(
 				formatConnectOauthCaughtError(
@@ -1255,9 +1328,29 @@ export function ConnectOauthRoute(handle: Handle) {
 				'error',
 			)
 		}
-	})
+	}
 
 	return () => {
+		const currentHref = readCurrentRouterHref(handle)
+		const normalizedHref = normalizeConnectHref(currentHref)
+		// An in-app navigation to a different connect URL (another provider,
+		// a platform lane switch) re-resolves from scratch instead of keeping
+		// the previous provider's page. Callback flows are terminal — their
+		// URL is rewritten via history.replaceState — and never reset.
+		if (
+			resolvedHref !== null &&
+			resolvedHref !== normalizedHref &&
+			!connectOauthHandled
+		) {
+			resetResolutionState()
+		}
+		if (resolvedHref === null) {
+			resolvedHref = normalizedHref
+		}
+		applyRouteLoaderData(currentHref)
+		if (!initialLoadStarted && typeof document !== 'undefined') {
+			handle.queueTask(initializeVisit)
+		}
 		if (!config) {
 			return (
 				<section mix={css(pageCss)}>
