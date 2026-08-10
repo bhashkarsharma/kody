@@ -13,9 +13,11 @@ import { on } from '#client/event-mixin.ts'
 import { ProviderIcon } from '#client/provider-icons.tsx'
 import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
-import { readJson,
+import {
+	readJson,
 	buildHostApprovalRequestUrl,
-	submitApprovalRequest } from '#client/routes/account-approval-shared.ts'
+	submitApprovalRequest,
+} from '#client/routes/account-approval-shared.ts'
 import {
 	type RouteLoaderResult,
 	routeLoaderRedirect,
