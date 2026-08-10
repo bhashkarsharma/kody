@@ -808,14 +808,7 @@ export function ConnectOauthRoute(handle: Handle) {
 					Continuing replaces its tokens and scopes. You can also keep it and
 					connect under a different name.
 				</p>
-				<div
-					mix={css({
-						display: 'flex',
-						flexWrap: 'wrap',
-						gap: spacing.sm,
-						alignItems: 'center',
-					})}
-				>
+				<div mix={css(replaceActionsCss)}>
 					<button
 						type="button"
 						disabled={submitting}
@@ -833,7 +826,7 @@ export function ConnectOauthRoute(handle: Handle) {
 					</button>
 					{config.platformAppSlug ? (
 						<>
-							<span mix={css(descriptionCss)}>or connect as</span>
+							<span mix={css(replaceAsLabelCss)}>or connect as</span>
 							<input
 								type="text"
 								placeholder={renameSuggestion}
@@ -844,7 +837,7 @@ export function ConnectOauthRoute(handle: Handle) {
 										renameInput = event.currentTarget.value
 										update()
 									}),
-									css({ ...inputCss, maxWidth: '12rem' }),
+									css(replaceRenameInputCss),
 								]}
 								data-testid="connect-rename-input"
 							/>
@@ -1948,6 +1941,26 @@ const replaceCalloutCss = {
 	...insetCardCss,
 	display: 'grid',
 	gap: spacing.sm,
+}
+
+const replaceActionsCss = {
+	display: 'flex',
+	flexWrap: 'wrap' as const,
+	gap: spacing.sm,
+	alignItems: 'center',
+}
+
+const replaceAsLabelCss = {
+	margin: 0,
+	color: colors.textMuted,
+	lineHeight: 1,
+	whiteSpace: 'nowrap' as const,
+}
+
+const replaceRenameInputCss = {
+	...inputCss,
+	maxWidth: '12rem',
+	margin: 0,
 }
 
 const compactStatusCss = {
