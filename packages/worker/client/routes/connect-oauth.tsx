@@ -10,22 +10,22 @@ import {
 import { type Handle, css } from 'remix/ui'
 import { CopyTextButton } from '#client/copy-text-button.tsx'
 import { on } from '#client/event-mixin.ts'
+import { ProviderIcon } from '#client/provider-icons.tsx'
 import { readCurrentRouterHref } from '#client/client-router.tsx'
 import { tryConsumeRouteLoaderData } from '#client/loader-data-context.tsx'
-import { readJson } from '#client/routes/account-approval-shared.ts'
+import { readJson,
+	buildHostApprovalRequestUrl,
+	submitApprovalRequest } from '#client/routes/account-approval-shared.ts'
 import {
 	type RouteLoaderResult,
 	routeLoaderRedirect,
 } from '#client/route-loader.ts'
 import { passwordManagerIgnoreProps } from '#client/password-manager-ignore.ts'
 import {
-	buildHostApprovalRequestUrl,
-	submitApprovalRequest,
-} from '#client/routes/account-approval-shared.ts'
-import {
 	colors,
 	radius,
 	spacing,
+	transitions,
 	typography,
 } from '#universal/styles/tokens.ts'
 import {
@@ -38,14 +38,12 @@ import {
 	detailValueCss,
 	fieldCss,
 	fieldLabelCss,
+	getBrandChipCss,
 	getPrimaryButtonCss,
 	getSecondaryButtonCss,
+	hoverMq,
 	insetCardCss,
 	listCss,
-	pageDescriptionCss,
-	pageEyebrowCss,
-	pageHeaderCss,
-	pageTitleCss,
 	primaryLinkCss,
 	sectionTitleCss,
 	stackedPageCss,
@@ -796,7 +794,10 @@ export function ConnectOauthRoute(handle: Handle) {
 				: 'your own OAuth app'
 		const renameSuggestion = `${config.providerKey}-2`
 		return (
-			<div mix={css(insetCardCss)}>
+			<div
+				mix={css(replaceCalloutCss)}
+				data-testid="connect-replace-confirm-panel"
+			>
 				<p mix={css({ margin: 0, color: colors.text, fontWeight: 600 })}>
 					You already have a {config.providerKey} connection using{' '}
 					{existingLabel}.
@@ -851,9 +852,6 @@ export function ConnectOauthRoute(handle: Handle) {
 								mix={[
 									on('click', () => {
 										const name = renameInput.trim() || renameSuggestion
-										// Full document load: the renamed connect
-										// auto-starts the provider redirect, which is
-										// simplest from a fresh document.
 										window.location.assign(
 											`/connect/oauth?provider=${encodeURIComponent(name)}&platform=${encodeURIComponent(config!.platformAppSlug!)}`,
 										)
@@ -873,23 +871,18 @@ export function ConnectOauthRoute(handle: Handle) {
 
 	/**
 	 * Shown when the current (or prospective) connection runs on the user's
-	 * own OAuth app while an enabled built-in exists for the same name. A
-	 * complete bring-your-own record wins the lookup by design, so without
-	 * this the built-in lane is invisible from the connect page.
+	 * own OAuth app while an enabled built-in exists for the same name.
 	 */
 	const renderBuiltInAlternative = () => {
 		if (!builtInAvailable || !config || config.platformAppSlug) return null
 		return (
-			<p mix={css(descriptionCss)}>
+			<p mix={css(builtInAlternativeCss)}>
 				This uses your own OAuth app for {config.provider}. Prefer the hosted
 				one?{' '}
 				<a
 					href={`/connect/oauth?provider=${encodeURIComponent(config.providerKey)}&platform=1`}
 					mix={[
 						css(primaryLinkCss),
-						// Full document load on purpose: switching lanes may
-						// auto-start the provider redirect, and that is
-						// simplest to reason about from a fresh document.
 						on('click', (event) => {
 							event.preventDefault()
 							window.location.assign(event.currentTarget.href)
@@ -900,6 +893,454 @@ export function ConnectOauthRoute(handle: Handle) {
 				</a>{' '}
 				— connecting it replaces this connection&apos;s tokens and scopes.
 			</p>
+		)
+	}
+
+	const shouldShowCompactStatus = () =>
+		statusTone === 'error' ||
+		statusMessage.toLowerCase().includes('redirecting')
+
+	const renderCompactStatusLine = () => {
+		if (!shouldShowCompactStatus()) return null
+		return (
+			<p
+				mix={css(statusTone === 'error' ? compactErrorCss : compactStatusCss)}
+				role={statusTone === 'error' ? 'alert' : 'status'}
+			>
+				{statusMessage}
+			</p>
+		)
+	}
+
+	const renderProviderLogo = () => {
+		if (!config) return null
+		if (config.platformLogoPath) {
+			return (
+				<img
+					src={config.platformLogoPath}
+					alt=""
+					width={48}
+					height={48}
+					mix={css(heroLogoCss)}
+				/>
+			)
+		}
+		return (
+			<span mix={css(heroLogoWellCss)} aria-hidden="true">
+				<ProviderIcon providerId={config.providerKey} size="3rem" />
+			</span>
+		)
+	}
+
+	const renderHeroScopeChips = () => {
+		if (!config || config.scopes.length === 0) return null
+		return (
+			<ul mix={css(scopeChipListCss)}>
+				{config.scopes.map((scope) => (
+					<li key={scope} mix={css(getBrandChipCss())}>
+						{scope}
+					</li>
+				))}
+			</ul>
+		)
+	}
+
+	const togglePlatformScope = (scope: string, checked: boolean) => {
+		if (!config) return
+		const allowed = config.platformAllowedScopes ?? []
+		if (!allowed.includes(scope)) return
+		const nextScopes = checked
+			? Array.from(new Set([...config.scopes, scope]))
+			: config.scopes.filter((entry) => entry !== scope)
+		config = { ...config, scopes: nextScopes }
+		update()
+	}
+
+	const renderChooseWhatToShareDetails = () => {
+		if (!config) return null
+		const showPlatformLane =
+			Boolean(config.platformAppSlug) &&
+			Boolean(config.platformAllowedScopes?.length)
+		const showUserLane = !config.platformAppSlug
+		if (!showPlatformLane && !showUserLane) return null
+		return (
+			<details mix={css(disclosureDetailsCss)}>
+				<summary mix={css(disclosureSummaryCss)}>Choose what to share</summary>
+				<div mix={css(disclosureBodyCss)}>
+					{showPlatformLane ? (
+						<section>
+							<h3 mix={css(disclosureSectionTitleCss)}>Scopes</h3>
+							<ul mix={css(scopeCheckboxListCss)}>
+								{config.platformAllowedScopes!.map((scope) => {
+									const checked = config!.scopes.includes(scope)
+									return (
+										<li key={scope}>
+											<label mix={css(scopeCheckboxLabelCss)}>
+												<input
+													type="checkbox"
+													checked={checked}
+													mix={on('change', (event) => {
+														togglePlatformScope(
+															scope,
+															event.currentTarget.checked,
+														)
+													})}
+												/>
+												<span>{scope}</span>
+											</label>
+										</li>
+									)
+								})}
+							</ul>
+						</section>
+					) : null}
+					{showUserLane ? (
+						<section>
+							<h3 mix={css(disclosureSectionTitleCss)}>Scopes</h3>
+							<p mix={css(descriptionCss)}>
+								Space-separated OAuth scopes to request during authorization.
+							</p>
+							<label mix={css(fieldCss)}>
+								<span mix={css(fieldLabelCss)}>Requested scopes</span>
+								<input
+									type="text"
+									value={config.scopes.join(' ')}
+									{...passwordManagerIgnoreProps}
+									mix={[
+										on('input', (event) => {
+											if (!config) return
+											config = {
+												...config,
+												scopes: parseScopes(event.currentTarget.value),
+											}
+											update()
+										}),
+										css(inputCss),
+									]}
+								/>
+							</label>
+						</section>
+					) : null}
+				</div>
+			</details>
+		)
+	}
+
+	const renderSetupWorkbench = () => {
+		if (!config) return null
+		return (
+			<>
+				{renderRedirectUriCard()}
+				{renderProviderInstructions()}
+				{renderAllowedHosts()}
+				<form
+					{...passwordManagerIgnoreProps}
+					mix={[
+						on('submit', handleSetupSubmit),
+						css({ display: 'grid', gap: spacing.md }),
+					]}
+				>
+					<label mix={css(fieldCss)}>
+						<span mix={css(fieldLabelCss)}>Client ID</span>
+						<input
+							name="oauthClientId"
+							required
+							{...passwordManagerIgnoreProps}
+							value={clientIdInput}
+							mix={[
+								on('input', (event) => {
+									clientIdInput = event.currentTarget.value
+									update()
+								}),
+								css(inputCss),
+							]}
+						/>
+					</label>
+					<p mix={css(descriptionCss)}>
+						{hasStoredClientId
+							? 'Stored on the OAuth app for this connection.'
+							: 'Saved on the OAuth app when you finish connecting.'}
+					</p>
+					{config.flow === 'confidential' ? (
+						hasStoredClientSecret && !revealStoredClientSecretField ? (
+							<section mix={css(insetCardCss)}>
+								<p mix={css({ margin: 0, color: colors.text })}>
+									Using the stored client secret in{' '}
+									<code>
+										{config.clientSecretSecretName ?? 'unknown secret'}
+									</code>
+									.
+								</p>
+								<p mix={css(descriptionCss)}>
+									You can continue without re-entering it.
+								</p>
+								<button
+									type="button"
+									mix={[
+										css(secondaryButtonCss),
+										on('click', () => {
+											revealStoredClientSecretField = true
+											update()
+										}),
+									]}
+								>
+									Replace stored client secret
+								</button>
+							</section>
+						) : (
+							<label mix={css(fieldCss)}>
+								<span mix={css(fieldLabelCss)}>Client Secret</span>
+								<input
+									name="oauthClientSecret"
+									type="password"
+									required
+									{...passwordManagerIgnoreProps}
+									value={clientSecretInput}
+									mix={[
+										on('input', (event) => {
+											clientSecretInput = event.currentTarget.value
+											update()
+										}),
+										css(inputCss),
+									]}
+								/>
+							</label>
+						)
+					) : null}
+					<button
+						type="submit"
+						disabled={submitting}
+						mix={css(primaryButtonCss)}
+					>
+						Save configuration
+					</button>
+				</form>
+				<section mix={css(cardCss)}>
+					<h3 mix={css(cardTitleCss)}>Provider details</h3>
+					<div mix={css(detailGridCss)}>
+						<div mix={css(detailItemCss)}>
+							<span mix={css(detailLabelCss)}>Authorize URL</span>
+							<code mix={css(detailValueCss)}>{config.authorizeUrl}</code>
+						</div>
+						<div mix={css(detailItemCss)}>
+							<span mix={css(detailLabelCss)}>Token URL</span>
+							<code mix={css(detailValueCss)}>{config.tokenUrl}</code>
+						</div>
+						<div mix={css(detailItemCss)}>
+							<span mix={css(detailLabelCss)}>Flow</span>
+							<span mix={css(detailValueCss)}>{config.flow}</span>
+						</div>
+						<div mix={css(detailItemCss)}>
+							<span mix={css(detailLabelCss)}>PKCE</span>
+							<span mix={css(detailValueCss)}>
+								{config.usePkce ? 'S256' : 'off'}
+							</span>
+						</div>
+						<div mix={css(detailItemCss)}>
+							<span mix={css(detailLabelCss)}>Scopes</span>
+							<span mix={css(detailValueCss)}>
+								{config.scopes.length ? config.scopes.join(' ') : 'None'}
+							</span>
+						</div>
+					</div>
+					{config.dashboardUrl && isSafeExternalUrl(config.dashboardUrl) ? (
+						<a
+							href={config.dashboardUrl}
+							target="_blank"
+							rel="noreferrer noopener"
+							mix={css(primaryLinkCss)}
+						>
+							Open provider dashboard
+						</a>
+					) : null}
+				</section>
+				{renderExistingIntegrationConfig()}
+			</>
+		)
+	}
+
+	const renderByoOauthDetails = () => {
+		if (!config || config.platformAppSlug) return null
+		return (
+			<details mix={css(disclosureDetailsCss)} open={currentStep === 'setup'}>
+				<summary mix={css(disclosureSummaryCss)}>
+					Use your own OAuth app
+				</summary>
+				<div mix={css(disclosureBodyCss)}>{renderSetupWorkbench()}</div>
+			</details>
+		)
+	}
+
+	const renderHero = () => {
+		if (!config) return null
+		const lede =
+			config.platformDescription?.trim() ||
+			`Connect your ${config.provider} account to Kody.`
+		const showContinueButton =
+			currentStep === 'connect' &&
+			!(wouldReplaceDifferentApp() && !replaceConfirmed)
+		return (
+			<header mix={css(heroHeadCss)}>
+				<span mix={css(heroEyebrowCss)} data-rise style={{ '--rise': '0' }}>
+					Kody secure connection
+				</span>
+				<div mix={css(heroTitleRowCss)} data-rise style={{ '--rise': '1' }}>
+					{renderProviderLogo()}
+					<h1 mix={css(heroTitleCss)}>{config.provider}</h1>
+				</div>
+				<p mix={css(heroLedeCss)} data-rise style={{ '--rise': '2' }}>
+					{lede}
+				</p>
+				<div data-rise style={{ '--rise': '3' }}>
+					{renderHeroScopeChips()}
+				</div>
+				{renderReplaceConfirmation()}
+				{renderBuiltInAlternative()}
+				{renderCompactStatusLine()}
+				{showContinueButton ? (
+					<div mix={css(heroActionsCss)} data-rise style={{ '--rise': '4' }}>
+						{existingIntegrationConfig && hasStoredClientId ? (
+							<p mix={css(descriptionCss)}>
+								Using stored client ID
+								{config.flow === 'confidential' && hasStoredClientSecret
+									? ` and stored client secret ${config.clientSecretSecretName ?? ''}.`
+									: '.'}
+							</p>
+						) : null}
+						<button
+							type="button"
+							disabled={submitting}
+							mix={[
+								on('click', () => void handleConnect()),
+								css(primaryButtonCss),
+							]}
+						>
+							Continue with {config.provider}
+						</button>
+						<p mix={css(termsNoteCss)}>
+							Connecting authorizes your agent — and any code you run or install
+							— to act as you on {config.provider} with the scopes you grant.
+							Kody does not control or supervise what your agent does with this
+							access; that responsibility is yours. See the{' '}
+							<a href="/terms" target="_blank" rel="noreferrer noopener">
+								Terms
+							</a>
+							.
+						</p>
+					</div>
+				) : null}
+			</header>
+		)
+	}
+
+	const renderSuccessState = () => {
+		if (!config) return null
+		return (
+			<section mix={css(successPanelCss)}>
+				<h2 mix={css(successTitleCss)}>Connected to {config.provider}</h2>
+				<p mix={css(compactStatusCss)}>{statusMessage}</p>
+				<div mix={css(successTokenRowCss)}>
+					<span>
+						Access token saved:{' '}
+						<strong>{accessTokenSaved ? 'Yes' : 'No'}</strong>
+					</span>
+					<span>
+						Refresh token saved:{' '}
+						<strong>{refreshTokenSaved ? 'Yes' : 'No'}</strong>
+					</span>
+				</div>
+				{hostApprovalLinks.length > 0 ? (
+					<div mix={css(successSectionCss)}>
+						<p mix={css(descriptionCss)}>
+							Hosts are never auto-approved. Approve each token host:
+						</p>
+						<button
+							type="button"
+							disabled={approvingAllHosts}
+							mix={[
+								on('click', () => void approveAllHostApprovals()),
+								css(getSecondaryButtonCss()),
+							]}
+						>
+							{approvingAllHosts ? 'Approving hosts…' : 'Approve all hosts'}
+						</button>
+						<ul mix={css(listCss)}>
+							{hostApprovalLinks.map((link) => (
+								<li key={`${link.secretName}:${link.host}`}>
+									<a
+										href={link.approvalUrl}
+										target="_blank"
+										rel="noreferrer noopener"
+										mix={css(primaryLinkCss)}
+									>
+										Approve <code>{link.host}</code> for{' '}
+										<code>{link.secretName}</code>
+									</a>
+								</li>
+							))}
+						</ul>
+					</div>
+				) : null}
+				<div mix={css(successSectionCss)}>
+					<h3 mix={css(disclosureSectionTitleCss)}>Allowed hosts</h3>
+					<ul mix={css(listCss)}>
+						{config.allowedHosts.map((host) => (
+							<li key={host}>{host}</li>
+						))}
+					</ul>
+					<a
+						href="/account/secrets"
+						target="_blank"
+						rel="noreferrer noopener"
+						mix={css(primaryLinkCss)}
+					>
+						Open account secrets
+					</a>
+				</div>
+				{nextSteps ? (
+					<div mix={css(successNextStepsCss)}>
+						<p mix={css(descriptionCss)}>{nextSteps.guidance}</p>
+						{nextSteps.suggestions.length > 0 ? (
+							<ul mix={css(listCss)}>
+								{nextSteps.suggestions.map((suggestion) => (
+									<li key={suggestion.listingId}>
+										<a
+											href={suggestion.publicUrl}
+											target="_blank"
+											rel="noreferrer noopener"
+											mix={css(primaryLinkCss)}
+										>
+											{suggestion.name}
+										</a>
+										{suggestion.trusted ? (
+											<span mix={css(trustedBadgeCss)}>Trusted</span>
+										) : null}
+										<span mix={css(descriptionCss)}>
+											{' '}
+											— {suggestion.description}
+										</span>
+										<div mix={css(suggestionActionsCss)}>
+											<CopyTextButton
+												value={suggestion.forkPrompt}
+												idleLabel="Copy fork prompt"
+												variant="secondary"
+											/>
+										</div>
+									</li>
+								))}
+							</ul>
+						) : null}
+						<p mix={css(descriptionCss)}>
+							{nextSteps.createHelpersCta.label}{' '}
+							<CopyTextButton
+								value={nextSteps.createHelpersCta.prompt}
+								idleLabel="Copy create prompt"
+								variant="secondary"
+							/>
+						</p>
+					</div>
+				) : null}
+			</section>
 		)
 	}
 
@@ -1354,375 +1795,48 @@ export function ConnectOauthRoute(handle: Handle) {
 		if (!config) {
 			return (
 				<section mix={css(pageCss)}>
-					<header mix={css(headerCss)}>
-						<span mix={css(eyebrowCss)}>Kody secure connection</span>
-						<h1 mix={css(pageTitleCss)}>Connect OAuth</h1>
-						<p mix={css(pageDescriptionCss)}>{statusMessage}</p>
+					<header mix={css(heroHeadCss)}>
+						<span mix={css(heroEyebrowCss)}>Kody secure connection</span>
+						<h1 mix={css(heroTitleCss)}>Connect OAuth</h1>
+						<p mix={css(hasConfigError ? compactErrorCss : heroLedeCss)}>
+							{statusMessage}
+						</p>
 					</header>
-					{renderRedirectUriCard()}
+					{ssrRedirectUri ? (
+						<details mix={css(disclosureDetailsCss)}>
+							<summary mix={css(disclosureSummaryCss)}>
+								Use your own OAuth app
+							</summary>
+							<div mix={css(disclosureBodyCss)}>
+								<section mix={css(redirectUriCardCss)}>
+									<h2 mix={css(cardTitleCss)}>Redirect URI</h2>
+									<p mix={css({ margin: 0, color: colors.text })}>
+										Register this exact URL as the redirect (callback) URI in
+										your provider&apos;s OAuth app settings.
+									</p>
+									<pre mix={css(redirectUriValueCss)}>{ssrRedirectUri}</pre>
+									<div>
+										<CopyTextButton
+											value={ssrRedirectUri}
+											idleLabel="Copy redirect URI"
+											variant="primary"
+										/>
+									</div>
+								</section>
+							</div>
+						</details>
+					) : null}
 				</section>
 			)
 		}
+		if (currentStep === 'success') {
+			return <section mix={css(pageCss)}>{renderSuccessState()}</section>
+		}
 		return (
 			<section mix={css(pageCss)}>
-				<header mix={css(headerCss)}>
-					<span mix={css(eyebrowCss)}>Kody secure connection</span>
-					<h1
-						mix={css({
-							...pageTitleCss,
-							display: 'flex',
-							alignItems: 'center',
-							gap: spacing.sm,
-						})}
-					>
-						{config.platformLogoPath ? (
-							<img
-								src={config.platformLogoPath}
-								alt=""
-								width={36}
-								height={36}
-								mix={css({ borderRadius: radius.sm })}
-							/>
-						) : null}
-						Connect {config.provider}
-					</h1>
-					{config.platformDescription ? (
-						<p mix={css(pageDescriptionCss)}>{config.platformDescription}</p>
-					) : (
-						<p mix={css(pageDescriptionCss)}>
-							Follow the steps below to connect your account using OAuth.
-						</p>
-					)}
-				</header>
-				<section mix={css(getStatusCardCss(statusTone))}>
-					<div
-						mix={css({
-							display: 'flex',
-							alignItems: 'center',
-							justifyContent: 'space-between',
-							gap: spacing.sm,
-							flexWrap: 'wrap',
-						})}
-					>
-						<strong mix={css(sectionTitleCss)}>Status</strong>
-						<span mix={css(getStatusBadgeCss(statusTone))}>{currentStep}</span>
-					</div>
-					<p mix={css(getStatusMessageCss(statusTone))}>{statusMessage}</p>
-				</section>
-				{renderRedirectUriCard()}
-				<section mix={css(cardCss)}>
-					<h2 mix={css(cardTitleCss)}>Provider details</h2>
-					<div mix={css(detailGridCss)}>
-						<div mix={css(detailItemCss)}>
-							<span mix={css(detailLabelCss)}>Authorize URL</span>
-							<code mix={css(detailValueCss)}>{config.authorizeUrl}</code>
-						</div>
-						<div mix={css(detailItemCss)}>
-							<span mix={css(detailLabelCss)}>Token URL</span>
-							<code mix={css(detailValueCss)}>{config.tokenUrl}</code>
-						</div>
-						<div mix={css(detailItemCss)}>
-							<span mix={css(detailLabelCss)}>Flow</span>
-							<span mix={css(detailValueCss)}>{config.flow}</span>
-						</div>
-						<div mix={css(detailItemCss)}>
-							<span mix={css(detailLabelCss)}>PKCE</span>
-							<span mix={css(detailValueCss)}>
-								{config.usePkce ? 'S256' : 'off'}
-							</span>
-						</div>
-						<div mix={css(detailItemCss)}>
-							<span mix={css(detailLabelCss)}>Scopes</span>
-							<span mix={css(detailValueCss)}>
-								{config.scopes.length ? config.scopes.join(' ') : 'None'}
-							</span>
-						</div>
-					</div>
-					{config.dashboardUrl && isSafeExternalUrl(config.dashboardUrl) ? (
-						<a
-							href={config.dashboardUrl}
-							target="_blank"
-							rel="noreferrer noopener"
-							mix={css(primaryLinkCss)}
-						>
-							Open provider dashboard
-						</a>
-					) : null}
-				</section>
-				{renderExistingIntegrationConfig()}
-				{currentStep === 'setup' ? (
-					<section mix={css(cardCss)}>
-						<h2 mix={css(cardTitleCss)}>
-							1. {existingIntegrationConfig ? 'Review' : 'Save'} OAuth client
-							configuration
-						</h2>
-						{renderBuiltInAlternative()}
-						{renderProviderInstructions()}
-						{renderAllowedHosts()}
-						<form
-							{...passwordManagerIgnoreProps}
-							mix={[
-								on('submit', handleSetupSubmit),
-								css({ display: 'grid', gap: spacing.md }),
-							]}
-						>
-							<label mix={css(fieldCss)}>
-								<span mix={css(fieldLabelCss)}>Client ID</span>
-								<input
-									name="oauthClientId"
-									required
-									{...passwordManagerIgnoreProps}
-									value={clientIdInput}
-									mix={[
-										on(
-											'input',
-
-											(event) => {
-												clientIdInput = event.currentTarget.value
-												update()
-											},
-										),
-
-										css(inputCss),
-									]}
-								/>
-							</label>
-							<p mix={css(descriptionCss)}>
-								{hasStoredClientId
-									? 'Stored on the OAuth app for this connection.'
-									: 'Saved on the OAuth app when you finish connecting.'}
-							</p>
-							{config.flow === 'confidential' ? (
-								hasStoredClientSecret && !revealStoredClientSecretField ? (
-									<section mix={css(insetCardCss)}>
-										<p mix={css({ margin: 0, color: colors.text })}>
-											Using the stored client secret in{' '}
-											<code>
-												{config.clientSecretSecretName ?? 'unknown secret'}
-											</code>
-											.
-										</p>
-										<p mix={css(descriptionCss)}>
-											You can continue without re-entering it.
-										</p>
-										<button
-											type="button"
-											mix={[
-												css(secondaryButtonCss),
-												on(
-													'click',
-
-													() => {
-														revealStoredClientSecretField = true
-														update()
-													},
-												),
-											]}
-										>
-											Replace stored client secret
-										</button>
-									</section>
-								) : (
-									<label mix={css(fieldCss)}>
-										<span mix={css(fieldLabelCss)}>Client Secret</span>
-										<input
-											name="oauthClientSecret"
-											type="password"
-											required
-											{...passwordManagerIgnoreProps}
-											value={clientSecretInput}
-											mix={[
-												on(
-													'input',
-
-													(event) => {
-														clientSecretInput = event.currentTarget.value
-														update()
-													},
-												),
-
-												css(inputCss),
-											]}
-										/>
-									</label>
-								)
-							) : null}
-							<button
-								type="submit"
-								disabled={submitting}
-								mix={css(primaryButtonCss)}
-							>
-								Save configuration
-							</button>
-						</form>
-					</section>
-				) : null}
-				{currentStep === 'connect' ? (
-					<section mix={css(cardCss)}>
-						<h2 mix={css(cardTitleCss)}>2. Connect</h2>
-						<p mix={css({ margin: 0, color: colors.text })}>
-							Start the OAuth flow. You will be redirected to the provider.
-						</p>
-						{renderReplaceConfirmation()}
-						{renderBuiltInAlternative()}
-						{existingIntegrationConfig && hasStoredClientId ? (
-							<p mix={css(descriptionCss)}>
-								Using stored client ID
-								{config.flow === 'confidential' && hasStoredClientSecret
-									? ` and stored client secret ${config.clientSecretSecretName ?? ''}.`
-									: '.'}
-							</p>
-						) : null}
-						<p mix={css(descriptionCss)}>
-							Connecting authorizes your agent — and any code you run or install
-							— to act as you on {config.provider} with the scopes you grant.
-							Kody does not control or supervise what your agent does with this
-							access; that responsibility is yours. See the{' '}
-							<a href="/terms" target="_blank" rel="noreferrer noopener">
-								Terms
-							</a>
-							.
-						</p>
-						{/* The primary button yields to the replace confirmation so a
-						    different-app overwrite is never one ambient click away. */}
-						{wouldReplaceDifferentApp() && !replaceConfirmed ? null : (
-							<button
-								type="button"
-								disabled={submitting}
-								mix={[
-									on('click', () => void handleConnect()),
-									css(primaryButtonCss),
-								]}
-							>
-								Connect {config.provider}
-							</button>
-						)}
-					</section>
-				) : null}
-				{currentStep === 'success' ? (
-					<section mix={css(cardCss)}>
-						<h2 mix={css(cardTitleCss)}>4. Success</h2>
-						<div mix={css(detailGridCss)}>
-							<div mix={css(detailItemCss)}>
-								<span mix={css(detailLabelCss)}>Access token saved</span>
-								<strong mix={css(detailValueCss)}>
-									{accessTokenSaved ? 'Yes' : 'No'}
-								</strong>
-							</div>
-							<div mix={css(detailItemCss)}>
-								<span mix={css(detailLabelCss)}>Refresh token saved</span>
-								<strong mix={css(detailValueCss)}>
-									{refreshTokenSaved ? 'Yes' : 'No'}
-								</strong>
-							</div>
-						</div>
-						{nextSteps ? (
-							<div mix={css(insetCardCss)}>
-								<h3 mix={css(sectionTitleCss)}>Next: helpers package</h3>
-								<p mix={css(descriptionCss)}>{nextSteps.guidance}</p>
-								{nextSteps.suggestions.length > 0 ? (
-									<ul mix={css(listCss)}>
-										{nextSteps.suggestions.map((suggestion) => (
-											<li key={suggestion.listingId}>
-												<div mix={css(suggestionHeaderCss)}>
-													<a
-														href={suggestion.publicUrl}
-														target="_blank"
-														rel="noreferrer noopener"
-														mix={css(primaryLinkCss)}
-													>
-														{suggestion.name}
-													</a>
-													{suggestion.trusted ? (
-														<span mix={css(trustedBadgeCss)}>Trusted</span>
-													) : null}
-												</div>
-												<p mix={css(descriptionCss)}>
-													{suggestion.description}
-												</p>
-												<div mix={css(suggestionActionsCss)}>
-													<a
-														href={suggestion.publicUrl}
-														target="_blank"
-														rel="noreferrer noopener"
-														mix={css(primaryLinkCss)}
-													>
-														View listing
-													</a>
-													<CopyTextButton
-														value={suggestion.forkPrompt}
-														idleLabel="Copy fork prompt"
-														variant="secondary"
-													/>
-												</div>
-											</li>
-										))}
-									</ul>
-								) : null}
-								<div mix={css(suggestionActionsCss)}>
-									<strong mix={css(detailValueCss)}>
-										{nextSteps.createHelpersCta.label}
-									</strong>
-									<CopyTextButton
-										value={nextSteps.createHelpersCta.prompt}
-										idleLabel="Copy create prompt"
-										variant="secondary"
-									/>
-								</div>
-							</div>
-						) : null}
-						<h3 mix={css(sectionTitleCss)}>Host approvals</h3>
-						<p mix={css({ margin: 0, color: colors.text })}>
-							Hosts are never auto-approved. Review these allowed hosts in your
-							account secrets.
-						</p>
-						<ul mix={css(listCss)}>
-							{config.allowedHosts.map((host) => (
-								<li key={host}>{host}</li>
-							))}
-						</ul>
-						{hostApprovalLinks.length > 0 ? (
-							<div mix={css(insetCardCss)}>
-								<p mix={css(descriptionCss)}>
-									Approve each token host directly:
-								</p>
-								<button
-									type="button"
-									disabled={approvingAllHosts}
-									mix={[
-										on('click', () => void approveAllHostApprovals()),
-										css(primaryButtonCss),
-									]}
-								>
-									{approvingAllHosts ? 'Approving hosts…' : 'Approve all hosts'}
-								</button>
-								<ul mix={css(listCss)}>
-									{hostApprovalLinks.map((link) => (
-										<li key={`${link.secretName}:${link.host}`}>
-											<a
-												href={link.approvalUrl}
-												target="_blank"
-												rel="noreferrer noopener"
-												mix={css(primaryLinkCss)}
-											>
-												Approve <code>{link.host}</code> for{' '}
-												<code>{link.secretName}</code>
-											</a>
-										</li>
-									))}
-								</ul>
-							</div>
-						) : null}
-						<a
-							href="/account/secrets"
-							target="_blank"
-							rel="noreferrer"
-							mix={css(primaryLinkCss)}
-						>
-							Open account secrets
-						</a>
-					</section>
-				) : null}
+				{renderHero()}
+				{renderChooseWhatToShareDetails()}
+				{renderByoOauthDetails()}
 			</section>
 		)
 	}
@@ -1732,10 +1846,206 @@ const pageCss = {
 	...stackedPageCss,
 	maxWidth: '56rem',
 	margin: '0 auto',
+	padding:
+		'clamp(2.5rem, 6vw, 4.5rem) clamp(1.25rem, 4vw, 2.5rem) clamp(3rem, 7vw, 5rem)',
 }
 
-const headerCss = pageHeaderCss
-const eyebrowCss = pageEyebrowCss
+const heroHeadCss = {
+	position: 'relative' as const,
+	isolation: 'isolate' as const,
+	display: 'grid',
+	gap: spacing.md,
+	'&::before': {
+		content: '""',
+		position: 'absolute' as const,
+		zIndex: -1,
+		inset: '-60% -12% -140%',
+		background: `radial-gradient(ellipse 42% 58% at 68% 40%, oklch(from ${colors.text} l c h / 0.05), transparent 72%)`,
+		maskImage: 'var(--kody-pattern)',
+		maskPosition: 'center',
+		maskSize: '340px',
+		maskRepeat: 'repeat',
+		WebkitMaskImage: 'var(--kody-pattern)',
+		WebkitMaskPosition: 'center',
+		WebkitMaskSize: '340px',
+		WebkitMaskRepeat: 'repeat',
+		pointerEvents: 'none' as const,
+	},
+}
+
+const heroEyebrowCss = {
+	font: `700 0.78rem/1 ${typography.fontFamilyDisplay}`,
+	textTransform: 'uppercase' as const,
+	letterSpacing: '0.09em',
+	color: colors.primaryText,
+}
+
+const heroTitleRowCss = {
+	display: 'flex',
+	alignItems: 'center',
+	gap: spacing.md,
+	flexWrap: 'wrap' as const,
+}
+
+const heroTitleCss = {
+	margin: 0,
+	font: `760 clamp(2rem, 4vw, 2.8rem)/1.04 ${typography.fontFamilyDisplay}`,
+	letterSpacing: '-0.028em',
+	color: colors.text,
+}
+
+const heroLedeCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: '1.08rem',
+	maxWidth: '52ch',
+}
+
+const heroLogoCss = {
+	borderRadius: radius.sm,
+	flex: 'none',
+}
+
+const heroLogoWellCss = {
+	display: 'inline-flex',
+	alignItems: 'center',
+	justifyContent: 'center',
+	flex: 'none',
+}
+
+const scopeChipListCss = {
+	display: 'flex',
+	flexWrap: 'wrap' as const,
+	gap: spacing.sm,
+	margin: 0,
+	padding: 0,
+	listStyle: 'none',
+}
+
+const heroActionsCss = {
+	display: 'grid',
+	gap: spacing.md,
+	marginTop: spacing.sm,
+}
+
+const termsNoteCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: typography.fontSize.sm,
+	maxWidth: '58ch',
+}
+
+const builtInAlternativeCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: typography.fontSize.sm,
+	maxWidth: '58ch',
+}
+
+const replaceCalloutCss = {
+	...insetCardCss,
+	display: 'grid',
+	gap: spacing.sm,
+}
+
+const compactStatusCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: typography.fontSize.sm,
+}
+
+const compactErrorCss = {
+	margin: 0,
+	color: colors.error,
+	fontSize: typography.fontSize.sm,
+}
+
+const disclosureDetailsCss = {
+	marginTop: 'clamp(1.5rem, 4vw, 2.5rem)',
+	paddingTop: '1.2rem',
+	borderTop: `1px solid ${colors.border}`,
+	'& > div': {
+		'@media (prefers-reduced-motion: no-preference)': {
+			transition: `opacity 240ms ${transitions.easeOut}, translate 240ms ${transitions.easeOut}`,
+		},
+		'@starting-style': {
+			opacity: 0,
+			translate: '0 6px',
+		},
+	},
+}
+
+const disclosureSummaryCss = {
+	cursor: 'pointer',
+	width: 'fit-content',
+	padding: '0.3rem 0',
+	font: `700 1.05rem/1.3 ${typography.fontFamilyDisplay}`,
+	color: colors.text,
+	transition: `color ${transitions.fast}`,
+	[hoverMq]: {
+		'&:hover': {
+			color: colors.primaryText,
+		},
+	},
+}
+
+const disclosureBodyCss = {
+	marginTop: '1.2rem',
+	display: 'grid',
+	gap: spacing.lg,
+	minWidth: 0,
+	'& > *': { minWidth: 0 },
+}
+
+const disclosureSectionTitleCss = {
+	margin: '0 0 0.5rem',
+	font: `700 0.95rem/1.3 ${typography.fontFamilyDisplay}`,
+	color: colors.text,
+}
+
+const scopeCheckboxListCss = {
+	...listCss,
+	display: 'grid',
+	gap: spacing.sm,
+}
+
+const scopeCheckboxLabelCss = {
+	display: 'flex',
+	alignItems: 'flex-start',
+	gap: spacing.sm,
+	color: colors.text,
+	cursor: 'pointer',
+}
+
+const successPanelCss = {
+	display: 'grid',
+	gap: spacing.lg,
+}
+
+const successTitleCss = {
+	margin: 0,
+	font: `720 clamp(1.6rem, 3vw, 2.2rem)/1.1 ${typography.fontFamilyDisplay}`,
+	letterSpacing: '-0.02em',
+}
+
+const successTokenRowCss = {
+	display: 'flex',
+	flexWrap: 'wrap' as const,
+	gap: spacing.md,
+	color: colors.text,
+}
+
+const successSectionCss = {
+	display: 'grid',
+	gap: spacing.sm,
+}
+
+const successNextStepsCss = {
+	display: 'grid',
+	gap: spacing.sm,
+	paddingTop: spacing.sm,
+	borderTop: `1px solid ${colors.border}`,
+}
 
 const redirectUriCardCss = {
 	...cardCss,
@@ -1751,20 +2061,17 @@ const redirectUriValueCss = {
 	fontSize: typography.fontSize.base,
 	fontWeight: typography.fontWeight.medium,
 }
+
 const primaryButtonCss = getPrimaryButtonCss({
 	size: 'lg',
 	weight: 'semibold',
 })
+
 const secondaryButtonCss = getSecondaryButtonCss({
 	size: 'lg',
 	weight: 'semibold',
 })
-const suggestionHeaderCss = {
-	display: 'flex',
-	flexWrap: 'wrap' as const,
-	alignItems: 'center',
-	gap: spacing.sm,
-}
+
 const suggestionActionsCss = {
 	display: 'flex',
 	flexWrap: 'wrap' as const,
@@ -1772,6 +2079,7 @@ const suggestionActionsCss = {
 	gap: spacing.sm,
 	marginTop: spacing.sm,
 }
+
 const trustedBadgeCss = {
 	display: 'inline-flex',
 	alignItems: 'center',
@@ -1782,41 +2090,4 @@ const trustedBadgeCss = {
 	color: colors.primaryText,
 	fontSize: typography.fontSize.xs,
 	fontWeight: typography.fontWeight.semibold,
-}
-
-function getStatusCardCss(tone: 'info' | 'warn' | 'error') {
-	return {
-		...cardCss,
-		border: `1px solid ${tone === 'error' ? colors.error : colors.primary}`,
-		backgroundColor:
-			tone === 'error'
-				? 'color-mix(in srgb, var(--color-danger) 8%, var(--color-surface))'
-				: colors.primarySoftest,
-	}
-}
-
-function getStatusBadgeCss(tone: 'info' | 'warn' | 'error') {
-	return {
-		display: 'inline-flex',
-		alignItems: 'center',
-		justifyContent: 'center',
-		padding: `0.25rem ${spacing.sm}`,
-		borderRadius: radius.full,
-		backgroundColor:
-			tone === 'error'
-				? 'color-mix(in srgb, var(--color-danger) 14%, transparent)'
-				: colors.surface,
-		color: tone === 'error' ? colors.error : colors.primaryText,
-		fontSize: typography.fontSize.xs,
-		fontWeight: typography.fontWeight.semibold,
-		letterSpacing: '0.08em',
-		textTransform: 'uppercase' as const,
-	}
-}
-
-function getStatusMessageCss(tone: 'info' | 'warn' | 'error') {
-	return {
-		margin: 0,
-		color: tone === 'error' ? colors.error : colors.text,
-	}
 }

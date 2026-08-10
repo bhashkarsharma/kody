@@ -620,8 +620,9 @@ test('renderAppPage server-renders connect-oauth provider visits without a loadi
 	const env = createTestEnv(createUserTestDb([]))
 
 	// A stored user-lane confidential google connection whose client secret
-	// already exists: the page must SSR straight into "ready to connect"
-	// with the Redirect URI card, not "Loading provider configuration…".
+	// already exists: the page must SSR straight into the connect hero
+	// with the Redirect URI inside the BYO disclosure, not
+	// "Loading provider configuration…".
 	const response = await renderAppPage({
 		request: new Request('https://example.com/connect/oauth?provider=google'),
 		env,
@@ -662,16 +663,14 @@ test('renderAppPage server-renders connect-oauth provider visits without a loadi
 
 	expect(response.status).toBe(200)
 	const html = await readResponseText(response)
-	expect(html).toContain('Connect google')
-	expect(html).toContain(
-		'Loaded your existing integration config and client credentials. Ready to connect.',
-	)
+	expect(html).toContain('>google</h1>')
+	expect(html).toContain('Connect your google account to Kody.')
 	expect(html).toContain('https://example.com/connect/oauth')
 	expect(html).toContain('https://accounts.google.com/o/oauth2/v2/auth')
 	expect(html).not.toContain('Loading provider configuration')
-	// Ready state renders the plain Connect button (also proves the
+	// Ready state renders the hero Continue button (also proves the
 	// replace-state assertion below is not vacuous about serialization).
-	expect(html).toContain('>Connect google</button>')
+	expect(html).toContain('>Continue with google</button>')
 
 	// A built-in connect that would replace a user-lane connection under the
 	// same name server-renders the replace confirmation and withholds the
@@ -726,7 +725,7 @@ test('renderAppPage server-renders connect-oauth provider visits without a loadi
 	// Operator-authored description renders under the provider name.
 	expect(replaceHtml).toContain('Send-only Gmail access.')
 	expect(replaceHtml).not.toContain('Loading provider configuration')
-	expect(replaceHtml).not.toContain('>Connect google</button>')
+	expect(replaceHtml).not.toContain('>Continue with google</button>')
 })
 
 test('renderAppPage renders the redesigned landing page shell', async () => {
