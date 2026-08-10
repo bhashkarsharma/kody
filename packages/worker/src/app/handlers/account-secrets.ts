@@ -39,6 +39,7 @@ import {
 	normalizeIntegrationConfig,
 	integrationConfigSchema,
 } from '#mcp/capabilities/integrations/integration-shared.ts'
+import { resolvePersistedOauthScopes } from '#worker/integrations/oauth-granted-scopes.ts'
 import {
 	assertScopesAllowedForPlatformApp,
 	getAvailablePlatformApp,
@@ -346,7 +347,7 @@ async function handleConnectOauthAction(input: {
 				]
 			: readStringArray(input.body, 'allowedHosts'),
 	)
-	const scopes = readStringArray(input.body, 'scopes')
+	const requestedScopes = readStringArray(input.body, 'scopes')
 	const scopeSeparator = readRawOptionalString(input.body, 'scopeSeparator')
 	const extraAuthorizeParams = readStringRecord(
 		input.body,
@@ -397,6 +398,12 @@ async function handleConnectOauthAction(input: {
 			400,
 		)
 	}
+	// Prefer granted scopes from the token response when present (Google
+	// granular consent can return a subset). Fall back to the requested set.
+	const scopes = resolvePersistedOauthScopes({
+		requestedScopes,
+		tokenPayload: tokenRecord,
+	})
 	// Scope validation must precede token persistence: a rejected scope set
 	// must not leave orphan token secrets behind.
 	if (platformApp) {

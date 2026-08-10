@@ -546,6 +546,50 @@ test('connect oauth saves tokens via the secret store and persists app+connectio
 		}),
 	)
 
+	mockModule.upsertIntegration.mockClear()
+	const googleGranular = await handler.handler({
+		request: new Request('https://example.com/account/secrets.json', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				action: 'connect_oauth',
+				provider: 'google',
+				authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+				tokenUrl: 'https://oauth2.googleapis.com/token',
+				apiBaseUrl: 'https://www.googleapis.com',
+				scopes: [
+					'https://www.googleapis.com/auth/drive',
+					'https://www.googleapis.com/auth/drive.readonly',
+				],
+				scopeSeparator: ' ',
+				flow: 'confidential',
+				clientId: 'google-client-id',
+				clientSecretSecretName: 'googleClientSecret',
+				accessTokenSecretName: 'googleAccessToken',
+				refreshTokenSecretName: 'googleRefreshToken',
+				allowedHosts: ['oauth2.googleapis.com', 'www.googleapis.com'],
+				tokenPayload: {
+					access_token: 'google-access',
+					refresh_token: 'google-refresh',
+					// Granular consent granted only a subset of the request.
+					scope: 'https://www.googleapis.com/auth/drive.readonly',
+				},
+			}),
+		}),
+		params: {},
+	} as never)
+	expect(googleGranular.status).toBe(200)
+	expect(mockModule.upsertIntegration).toHaveBeenCalledWith(
+		expect.objectContaining({
+			config: expect.objectContaining({
+				name: 'google',
+				authorization: expect.objectContaining({
+					scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+				}),
+			}),
+		}),
+	)
+
 	mockModule.listSecrets.mockResolvedValueOnce([
 		{
 			name: 'teslaAccessToken',
