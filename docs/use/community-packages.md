@@ -132,20 +132,22 @@ Only after publish does the package become a live saved package in your account.
 
 ## One-click install
 
-Each listing detail page has an **Install** button for signed-in users. Featured
-starter packages on `/onboarding` appear as a square-card grid with one-click
-install without leaving the page: after install, **Copy prompt** gives your
-agent a short setup prompt. If you already have a saved package with the same
-`kody_id`, or a fork of that listing, onboarding, listing cards, and the detail
-page show **Copy prompt** / **Installed** (or **Forked**) instead of Install.
-Listing cards and the detail page place **Trusted** / **Installed** (or
-**Forked**) badges on their own row under the package name. A trailing **Choose
-your own adventure** card copies an open-ended setup prompt when you want to
-explore or build something custom instead. Install forks the listing into your
-account and, when the fork passes the same publish checks a repo session would
-run, publishes it immediately as a live saved package. **Publishing activates
-the package right away** — declared jobs are scheduled and `autoStart` services
-start.
+Each listing detail page has an **Install** button for signed-in users. On
+`/onboarding`, Step 2 features zero-auth example packages as a one-click
+fork/install grid and shows **Copy prompt** while install finishes so your agent
+can invoke the owned package. Step 3 offers built-in service connects plus
+featured starters that usually need an account; after those installs, **Copy
+prompt** gives your agent a short setup prompt. If you already have a saved
+package with the same `kody_id`, or a fork of that listing, onboarding, listing
+cards, and the detail page show **Copy prompt** / **Installed** (or **Forked**)
+instead of Install. Listing cards and the detail page place **Trusted** /
+**Installed** (or **Forked**) badges on their own row under the package name. A
+trailing **Choose your own adventure** card copies an open-ended setup prompt
+when you want to explore or build something custom instead. Install forks the
+listing into your account and, when the fork passes the same publish checks a
+repo session would run, publishes it immediately as a live saved package.
+**Publishing activates the package right away** — declared jobs are scheduled
+and `autoStart` services start.
 
 - **Untrusted listings** show a warning first: no admin has reviewed the code,
   and installing runs it in your account. You must explicitly confirm. Direct
