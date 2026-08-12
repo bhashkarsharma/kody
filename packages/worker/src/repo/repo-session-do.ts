@@ -18,7 +18,6 @@ import {
 } from './repo-sessions.ts'
 import {
 	type ArtifactBootstrapAccess,
-	type ArtifactRepoInfo,
 	buildArtifactsGitAuth,
 	buildAuthenticatedArtifactsRemote,
 	resolveArtifactSourceHead,
@@ -113,6 +112,10 @@ import {
 	registerStorageBucketAndWait,
 	repoSessionStorageBucketId,
 } from '#worker/storage-buckets/service.ts'
+import {
+	pushServerTiming,
+	type ServerTimingEntry,
+} from '#worker/server-timing.ts'
 
 const repoSessionWorkspacePrefix = '/session'
 const lastCheckStatusStorageKey = 'repo-session:last-check-status'
@@ -1255,6 +1258,7 @@ class RepoSessionBase extends DurableObject<Env> {
 			}
 		}>
 	}): Promise<RepoSourceBootstrapResult> {
+		const serverTiming: Array<ServerTimingEntry> = []
 		const source = await getEntitySourceById(this.env.APP_DB, input.sourceId)
 		if (!source) {
 			throw new Error(`Source "${input.sourceId}" was not found.`)
@@ -1267,90 +1271,117 @@ class RepoSessionBase extends DurableObject<Env> {
 				`Source "${source.id}" already has a published commit. Use repo sessions for later edits.`,
 			)
 		}
-		let sourceInfo: ArtifactRepoInfo | null = null
-		let sourceAccess: { remote: string; token: string }
-		if (input.bootstrapAccess) {
-			sourceAccess = {
-				remote: input.bootstrapAccess.remote,
-				token: input.bootstrapAccess.token,
-			}
-		} else {
-			const sourceRepo = await resolveArtifactSourceRepo(
-				this.env,
-				source.repo_id,
-			)
-			sourceInfo = await sourceRepo.info()
-			sourceAccess = await ensureArtifactRepoRemote({
-				repo: sourceRepo,
-				scope: 'write',
-				pendingReconcile: buildPendingExternalReconcile(
-					this.env.APP_DB,
-					source,
-				),
-			})
-		}
+		const remoteSetup = await pushServerTiming(
+			serverTiming,
+			'bootstrap-artifact-remote',
+			async () => {
+				if (input.bootstrapAccess) {
+					return {
+						remote: input.bootstrapAccess.remote,
+						token: input.bootstrapAccess.token,
+						sourceInfo: null,
+					}
+				}
+				const sourceRepo = await resolveArtifactSourceRepo(
+					this.env,
+					source.repo_id,
+				)
+				const sourceInfo = await sourceRepo.info()
+				const access = await ensureArtifactRepoRemote({
+					repo: sourceRepo,
+					scope: 'write',
+					pendingReconcile: buildPendingExternalReconcile(
+						this.env.APP_DB,
+						source,
+					),
+				})
+				return {
+					remote: access.remote,
+					token: access.token,
+					sourceInfo,
+				}
+			},
+		)
 		const targetBranch =
 			input.bootstrapAccess?.defaultBranch ??
-			sourceInfo?.defaultBranch ??
+			remoteSetup.sourceInfo?.defaultBranch ??
 			defaultSessionBranch
-		await this.resetWorkspace()
-		await this.workspace.mkdir(repoSessionWorkspacePrefix, {
-			recursive: true,
+		await pushServerTiming(serverTiming, 'bootstrap-git-init', async () => {
+			await this.resetWorkspace()
+			await this.workspace.mkdir(repoSessionWorkspacePrefix, {
+				recursive: true,
+			})
+			await this.git.init({
+				dir: repoSessionWorkspacePrefix,
+				defaultBranch: targetBranch,
+			})
+			await this.ensureRemote({
+				name: 'source',
+				url: buildAuthenticatedArtifactsRemote({
+					remote: remoteSetup.remote,
+					token: remoteSetup.token,
+				}),
+			})
 		})
-		await this.git.init({
-			dir: repoSessionWorkspacePrefix,
-			defaultBranch: targetBranch,
-		})
-		await this.ensureRemote({
-			name: 'source',
-			url: buildAuthenticatedArtifactsRemote({
-				remote: sourceAccess.remote,
-				token: sourceAccess.token,
+		await pushServerTiming(serverTiming, 'bootstrap-write-files', () =>
+			this.applyWorkspaceEdits({
+				edits: input.edits as Array<RepoSessionEdit>,
+				dryRun: false,
+				rollbackOnError: true,
 			}),
-		})
-		await this.applyWorkspaceEdits({
-			edits: input.edits as Array<RepoSessionEdit>,
-			dryRun: false,
-			rollbackOnError: true,
-		})
-		const publishedCommit = await this.commitIfDirty(
-			`Bootstrap source repo ${source.id}`,
 		)
-		if (!publishedCommit) {
-			throw new Error(`Source "${source.id}" bootstrap produced no commit.`)
-		}
-		await this.readManifestFromWorkspace(
-			source.manifest_path,
-			source.entity_kind,
+		const publishedCommit = await pushServerTiming(
+			serverTiming,
+			'bootstrap-commit',
+			async () => {
+				const commit = await this.commitIfDirty(
+					`Bootstrap source repo ${source.id}`,
+				)
+				if (!commit) {
+					throw new Error(`Source "${source.id}" bootstrap produced no commit.`)
+				}
+				await this.readManifestFromWorkspace(
+					source.manifest_path,
+					source.entity_kind,
+				)
+				return commit
+			},
 		)
-		await this.git.push({
-			dir: repoSessionWorkspacePrefix,
-			remote: 'source',
-			ref: targetBranch,
-			...buildArtifactsGitAuth({ token: sourceAccess.token }),
-		})
-		await this.attachSourcePublishGitNote({
-			source,
-			commitOid: publishedCommit,
-			remote: sourceAccess.remote,
-			token: sourceAccess.token,
-			remoteName: 'source',
-			publishedBy: 'source_bootstrap',
-			sessionId: input.sessionId,
-			previousPublishedCommit: null,
-			scope: 'repo.bootstrapSource.publish-git-note',
-		})
-		await updateEntitySource(this.env.APP_DB, {
-			id: source.id,
-			userId: source.user_id,
-			publishedCommit,
-			manifestPath: source.manifest_path,
-			sourceRoot: source.source_root,
-		})
+		await pushServerTiming(serverTiming, 'bootstrap-git-push', () =>
+			this.git.push({
+				dir: repoSessionWorkspacePrefix,
+				remote: 'source',
+				ref: targetBranch,
+				...buildArtifactsGitAuth({ token: remoteSetup.token }),
+			}),
+		)
+		await pushServerTiming(serverTiming, 'bootstrap-git-note', () =>
+			this.attachSourcePublishGitNote({
+				source,
+				commitOid: publishedCommit,
+				remote: remoteSetup.remote,
+				token: remoteSetup.token,
+				remoteName: 'source',
+				publishedBy: 'source_bootstrap',
+				sessionId: input.sessionId,
+				previousPublishedCommit: null,
+				scope: 'repo.bootstrapSource.publish-git-note',
+			}),
+		)
+		await pushServerTiming(serverTiming, 'bootstrap-published-commit', () =>
+			updateEntitySource(this.env.APP_DB, {
+				id: source.id,
+				userId: source.user_id,
+				publishedCommit,
+				manifestPath: source.manifest_path,
+				sourceRoot: source.source_root,
+			}),
+		)
 		return {
 			sessionId: input.sessionId,
 			publishedCommit,
 			message: `Bootstrapped source ${source.id} in ${source.repo_id}.`,
+			serverTiming,
 		}
 	}
 
