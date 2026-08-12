@@ -44,6 +44,7 @@ import {
 } from './repo-kody-execution.ts'
 import {
 	createIsolatedCheckPhaseRunner,
+	isolatedBundleChunkConcurrency,
 	isolatedBundleChunkSize,
 	type IsolatedCheckPhaseRunner,
 } from './isolated-check-phases.ts'
@@ -1069,6 +1070,34 @@ export async function runPackageTypecheckLanguageService(input: {
 	}
 }
 
+async function mapPool<T, R>(
+	items: ReadonlyArray<T>,
+	concurrency: number,
+	mapper: (item: T) => Promise<R>,
+): Promise<Array<R>> {
+	if (items.length === 0) return []
+	const limit = Math.max(1, Math.min(concurrency, items.length))
+	const results: Array<R> = []
+	let nextIndex = 0
+	let firstError: unknown
+	async function worker() {
+		while (nextIndex < items.length) {
+			const index = nextIndex
+			nextIndex += 1
+			const item = items[index]
+			if (item === undefined) return
+			try {
+				results[index] = await mapper(item)
+			} catch (error) {
+				firstError ??= error
+			}
+		}
+	}
+	await Promise.all(Array.from({ length: limit }, () => worker()))
+	if (firstError !== undefined) throw firstError
+	return results
+}
+
 async function runChunkedBundleValidation(input: {
 	runner: IsolatedCheckPhaseRunner
 	stagingKey: string
@@ -1076,25 +1105,32 @@ async function runChunkedBundleValidation(input: {
 	userId: string
 	entryPoints: Array<PackageBundleTarget>
 }) {
-	const failures: Array<string> = []
+	const chunks: Array<Array<PackageBundleTarget>> = []
 	for (
 		let start = 0;
 		start < input.entryPoints.length;
 		start += isolatedBundleChunkSize
 	) {
-		const chunk = input.entryPoints.slice(
-			start,
-			start + isolatedBundleChunkSize,
-		)
-		const outcome = await input.runner.run({
-			phase: 'bundle-chunk',
-			stagingKey: input.stagingKey,
-			baseUrl: input.baseUrl,
-			userId: input.userId,
-			bundleTargets: chunk,
-		})
-		if (!outcome.ok) failures.push(outcome.message)
+		chunks.push(input.entryPoints.slice(start, start + isolatedBundleChunkSize))
 	}
+	// Each chunk runs in its own throwaway isolate. Cap how many of those
+	// isolates one check request starts together so a many-export package
+	// cannot stampede Durable Object capacity.
+	const outcomes = await mapPool(
+		chunks,
+		isolatedBundleChunkConcurrency,
+		(bundleTargets) =>
+			input.runner.run({
+				phase: 'bundle-chunk',
+				stagingKey: input.stagingKey,
+				baseUrl: input.baseUrl,
+				userId: input.userId,
+				bundleTargets,
+			}),
+	)
+	const failures = outcomes
+		.filter((outcome) => !outcome.ok)
+		.map((outcome) => outcome.message)
 	return {
 		ok: failures.length === 0,
 		message:
@@ -1313,7 +1349,7 @@ export async function runRepoChecks(input: {
 	let typecheckResult: RepoCheckResult
 	let bundleCheckResult: { ok: boolean; message: string }
 	try {
-		typecheckResult = await (async (): Promise<RepoCheckResult> => {
+		const runTypecheckPhase = async (): Promise<RepoCheckResult> => {
 			if (missingCallableTypecheckTargets.length > 0) {
 				return {
 					kind: 'typecheck',
@@ -1357,38 +1393,70 @@ export async function runRepoChecks(input: {
 							targets: callableTypecheckTargets,
 						})
 			return { kind: 'typecheck', ...outcome }
-		})()
+		}
 
-		bundleCheckResult =
-			missingBundleTargets.length > 0
-				? {
-						ok: false,
-						message: formatBundleCheckMessage({
-							missingEntryPoints: missingBundleTargets,
-							targetCount: bundleTargets.length,
-						}),
-					}
-				: bundleContext
-					? isolatedRunner && stagingKey
-						? await runChunkedBundleValidation({
-								runner: isolatedRunner,
-								stagingKey,
-								baseUrl: bundleContext.baseUrl,
-								userId: bundleContext.userId,
-								entryPoints: bundleTargets,
-							})
-						: await validatePackageBundles({
-								...bundleContext,
-								sourceFiles,
-								entryPoints: bundleTargets,
-							})
-					: {
-							ok: true,
-							message: formatBundleCheckMessage({
-								missingEntryPoints: missingBundleTargets,
-								targetCount: bundleTargets.length,
-							}),
-						}
+		const runBundlePhase = async (): Promise<{
+			ok: boolean
+			message: string
+		}> => {
+			if (missingBundleTargets.length > 0) {
+				return {
+					ok: false,
+					message: formatBundleCheckMessage({
+						missingEntryPoints: missingBundleTargets,
+						targetCount: bundleTargets.length,
+					}),
+				}
+			}
+			if (!bundleContext) {
+				return {
+					ok: true,
+					message: formatBundleCheckMessage({
+						missingEntryPoints: missingBundleTargets,
+						targetCount: bundleTargets.length,
+					}),
+				}
+			}
+			if (isolatedRunner && stagingKey) {
+				return await runChunkedBundleValidation({
+					runner: isolatedRunner,
+					stagingKey,
+					baseUrl: bundleContext.baseUrl,
+					userId: bundleContext.userId,
+					entryPoints: bundleTargets,
+				})
+			}
+			return await validatePackageBundles({
+				...bundleContext,
+				sourceFiles,
+				entryPoints: bundleTargets,
+			})
+		}
+
+		// Isolated phases use separate throwaway isolates, so overlapping them
+		// (and overlapping bundle chunks) does not stack DO heap the way the
+		// inline fallback would. Keep the inline path sequential: typecheck
+		// first so its disposable heap never sits on top of resident
+		// esbuild-wasm memory.
+		if (isolatedRunner && stagingKey) {
+			const typecheckPromise = runTypecheckPhase()
+			const bundlePromise = runBundlePhase()
+			const [typecheckSettled, bundleSettled] = await Promise.allSettled([
+				typecheckPromise,
+				bundlePromise,
+			])
+			if (typecheckSettled.status === 'rejected') {
+				throw typecheckSettled.reason
+			}
+			if (bundleSettled.status === 'rejected') {
+				throw bundleSettled.reason
+			}
+			typecheckResult = typecheckSettled.value
+			bundleCheckResult = bundleSettled.value
+		} else {
+			typecheckResult = await runTypecheckPhase()
+			bundleCheckResult = await runBundlePhase()
+		}
 	} finally {
 		if (isolatedRunner && stagingKey) {
 			await isolatedRunner.discard(stagingKey)

@@ -15,6 +15,8 @@ import {
  *
  * - phases never stack their peak memory on top of the session isolate or
  *   each other (esbuild-wasm memory in particular never shrinks once grown),
+ * - callers may overlap typecheck with bundle chunks (and overlap chunks with
+ *   each other) without stacking DO heap — `runRepoChecks` does this,
  * - a package too large for even a single phase surfaces as a failed check
  *   with an actionable message instead of an opaque isolate reset, and
  * - the throwaway instances never touch their own Durable Object storage, so
@@ -33,6 +35,12 @@ const stagingTtlSeconds = 15 * 60
  * fan-out modest for typical packages.
  */
 export const isolatedBundleChunkSize = 4
+/**
+ * Max throwaway isolates running bundle chunks at once. Chunk size bounds
+ * work *inside* one isolate; this bounds how many of those isolates a single
+ * check request may start together.
+ */
+export const isolatedBundleChunkConcurrency = 2
 
 export type IsolatedCheckPhaseRequest =
 	| {
