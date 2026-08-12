@@ -4,20 +4,34 @@
 		{
 			"path": "packages/worker/wrangler.jsonc",
 			"protected_migrations": [
-				{ "tag": "v1", "new_sqlite_classes": ["MCP"] },
-				{ "tag": "v2", "new_sqlite_classes": ["ChatAgent"] },
+				{
+					"tag": "v1",
+					"new_sqlite_classes": ["MCP"]
+				},
+				{
+					"tag": "v2",
+					"new_sqlite_classes": ["ChatAgent"]
+				},
 				{
 					"tag": "v3",
 					"new_sqlite_classes": ["HomeConnectorSession", "HomeMCP"]
 				},
-				{ "tag": "v4", "new_sqlite_classes": ["SchedulerDO"] },
 				{
-					"tag": "v6",
-					"new_sqlite_classes": ["JobManager", "JobRunner"]
+					"tag": "v4",
+					"new_sqlite_classes": ["SchedulerDO"]
 				},
-				{ "tag": "v8", "new_sqlite_classes": ["StorageRunner"] },
-				{ "tag": "v10", "new_sqlite_classes": ["AgentTurnRunner"] },
-				{ "tag": "v11", "new_sqlite_classes": ["RepoSession"] },
+				{
+					"tag": "v8",
+					"new_sqlite_classes": ["StorageRunner"]
+				},
+				{
+					"tag": "v10",
+					"new_sqlite_classes": ["AgentTurnRunner"]
+				},
+				{
+					"tag": "v11",
+					"new_sqlite_classes": ["RepoSession"]
+				},
 				{
 					"tag": "v13",
 					"new_sqlite_classes": ["PackageRealtimeSession"]
@@ -26,103 +40,339 @@
 					"tag": "v14",
 					"new_sqlite_classes": ["PackageServiceInstance"]
 				},
-				{ "tag": "v18", "new_sqlite_classes": ["McpClientHub"] },
+				{
+					"tag": "v18",
+					"new_sqlite_classes": ["McpClientHub"]
+				},
 				{
 					"tag": "v19",
 					"new_sqlite_classes": ["OAuthPurgeCoordinator"]
 				},
-				{ "tag": "v20", "new_sqlite_classes": ["RunLog"] },
-				{ "tag": "v21", "new_sqlite_classes": ["UserMeter"] },
-				{ "tag": "v22", "new_sqlite_classes": ["Mailbox"] },
-				{ "tag": "v23", "new_sqlite_classes": ["StripePlanRefresh"] }
+				{
+					"tag": "v20",
+					"new_sqlite_classes": ["RunLog"]
+				},
+				{
+					"tag": "v21",
+					"new_sqlite_classes": ["UserMeter"]
+				},
+				{
+					"tag": "v22",
+					"new_sqlite_classes": ["Mailbox"]
+				},
+				{
+					"tag": "v23",
+					"new_sqlite_classes": ["StripePlanRefresh"]
+				},
+				{
+					"tag": "v1",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["MCP"]
+				},
+				{
+					"tag": "v2",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["ChatAgent"]
+				},
+				{
+					"tag": "v3",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["HomeConnectorSession", "HomeMCP"]
+				},
+				{
+					"tag": "v4",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["SchedulerDO"]
+				},
+				{
+					"tag": "v8",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["StorageRunner"]
+				},
+				{
+					"tag": "v10",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["AgentTurnRunner"]
+				},
+				{
+					"tag": "v11",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["RepoSession"]
+				},
+				{
+					"tag": "v13",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["PackageRealtimeSession"]
+				},
+				{
+					"tag": "v14",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["PackageServiceInstance"]
+				},
+				{
+					"tag": "v18",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["McpClientHub"]
+				},
+				{
+					"tag": "v19",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["OAuthPurgeCoordinator"]
+				},
+				{
+					"tag": "v20",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["RunLog"]
+				},
+				{
+					"tag": "v21",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["UserMeter"]
+				},
+				{
+					"tag": "v22",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["Mailbox"]
+				},
+				{
+					"tag": "v23",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": ["StripePlanRefresh"]
+				},
+				{
+					"tag": "v1",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["MCP"]
+				},
+				{
+					"tag": "v2",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["ChatAgent"]
+				},
+				{
+					"tag": "v3",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["HomeConnectorSession", "HomeMCP"]
+				},
+				{
+					"tag": "v4",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["SchedulerDO"]
+				},
+				{
+					"tag": "v8",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["StorageRunner"]
+				},
+				{
+					"tag": "v10",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["AgentTurnRunner"]
+				},
+				{
+					"tag": "v11",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["RepoSession"]
+				},
+				{
+					"tag": "v13",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["PackageRealtimeSession"]
+				},
+				{
+					"tag": "v14",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["PackageServiceInstance"]
+				},
+				{
+					"tag": "v18",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["McpClientHub"]
+				},
+				{
+					"tag": "v19",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["OAuthPurgeCoordinator"]
+				},
+				{
+					"tag": "v20",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["RunLog"]
+				},
+				{
+					"tag": "v21",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["UserMeter"]
+				},
+				{
+					"tag": "v22",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["Mailbox"]
+				},
+				{
+					"tag": "v23",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["StripePlanRefresh"]
+				}
 			],
 			"protected_binding_sets": [
 				{
 					"location": "env.production.durable_objects",
 					"bindings": [
-						{ "name": "MCP_OBJECT", "class_name": "MCP" },
+						{
+							"name": "MCP_OBJECT",
+							"class_name": "MCP"
+						},
 						{
 							"name": "REMOTE_CONNECTOR_SESSION",
 							"class_name": "RemoteConnectorSession"
 						},
-						{ "name": "MCP_CLIENT_HUB", "class_name": "McpClientHub" },
+						{
+							"name": "MCP_CLIENT_HUB",
+							"class_name": "McpClientHub"
+						},
 						{
 							"name": "OAUTH_PURGE_COORDINATOR",
 							"class_name": "OAuthPurgeCoordinator"
 						},
-						{ "name": "STORAGE_RUNNER", "class_name": "StorageRunner" },
-						{ "name": "RUN_LOG", "class_name": "RunLog" },
-						{ "name": "USER_METER", "class_name": "UserMeter" },
-						{ "name": "MAILBOX", "class_name": "Mailbox" },
+						{
+							"name": "STORAGE_RUNNER",
+							"class_name": "StorageRunner",
+							"script_name": "kody-runtime"
+						},
+						{
+							"name": "RUN_LOG",
+							"class_name": "RunLog",
+							"script_name": "kody-runtime"
+						},
+						{
+							"name": "USER_METER",
+							"class_name": "UserMeter"
+						},
+						{
+							"name": "MAILBOX",
+							"class_name": "Mailbox"
+						},
 						{
 							"name": "STRIPE_PLAN_REFRESH",
 							"class_name": "StripePlanRefresh"
 						},
-						{ "name": "REPO_SESSION", "class_name": "RepoSession" },
+						{
+							"name": "REPO_SESSION",
+							"class_name": "RepoSession"
+						},
 						{
 							"name": "PACKAGE_REALTIME_SESSION",
-							"class_name": "PackageRealtimeSession"
+							"class_name": "PackageRealtimeSession",
+							"script_name": "kody-runtime"
 						},
 						{
 							"name": "PACKAGE_SERVICE_INSTANCE",
-							"class_name": "PackageServiceInstance"
+							"class_name": "PackageServiceInstance",
+							"script_name": "kody-runtime"
 						}
 					]
 				},
 				{
 					"location": "env.preview.durable_objects",
 					"bindings": [
-						{ "name": "MCP_OBJECT", "class_name": "MCP" },
+						{
+							"name": "MCP_OBJECT",
+							"class_name": "MCP"
+						},
 						{
 							"name": "REMOTE_CONNECTOR_SESSION",
 							"class_name": "RemoteConnectorSession"
 						},
-						{ "name": "MCP_CLIENT_HUB", "class_name": "McpClientHub" },
+						{
+							"name": "MCP_CLIENT_HUB",
+							"class_name": "McpClientHub"
+						},
 						{
 							"name": "OAUTH_PURGE_COORDINATOR",
 							"class_name": "OAuthPurgeCoordinator"
 						},
-						{ "name": "STORAGE_RUNNER", "class_name": "StorageRunner" },
-						{ "name": "RUN_LOG", "class_name": "RunLog" },
-						{ "name": "USER_METER", "class_name": "UserMeter" },
-						{ "name": "MAILBOX", "class_name": "Mailbox" },
+						{
+							"name": "STORAGE_RUNNER",
+							"class_name": "StorageRunner",
+							"script_name": "kody-runtime"
+						},
+						{
+							"name": "RUN_LOG",
+							"class_name": "RunLog",
+							"script_name": "kody-runtime"
+						},
+						{
+							"name": "USER_METER",
+							"class_name": "UserMeter"
+						},
+						{
+							"name": "MAILBOX",
+							"class_name": "Mailbox"
+						},
 						{
 							"name": "STRIPE_PLAN_REFRESH",
 							"class_name": "StripePlanRefresh"
 						},
-						{ "name": "REPO_SESSION", "class_name": "RepoSession" },
+						{
+							"name": "REPO_SESSION",
+							"class_name": "RepoSession"
+						},
 						{
 							"name": "PACKAGE_REALTIME_SESSION",
-							"class_name": "PackageRealtimeSession"
+							"class_name": "PackageRealtimeSession",
+							"script_name": "kody-runtime"
 						},
 						{
 							"name": "PACKAGE_SERVICE_INSTANCE",
-							"class_name": "PackageServiceInstance"
+							"class_name": "PackageServiceInstance",
+							"script_name": "kody-runtime"
 						}
 					]
 				},
 				{
 					"location": "env.test.durable_objects",
 					"bindings": [
-						{ "name": "MCP_OBJECT", "class_name": "MCP" },
+						{
+							"name": "MCP_OBJECT",
+							"class_name": "MCP"
+						},
 						{
 							"name": "REMOTE_CONNECTOR_SESSION",
 							"class_name": "RemoteConnectorSession"
 						},
-						{ "name": "MCP_CLIENT_HUB", "class_name": "McpClientHub" },
+						{
+							"name": "MCP_CLIENT_HUB",
+							"class_name": "McpClientHub"
+						},
 						{
 							"name": "OAUTH_PURGE_COORDINATOR",
 							"class_name": "OAuthPurgeCoordinator"
 						},
-						{ "name": "STORAGE_RUNNER", "class_name": "StorageRunner" },
-						{ "name": "RUN_LOG", "class_name": "RunLog" },
-						{ "name": "USER_METER", "class_name": "UserMeter" },
-						{ "name": "MAILBOX", "class_name": "Mailbox" },
+						{
+							"name": "STORAGE_RUNNER",
+							"class_name": "StorageRunner"
+						},
+						{
+							"name": "RUN_LOG",
+							"class_name": "RunLog"
+						},
+						{
+							"name": "USER_METER",
+							"class_name": "UserMeter"
+						},
+						{
+							"name": "MAILBOX",
+							"class_name": "Mailbox"
+						},
 						{
 							"name": "STRIPE_PLAN_REFRESH",
 							"class_name": "StripePlanRefresh"
 						},
-						{ "name": "REPO_SESSION", "class_name": "RepoSession" },
+						{
+							"name": "REPO_SESSION",
+							"class_name": "RepoSession"
+						},
 						{
 							"name": "PACKAGE_REALTIME_SESSION",
 							"class_name": "PackageRealtimeSession"
@@ -141,20 +391,199 @@
 			"protected_binding_sets": []
 		},
 		{
-			"path": "packages/jobs-worker/wrangler.jsonc",
-			"protected_migrations": [],
+			"path": "packages/runtime-worker/wrangler.jsonc",
+			"protected_migrations": [
+				{
+					"tag": "v1",
+					"location": "env.preview.migrations",
+					"new_sqlite_classes": [
+						"StorageRunner",
+						"RunLog",
+						"PackageRealtimeSession",
+						"PackageServiceInstance"
+					]
+				}
+			],
+			"protected_transfer_migrations": [
+				{
+					"tag": "v1",
+					"transferred_classes": [
+						{
+							"from": "StorageRunner",
+							"from_script": "kody",
+							"to": "StorageRunner"
+						},
+						{
+							"from": "RunLog",
+							"from_script": "kody",
+							"to": "RunLog"
+						},
+						{
+							"from": "PackageRealtimeSession",
+							"from_script": "kody",
+							"to": "PackageRealtimeSession"
+						},
+						{
+							"from": "PackageServiceInstance",
+							"from_script": "kody",
+							"to": "PackageServiceInstance"
+						}
+					]
+				}
+			],
 			"protected_binding_sets": [
 				{
 					"location": "env.production.durable_objects",
-					"bindings": [{ "name": "JOB_MANAGER", "class_name": "JobManager" }]
+					"bindings": [
+						{
+							"name": "STORAGE_RUNNER",
+							"class_name": "StorageRunner"
+						},
+						{
+							"name": "RUN_LOG",
+							"class_name": "RunLog"
+						},
+						{
+							"name": "PACKAGE_REALTIME_SESSION",
+							"class_name": "PackageRealtimeSession"
+						},
+						{
+							"name": "PACKAGE_SERVICE_INSTANCE",
+							"class_name": "PackageServiceInstance"
+						},
+						{
+							"name": "USER_METER",
+							"class_name": "UserMeter",
+							"script_name": "kody"
+						},
+						{
+							"name": "MCP_OBJECT",
+							"class_name": "MCP",
+							"script_name": "kody"
+						},
+						{
+							"name": "REMOTE_CONNECTOR_SESSION",
+							"class_name": "RemoteConnectorSession",
+							"script_name": "kody"
+						},
+						{
+							"name": "MCP_CLIENT_HUB",
+							"class_name": "McpClientHub",
+							"script_name": "kody"
+						},
+						{
+							"name": "MAILBOX",
+							"class_name": "Mailbox",
+							"script_name": "kody"
+						},
+						{
+							"name": "REPO_SESSION",
+							"class_name": "RepoSession",
+							"script_name": "kody"
+						}
+					]
 				},
 				{
 					"location": "env.preview.durable_objects",
-					"bindings": [{ "name": "JOB_MANAGER", "class_name": "JobManager" }]
+					"bindings": [
+						{
+							"name": "STORAGE_RUNNER",
+							"class_name": "StorageRunner"
+						},
+						{
+							"name": "RUN_LOG",
+							"class_name": "RunLog"
+						},
+						{
+							"name": "PACKAGE_REALTIME_SESSION",
+							"class_name": "PackageRealtimeSession"
+						},
+						{
+							"name": "PACKAGE_SERVICE_INSTANCE",
+							"class_name": "PackageServiceInstance"
+						},
+						{
+							"name": "USER_METER",
+							"class_name": "UserMeter",
+							"script_name": "kody"
+						},
+						{
+							"name": "MCP_OBJECT",
+							"class_name": "MCP",
+							"script_name": "kody"
+						},
+						{
+							"name": "REMOTE_CONNECTOR_SESSION",
+							"class_name": "RemoteConnectorSession",
+							"script_name": "kody"
+						},
+						{
+							"name": "MCP_CLIENT_HUB",
+							"class_name": "McpClientHub",
+							"script_name": "kody"
+						},
+						{
+							"name": "MAILBOX",
+							"class_name": "Mailbox",
+							"script_name": "kody"
+						},
+						{
+							"name": "REPO_SESSION",
+							"class_name": "RepoSession",
+							"script_name": "kody"
+						}
+					]
+				}
+			]
+		},
+		{
+			"path": "packages/jobs-worker/wrangler.jsonc",
+			"protected_migrations": [
+				{
+					"tag": "v1",
+					"location": "env.test.migrations",
+					"new_sqlite_classes": ["JobManager"]
+				}
+			],
+			"protected_binding_sets": [
+				{
+					"location": "env.production.durable_objects",
+					"bindings": [
+						{
+							"name": "JOB_MANAGER",
+							"class_name": "JobManager"
+						}
+					]
+				},
+				{
+					"location": "env.preview.durable_objects",
+					"bindings": [
+						{
+							"name": "JOB_MANAGER",
+							"class_name": "JobManager"
+						}
+					]
 				},
 				{
 					"location": "env.test.durable_objects",
-					"bindings": [{ "name": "JOB_MANAGER", "class_name": "JobManager" }]
+					"bindings": [
+						{
+							"name": "JOB_MANAGER",
+							"class_name": "JobManager"
+						}
+					]
+				}
+			],
+			"protected_transfer_migrations": [
+				{
+					"tag": "v1",
+					"transferred_classes": [
+						{
+							"from": "JobManager",
+							"from_script": "kody-production",
+							"to": "JobManager"
+						}
+					]
 				}
 			]
 		}

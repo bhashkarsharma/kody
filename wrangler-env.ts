@@ -16,6 +16,7 @@ import {
 	jobsWorkerWranglerConfigPath,
 	resolveWranglerConfigPath,
 } from './tools/wrangler-env-config.ts'
+import { writeLocalRuntimeDevConfig } from './tools/local-runtime-dev-config.ts'
 
 const envName = process.env.CLOUDFLARE_ENV ?? 'production'
 const portWaitTimeoutMs = 5000
@@ -33,6 +34,7 @@ const hasInspectorPortFlag = args.some(
 )
 
 const commandArgs = [...args]
+let shouldAddRuntimeDevConfig = false
 
 if (
 	!hasConfigFlag &&
@@ -52,16 +54,42 @@ if (
 	) {
 		commandArgs.push('--config', jobsWorkerWranglerConfigPath)
 	}
+	// Multi-worker local dev (ADR 0016): the main worker's production env
+	// binds the runtime worker (RUNTIME_WORKER service binding plus
+	// cross-script Durable Objects), so `wrangler dev` runs both scripts in
+	// one Miniflare via a secondary --config, which resolves those bindings
+	// locally. The secondary config is a generated local-dev variant (see
+	// tools/local-runtime-dev-config.ts) because wrangler applies `--var`
+	// only to the primary config, registers workers under `<name>-<env>`,
+	// and treats a secondary `ai` binding as always-remote.
+	const runtimeWorkerConfigPath = 'packages/runtime-worker/wrangler.jsonc'
+	// The test env runs the runtime lane in-process (no RUNTIME_WORKER
+	// binding), and the runtime config defines no test env.
+	if (
+		args[0] === 'dev' &&
+		envName !== 'test' &&
+		existsSync(
+			resolveWranglerConfigPath(runtimeWorkerConfigPath, process.cwd()),
+		)
+	) {
+		shouldAddRuntimeDevConfig = true
+	}
 }
 
 // The main worker config references pre-bundled modules in `src/generated/`
 // (see tools/build-worker-bundler-modules.ts), so make sure they exist before
 // any wrangler command that builds the worker. Skipped for explicit `--config`
-// invocations (mock servers, backup control plane) which don't use them.
+// invocations (mock servers, backup control plane) which don't use them —
+// except the runtime worker, whose entry module lives in the same source
+// tree as the main worker and imports the same generated modules.
 const isWorkerBuildCommand = ['dev', 'build', 'deploy', 'versions'].includes(
 	args[0] ?? '',
 )
-if (isWorkerBuildCommand && !hasConfigFlag) {
+const configArgValue = getArgValue(args, '--config')
+const isRuntimeWorkerConfig = Boolean(
+	configArgValue?.includes('runtime-worker'),
+)
+if (isWorkerBuildCommand && (!hasConfigFlag || isRuntimeWorkerConfig)) {
 	await ensureWorkerBundlerModules()
 }
 
@@ -119,6 +147,16 @@ if (isDevCommand && !hasInspectorPortFlag) {
 		}),
 	)
 	commandArgs.push('--inspector-port', resolvedInspectorPort)
+}
+
+if (shouldAddRuntimeDevConfig) {
+	const runtimeDevConfigPath = await writeLocalRuntimeDevConfig({
+		runtimeConfigPath: 'packages/runtime-worker/wrangler.jsonc',
+		envName,
+		mainWorkerDevName: `kody-${envName}`,
+		port: resolvedPort,
+	})
+	commandArgs.push('--config', runtimeDevConfigPath)
 }
 
 const processEnv = {

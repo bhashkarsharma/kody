@@ -129,28 +129,17 @@ test('writeGeneratedWranglerConfig preserves migrations and copies environment a
 			{ binding: 'COMMUNITY_ASSETS', bucket_name: 'kody-community-assets' },
 			{ binding: 'EMAIL_BLOBS', bucket_name: 'kody-email-blobs' },
 		])
-		// Hosted package apps need their own registrable domain attached to the
-		// Worker. The routes are generated from the base-URL vars rather than
-		// committed, because a committed route would make `wrangler dev` resolve
-		// every local request as that production host.
-		//
-		// `routes` replaces the Worker's whole custom-domain set, so the app origin
-		// must be listed too: publishing only the package-app domain detaches
-		// heykody.dev and deletes its DNS record.
+		// The routes are generated from the base-URL vars rather than committed,
+		// because a committed route would make `wrangler dev` resolve every local
+		// request as that production host. The package-app host is attached to
+		// the runtime Worker (ADR 0016), so the main Worker publishes only the
+		// app origin (plus legacy origins).
 		const packageAppBaseUrl =
 			productionConfig.env?.production?.vars?.PACKAGE_APP_BASE_URL
 		expect(typeof packageAppBaseUrl).toBe('string')
 		const packageAppHostname = new URL(String(packageAppBaseUrl)).hostname
 		expect(productionConfig.env?.production?.routes).toEqual([
 			{ pattern: 'heykody.dev', custom_domain: true },
-			{
-				pattern: packageAppHostname,
-				custom_domain: true,
-			},
-			{
-				pattern: `*.${packageAppHostname}/*`,
-				zone_name: packageAppHostname,
-			},
 		])
 		// Publishing routes otherwise drops the workers.dev trigger.
 		expect(productionConfig.env?.production?.workers_dev).toBe(true)
@@ -325,18 +314,10 @@ test('writeGeneratedWranglerConfig keeps legacy app hosts attached during a doma
 			}
 		}>(await readFile(outPath, 'utf8'))
 		const packageAppBaseUrl = config.env?.production?.vars?.PACKAGE_APP_BASE_URL
-		const packageAppHostname = new URL(String(packageAppBaseUrl)).hostname
+		expect(typeof packageAppBaseUrl).toBe('string')
 		expect(config.env?.production?.routes).toEqual([
 			{ pattern: 'heykody.app', custom_domain: true },
 			{ pattern: 'heykody.dev', custom_domain: true },
-			{
-				pattern: packageAppHostname,
-				custom_domain: true,
-			},
-			{
-				pattern: `*.${packageAppHostname}/*`,
-				zone_name: packageAppHostname,
-			},
 		])
 
 		// A legacy host equal to the package-app domain would silently collapse

@@ -72,10 +72,12 @@
 			"new_sqlite_classes": ["SchedulerDO"],
 			"tag": "v4",
 		},
-		{
-			"new_sqlite_classes": ["JobManager", "JobRunner"],
-			"tag": "v6",
-		},
+		// v6 (JobManager+JobRunner) and v9 (delete JobRunner) are omitted:
+		// JobManager moved to the jobs worker (ADR 0016) and is no longer
+		// exported here, so a fresh script replaying this chain (local dev,
+		// a new deployment) must not create it. The deployed production
+		// script is already past these tags, so wrangler's migration diff
+		// for it is unaffected.
 		{
 			"deleted_classes": ["SchedulerDO"],
 			"tag": "v7",
@@ -83,10 +85,6 @@
 		{
 			"new_sqlite_classes": ["StorageRunner"],
 			"tag": "v8",
-		},
-		{
-			"deleted_classes": ["JobRunner"],
-			"tag": "v9",
 		},
 		{
 			"new_sqlite_classes": ["AgentTurnRunner"],
@@ -196,11 +194,24 @@
 					"binding": "APP_LOADER",
 				},
 			],
+			// The runtime lane's workflow moved to the kody-runtime script (ADR
+			// 0016); MCP durable escalation in this Worker starts instances over
+			// the cross-script binding.
 			"workflows": [
 				{
 					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-dynamic-callable-workflows",
+					"name": "kody-runtime-dynamic-callable-workflows",
 					"class_name": "DynamicCallableWorkflow",
+					"script_name": "kody-runtime",
+				},
+			],
+			// Package runtime Worker (ADR 0016): runtime-owned requests are
+			// forwarded wholesale over this service binding (see
+			// packages/worker/src/runtime-worker-routing.ts).
+			"services": [
+				{
+					"binding": "RUNTIME_WORKER",
+					"service": "kody-runtime",
 				},
 			],
 			"assets": {
@@ -234,13 +245,18 @@
 						"class_name": "OAuthPurgeCoordinator",
 						"name": "OAUTH_PURGE_COORDINATOR",
 					},
+					// Runtime-owned Durable Objects live in the kody-runtime script
+					// (ADR 0016); storage transferred there via that script's
+					// `transferred_classes` migration.
 					{
 						"class_name": "StorageRunner",
 						"name": "STORAGE_RUNNER",
+						"script_name": "kody-runtime",
 					},
 					{
 						"class_name": "RunLog",
 						"name": "RUN_LOG",
+						"script_name": "kody-runtime",
 					},
 					{
 						"class_name": "UserMeter",
@@ -261,10 +277,12 @@
 					{
 						"class_name": "PackageRealtimeSession",
 						"name": "PACKAGE_REALTIME_SESSION",
+						"script_name": "kody-runtime",
 					},
 					{
 						"class_name": "PackageServiceInstance",
 						"name": "PACKAGE_SERVICE_INSTANCE",
+						"script_name": "kody-runtime",
 					},
 				],
 			},
@@ -585,8 +603,18 @@
 			"workflows": [
 				{
 					"binding": "DYNAMIC_CALLABLE_WORKFLOWS",
-					"name": "kody-preview-dynamic-callable-workflows",
+					"name": "kody-runtime-preview-dynamic-callable-workflows",
 					"class_name": "DynamicCallableWorkflow",
+					"script_name": "kody-runtime",
+				},
+			],
+			// Preview deploys generate per-PR worker names; the deploy config
+			// generator rewrites "kody-runtime" service/script references to the
+			// PR's runtime worker name (tools/ci/runtime-worker-config.ts).
+			"services": [
+				{
+					"binding": "RUNTIME_WORKER",
+					"service": "kody-runtime",
 				},
 			],
 			"assets": {
@@ -623,10 +651,12 @@
 					{
 						"class_name": "StorageRunner",
 						"name": "STORAGE_RUNNER",
+						"script_name": "kody-runtime",
 					},
 					{
 						"class_name": "RunLog",
 						"name": "RUN_LOG",
+						"script_name": "kody-runtime",
 					},
 					{
 						"class_name": "UserMeter",
@@ -647,10 +677,12 @@
 					{
 						"class_name": "PackageRealtimeSession",
 						"name": "PACKAGE_REALTIME_SESSION",
+						"script_name": "kody-runtime",
 					},
 					{
 						"class_name": "PackageServiceInstance",
 						"name": "PACKAGE_SERVICE_INSTANCE",
+						"script_name": "kody-runtime",
 					},
 				],
 			},
