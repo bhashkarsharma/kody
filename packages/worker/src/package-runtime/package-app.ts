@@ -613,11 +613,27 @@ function isSyntheticPackageAppRequest(request) {
 }
 
 async function startRuntimeRun(runtimeBridge, input) {
-	return await runtimeBridge.packageRuntimeRunStart(input);
+	try {
+		return await runtimeBridge.packageRuntimeRunStart(input);
+	} catch (error) {
+		console.warn('package-app-run-record-start-failed', error);
+		return null;
+	}
 }
 
 function finishRuntimeRun(runtimeBridge, executionCtx, input) {
-	executionCtx.waitUntil(runtimeBridge.packageRuntimeRunFinish(input));
+	// Begin is a WorkerEntrypoint RPC even though beginRunRecord itself is
+	// synchronous. Await it only inside waitUntil, chained before finish, so
+	// the HTTP/realtime response is not blocked on minting the handle.
+	executionCtx.waitUntil(
+		(async () => {
+			const run = await input.run;
+			await runtimeBridge.packageRuntimeRunFinish({
+				...input,
+				run,
+			});
+		})(),
+	);
 }
 
 function resolveRealtimeHandler(userModule, facetName) {
@@ -654,7 +670,7 @@ export class ${packageAppEntrypointName} extends WorkerEntrypoint {
 	async fetch(request) {
 		const runtimeBridge = this.env.${packageAppRuntimeBindingName};
 		const requestUrl = new URL(request.url);
-		const runtimeRun = await startRuntimeRun(runtimeBridge, {
+		const runtimeRun = startRuntimeRun(runtimeBridge, {
 			surface: 'app_fetch',
 			name: requestUrl.pathname,
 			metadata: {
@@ -709,7 +725,7 @@ export class ${packageAppEntrypointName} extends WorkerEntrypoint {
 
 	async handleRealtimeEvent(payload) {
 		const runtimeBridge = this.env.${packageAppRuntimeBindingName};
-		const runtimeRun = await startRuntimeRun(runtimeBridge, {
+		const runtimeRun = startRuntimeRun(runtimeBridge, {
 			surface: 'app_realtime',
 			name: buildFacetName(payload?.facet),
 			sessionId: payload?.sessionId,
@@ -1645,19 +1661,27 @@ async function resolvePackageAppBundledArtifact(input: {
 		sourceFiles,
 		bundleLabel: `Saved package app "${input.savedPackage.kodyId}"`,
 	})
+	// The caller's manifest and source row may come from the freshness-cached
+	// invoke contract and trail a republish by up to the freshness TTL, while
+	// the source-file load above is always current. Re-derive the app entry
+	// from those files and persist against a freshly loaded source row so the
+	// bundle identity matches the commit being built.
+	const rebuildAppEntry = resolvePackageAppEntryFromSourceFiles({
+		sourceFiles,
+		savedPackage: input.savedPackage,
+	})
 	const compiled = await buildKodyAppBundle({
 		env: input.env,
 		baseUrl: input.baseUrl,
 		userId: input.userId,
 		sourceFiles,
-		entryPoint: appEntry,
+		entryPoint: rebuildAppEntry,
 		rootPackageId: input.savedPackage.id,
 		cacheKey: inMemoryCacheKey,
 	})
 	const persistableSource = await resolvePersistablePackageSource({
 		env: input.env,
 		userId: input.userId,
-		source: input.source,
 		sourceId: input.savedPackage.sourceId,
 	})
 	await persistPublishedBundleArtifact({
@@ -1666,7 +1690,7 @@ async function resolvePackageAppBundledArtifact(input: {
 		source: persistableSource,
 		kind: 'app',
 		artifactName: null,
-		entryPoint: appEntry,
+		entryPoint: rebuildAppEntry,
 		mainModule: compiled.mainModule,
 		modules: compiled.modules,
 		dependencies: compiled.dependencies,
@@ -1678,6 +1702,24 @@ async function resolvePackageAppBundledArtifact(input: {
 		},
 	})
 	return compiled
+}
+
+function resolvePackageAppEntryFromSourceFiles(input: {
+	sourceFiles: Record<string, string>
+	savedPackage: { kodyId: string; manifestPath: string }
+}) {
+	const appEntry = getPackageAppEntryPath(
+		resolvePackageAppManifest({
+			sourceFiles: input.sourceFiles,
+			savedPackage: input.savedPackage,
+		}),
+	)
+	if (!appEntry) {
+		throw new Error(
+			`Saved package "${input.savedPackage.kodyId}" does not define kody.app.entry.`,
+		)
+	}
+	return appEntry
 }
 
 async function resolvePackageAppSourceFiles(input: {

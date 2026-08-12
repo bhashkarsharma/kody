@@ -89,6 +89,120 @@ async function collectQueryParamNamesForTest(url: URL) {
 	)(url) as Array<string>
 }
 
+async function extractGeneratedRuntimeRunHelpers() {
+	const sourceText = await readFile(
+		new URL('./package-app.ts', import.meta.url),
+		'utf8',
+	)
+	const start = sourceText.indexOf(
+		'async function startRuntimeRun(runtimeBridge, input) {',
+	)
+	const end = sourceText.indexOf('\nfunction resolveRealtimeHandler', start)
+	if (start < 0 || end < 0) {
+		throw new Error('runtime run helpers were not found.')
+	}
+	return sourceText
+		.slice(start, end)
+		.replaceAll('\\\\', '\\')
+		.replaceAll('\\`', '`')
+		.replaceAll('\\${', '${')
+}
+
+async function createRuntimeRunHelpersForTest() {
+	return new Function(
+		`${await extractGeneratedRuntimeRunHelpers()}; return { startRuntimeRun, finishRuntimeRun };`,
+	)() as {
+		startRuntimeRun: (
+			runtimeBridge: {
+				packageRuntimeRunStart: (input: unknown) => Promise<unknown>
+			},
+			input: unknown,
+		) => Promise<unknown>
+		finishRuntimeRun: (
+			runtimeBridge: {
+				packageRuntimeRunFinish: (input: unknown) => Promise<unknown>
+			},
+			executionCtx: { waitUntil: (promise: Promise<unknown>) => void },
+			input: Record<string, unknown>,
+		) => void
+	}
+}
+
+test('package app fetch does not await run-record begin before user code', async () => {
+	const sourceText = await readFile(
+		new URL('./package-app.ts', import.meta.url),
+		'utf8',
+	)
+	const fetchStart = sourceText.indexOf('async fetch(request) {')
+	const realtimeStart = sourceText.indexOf(
+		'async handleRealtimeEvent(payload) {',
+	)
+	const classEnd = sourceText.indexOf('\n}\n`.trim()', realtimeStart)
+	if (fetchStart < 0 || realtimeStart < 0 || classEnd < 0) {
+		throw new Error('package app worker fetch source was not found.')
+	}
+	const fetchSource = sourceText.slice(fetchStart, realtimeStart)
+	const realtimeSource = sourceText.slice(realtimeStart, classEnd)
+	expect(fetchSource).toContain('const runtimeRun = startRuntimeRun(')
+	expect(fetchSource).not.toContain('await startRuntimeRun(')
+	expect(realtimeSource).toContain('const runtimeRun = startRuntimeRun(')
+	expect(realtimeSource).not.toContain('await startRuntimeRun(')
+})
+
+test('package app run-record finish waits for begin inside waitUntil, not on the response path', async () => {
+	const { startRuntimeRun, finishRuntimeRun } =
+		await createRuntimeRunHelpersForTest()
+	let resolveStart: ((value: { id: string }) => void) | undefined
+	const startGate = new Promise<{ id: string }>((resolve) => {
+		resolveStart = resolve
+	})
+	const startCalls: Array<unknown> = []
+	const finishCalls: Array<unknown> = []
+	const waitUntilTasks: Array<Promise<unknown>> = []
+	const runtimeBridge = {
+		packageRuntimeRunStart: async (input: unknown) => {
+			startCalls.push(input)
+			return await startGate
+		},
+		packageRuntimeRunFinish: async (input: unknown) => {
+			finishCalls.push(input)
+			return { ok: true }
+		},
+	}
+
+	const runtimeRun = startRuntimeRun(runtimeBridge, {
+		surface: 'app_fetch',
+		name: '/',
+	})
+	finishRuntimeRun(
+		runtimeBridge,
+		{
+			waitUntil: (promise) => {
+				waitUntilTasks.push(promise)
+			},
+		},
+		{
+			run: runtimeRun,
+			status: 'success',
+			metadata: { httpStatus: 200 },
+		},
+	)
+
+	expect(startCalls).toEqual([{ surface: 'app_fetch', name: '/' }])
+	expect(finishCalls).toEqual([])
+	expect(waitUntilTasks).toHaveLength(1)
+
+	resolveStart?.({ id: 'run-1' })
+	await Promise.all(waitUntilTasks)
+	expect(finishCalls).toEqual([
+		{
+			run: { id: 'run-1' },
+			status: 'success',
+			metadata: { httpStatus: 200 },
+		},
+	])
+})
+
 test('package app kody proxy supports remote namespace calls', async () => {
 	const calls: Array<{ name: string; args: unknown }> = []
 	const kody = await createKodyProxyForTest({
@@ -328,14 +442,15 @@ function createPackageAppTestSource() {
 	}
 }
 
-function createPackageAppTestManifest() {
+function createPackageAppTestManifest(entry = 'app.js') {
 	return {
 		name: '@kody/example',
+		exports: { '.': `./${entry}` },
 		kody: {
 			id: 'example',
 			description: 'Example package',
 			app: {
-				entry: 'app.js',
+				entry,
 			},
 		},
 	}
@@ -758,6 +873,12 @@ test('buildPackageAppWorker persists rebuilt app artifacts with artifactName nul
 		'bundle-artifact:v1:source-1:commit-1:app:_:app.js',
 	)
 
+	const freshSource = {
+		...createPackageAppTestSource(),
+		published_commit: 'commit-2',
+	}
+	packageAppRuntimeMock.getEntitySourceById.mockResolvedValue(freshSource)
+
 	await buildPackageAppWorker({
 		env,
 		baseUrl: 'https://example.com',
@@ -789,17 +910,88 @@ test('buildPackageAppWorker persists rebuilt app artifacts with artifactName nul
 		} as never,
 	})
 
-	expect(packageAppRuntimeMock.getEntitySourceById).not.toHaveBeenCalled()
+	expect(packageAppRuntimeMock.getEntitySourceById).toHaveBeenCalledTimes(1)
 	expect(packageAppRuntimeMock.buildKodyAppBundle).toHaveBeenCalledTimes(1)
 	expect(
 		packageAppRuntimeMock.persistPublishedBundleArtifact,
 	).toHaveBeenCalledWith(
 		expect.objectContaining({
 			userId: 'user-1',
-			source,
+			source: freshSource,
 			kind: 'app',
 			artifactName: null,
 			entryPoint: 'app.js',
+		}),
+	)
+})
+
+test('an app artifact rebuild resolves its entry point from the fresh source, not the cached manifest', async () => {
+	resetPackageAppRuntimeMocks()
+	const { env } = createPackageAppTestEnv()
+	const cachedSource = createPackageAppTestSource()
+	const freshSource = {
+		...createPackageAppTestSource(),
+		published_commit: 'commit-2',
+	}
+	const staleManifest = createPackageAppTestManifest('stale.js')
+	const freshManifest = createPackageAppTestManifest('fresh.js')
+	packageAppRuntimeMock.loadPublishedBundleArtifactByIdentity.mockResolvedValue(
+		null,
+	)
+	packageAppRuntimeMock.buildKodyAppBundle.mockResolvedValue({
+		mainModule: 'dist/app.js',
+		modules: {
+			'dist/app.js':
+				'export default { fetch() { return new Response("fresh") } }',
+		},
+		dependencies: [],
+		dynamicDependencies: [],
+	})
+	packageAppRuntimeMock.persistPublishedBundleArtifact.mockResolvedValue(
+		'bundle-artifact:v1:source-1:commit-2:app:_:fresh.js',
+	)
+	packageAppRuntimeMock.getEntitySourceById.mockResolvedValue(freshSource)
+
+	await buildPackageAppWorker({
+		env,
+		baseUrl: 'https://example.com',
+		userId: 'user-1',
+		savedPackage: {
+			id: 'package-rebuild-entry',
+			kodyId: 'example-rebuild',
+			name: '@kody/example-rebuild',
+			sourceId: 'source-1',
+			publishedCommit: 'commit-1',
+			manifestPath: 'package.json',
+			sourceRoot: '/',
+		},
+		source: cachedSource,
+		manifest: staleManifest,
+		loadSourceFiles: async () => ({
+			'package.json': JSON.stringify(freshManifest),
+			'fresh.js':
+				'export default { async fetch() { return new Response("v2") } }',
+		}),
+		runtime: {
+			callerContext: {
+				user: {
+					userId: 'user-1',
+					email: 'rebuild@example.com',
+					displayName: 'Rebuild User',
+				},
+			},
+		} as never,
+	})
+
+	expect(packageAppRuntimeMock.buildKodyAppBundle).toHaveBeenCalledWith(
+		expect.objectContaining({ entryPoint: 'fresh.js' }),
+	)
+	expect(
+		packageAppRuntimeMock.persistPublishedBundleArtifact,
+	).toHaveBeenCalledWith(
+		expect.objectContaining({
+			source: freshSource,
+			entryPoint: 'fresh.js',
 		}),
 	)
 })
@@ -820,8 +1012,8 @@ test('buildPackageAppWorker rejects persisting artifacts for a source owned by a
 		dependencies: [],
 		dynamicDependencies: [],
 	})
-	// The pre-resolved source belongs to user-1, so the fast path must be
-	// skipped and the DB lookup (which finds nothing for this user) must fail.
+	// Rebuild always loads the current source row. The lookup finds nothing
+	// for this user, so persist must not run.
 	packageAppRuntimeMock.getEntitySourceById.mockResolvedValue(null)
 
 	await expect(
