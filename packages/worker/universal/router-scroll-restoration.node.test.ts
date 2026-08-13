@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { expect, test } from 'vitest'
+import { runInNewContext } from 'node:vm'
+import { expect, test, vi } from 'vitest'
 import {
 	getScrollRestorationInlineScript,
 	getStoredScrollY,
@@ -37,4 +38,23 @@ test('sessionStorage scroll positions restore the saved Y for the current histor
 	expect(scrollRestorationInlineScriptCspHash).toBe(
 		`'sha256-${createHash('sha256').update(restoreScript, 'utf8').digest('base64')}'`,
 	)
+
+	const scrollTo = vi.fn()
+	const history = {
+		scrollRestoration: 'auto',
+		state: { key: 'scroll-key-1' },
+		replaceState: vi.fn(),
+	}
+	runInNewContext(restoreScript, {
+		window: { history, scrollTo },
+		sessionStorage: {
+			getItem: () => stored,
+			removeItem: vi.fn(),
+		},
+		console,
+		Math,
+	})
+	expect(history.scrollRestoration).toBe('manual')
+	expect(scrollTo).toHaveBeenCalledWith(0, 2000)
+	expect(history.replaceState).not.toHaveBeenCalled()
 })
