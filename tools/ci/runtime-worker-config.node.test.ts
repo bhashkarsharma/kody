@@ -110,8 +110,8 @@ function buildMainGeneratedConfig(envName: string) {
 		],
 		vars: {
 			APP_BASE_URL: 'https://kody-pr-7.example.workers.dev',
-			PACKAGE_APP_BASE_URL:
-				envName === 'production' ? 'https://kodyapps.dev' : '',
+			PACKAGE_APP_BASE_URL: envName === 'production' ? 'https://kody.run' : '',
+			PACKAGE_APP_LEGACY_HOSTS: envName === 'production' ? 'kodyapps.dev' : '',
 		},
 	}
 	return { name: 'kody', env: { [envName]: env } }
@@ -261,10 +261,15 @@ test('generate publishes the package-app custom domain for production', async ()
 			migrations?: Array<{ tag?: string; transferred_classes?: unknown }>
 		}>(await readFile(outConfigPath, 'utf8'))
 
-		// Both package-app routes are zone routes, never custom domains: a
+		// Both package-app zones are zone routes, never custom domains: a
 		// custom domain in a zone whose route table the deploy also publishes
 		// gets detached (deleting its DNS record) when the routes are replaced.
+		// Canonical kody.run plus legacy kodyapps.dev must both stay attached —
+		// omitting the previous zone would detach `*.kodyapps.dev` and delete
+		// its DNS.
 		expect(runtimeConfig.env?.production?.routes).toEqual([
+			{ pattern: 'kody.run/*', zone_name: 'kody.run' },
+			{ pattern: '*.kody.run/*', zone_name: 'kody.run' },
 			{ pattern: 'kodyapps.dev/*', zone_name: 'kodyapps.dev' },
 			{ pattern: '*.kodyapps.dev/*', zone_name: 'kodyapps.dev' },
 		])
@@ -275,6 +280,71 @@ test('generate publishes the package-app custom domain for production', async ()
 		expect(
 			Array.isArray(runtimeConfig.migrations?.[0]?.transferred_classes),
 		).toBe(true)
+	} finally {
+		await rm(tempDir, { force: true, recursive: true })
+	}
+})
+
+test('generate keeps a GitHub PACKAGE_APP_LEGACY_HOSTS overlay on runtime zone routes', async () => {
+	consoleError.mockImplementation(() => {})
+	const tempDir = await mkdtemp(path.join(os.tmpdir(), 'kody-runtime-overlay-'))
+	try {
+		const mainConfig = buildMainGeneratedConfig('production')
+		const productionEnv = mainConfig.env.production as {
+			vars: Record<string, unknown>
+		}
+		// Overlay already applied to the main generated config, the way
+		// `writeGeneratedWranglerConfig` does for a non-empty GitHub var.
+		// Runtime wrangler still commits `kodyapps.dev` only — without
+		// preferring the main overlay, zone routes would omit the extra host.
+		productionEnv.vars.PACKAGE_APP_LEGACY_HOSTS =
+			'kodyapps.dev,legacy-apps.example.org'
+		productionEnv.vars.PACKAGE_APP_LEGACY_REDIRECT = 'true'
+		const mainConfigPath = path.join(tempDir, 'main.generated.json')
+		await writeFile(mainConfigPath, JSON.stringify(mainConfig))
+		const outConfigPath = path.join(tempDir, 'runtime.generated.json')
+
+		await generate({
+			envName: 'production',
+			mainConfigPath,
+			runtimeWorkerName: 'kody-runtime',
+			mainWorkerName: 'kody',
+			baseConfigPath: runtimeBaseConfigPath,
+			outConfigPath,
+		})
+
+		const runtimeConfig = parseJsonc<{
+			env?: {
+				production?: {
+					routes?: Array<{
+						pattern: string
+						zone_name?: string
+					}>
+					vars?: Record<string, unknown>
+				}
+			}
+		}>(await readFile(outConfigPath, 'utf8'))
+
+		expect(runtimeConfig.env?.production?.vars?.PACKAGE_APP_LEGACY_HOSTS).toBe(
+			'kodyapps.dev,legacy-apps.example.org',
+		)
+		expect(
+			runtimeConfig.env?.production?.vars?.PACKAGE_APP_LEGACY_REDIRECT,
+		).toBe('true')
+		expect(runtimeConfig.env?.production?.routes).toEqual([
+			{ pattern: 'kody.run/*', zone_name: 'kody.run' },
+			{ pattern: '*.kody.run/*', zone_name: 'kody.run' },
+			{ pattern: 'kodyapps.dev/*', zone_name: 'kodyapps.dev' },
+			{ pattern: '*.kodyapps.dev/*', zone_name: 'kodyapps.dev' },
+			{
+				pattern: 'legacy-apps.example.org/*',
+				zone_name: 'example.org',
+			},
+			{
+				pattern: '*.legacy-apps.example.org/*',
+				zone_name: 'example.org',
+			},
+		])
 	} finally {
 		await rm(tempDir, { force: true, recursive: true })
 	}
