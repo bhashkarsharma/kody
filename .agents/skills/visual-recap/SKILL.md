@@ -12,8 +12,8 @@ description:
 
 Produce a high-altitude, visual review aid directly in the PR description. No
 deployment, no third-party service: GitHub renders the block (including mermaid
-diagrams), and the PR itself is the storage. A future viewer app can ingest the
-same marker-delimited block via the GitHub API, so follow the format exactly.
+diagrams), and the PR itself is the storage. The marker-delimited block is
+machine-readable via the GitHub API, so follow the format exactly.
 
 The recap is informational and non-blocking. It supplements the PR description
 and normal code review; it never replaces reading the diff.
@@ -70,8 +70,9 @@ new map entry).
 ## Block format
 
 The block lives in the PR description between HTML comment markers, wrapped in
-`<details>`. Fixed section order — a future ingestion process parses this
-structure. Omit optional sections rather than leaving them empty.
+`<details>`. Fixed section order — keep the structure stable so the
+marker-delimited block stays machine-readable. Omit optional sections rather
+than leaving them empty.
 
 ````markdown
 <!-- system-recap:start -->
