@@ -518,3 +518,193 @@ test('resolveArtifactDefaultBranchHead reuses a provided token and still works w
 	expect(info).toHaveBeenCalledTimes(1)
 	expect(gitMocks.listServerRefs).toHaveBeenCalledTimes(1)
 })
+
+test('ensureArtifactRepoReady uses the create result without a follow-up GET', async () => {
+	const env = {
+		CLOUDFLARE_ACCOUNT_ID: 'acct',
+		CLOUDFLARE_API_TOKEN: 'token-123',
+		CLOUDFLARE_API_BASE_URL: 'https://api.example.com',
+	} as Env
+	const fetchMock = vi
+		.spyOn(globalThis, 'fetch')
+		.mockImplementation(async (input, init) => {
+			const url = new URL(String(input))
+			const method = init?.method ?? 'GET'
+			if (method === 'GET' && url.pathname.endsWith('/repos/repo-new')) {
+				return new Response(
+					JSON.stringify({
+						success: false,
+						result: null,
+						errors: [{ code: 1000, message: 'Repo not found' }],
+						messages: [],
+					}),
+					{
+						status: 404,
+						headers: {
+							'content-type': 'application/json',
+							'cf-ray': 'create-miss-ray',
+						},
+					},
+				)
+			}
+			if (method === 'POST' && url.pathname.endsWith('/repos')) {
+				return new Response(
+					JSON.stringify({
+						success: true,
+						result: {
+							id: 'repo_new',
+							name: 'repo-new',
+							description: null,
+							default_branch: 'main',
+							remote:
+								'https://acct.artifacts.cloudflare.net/git/default/repo-new.git',
+							token: 'art_v1_create?expires=1760000000',
+						},
+						errors: [],
+						messages: [],
+					}),
+					{
+						status: 201,
+						headers: {
+							'content-type': 'application/json',
+							'cf-ray': 'create-post-ray',
+						},
+					},
+				)
+			}
+			throw new Error(`Unexpected fetch: ${method} ${url.pathname}`)
+		})
+
+	await expect(ensureArtifactRepoReady(env, 'repo-new')).resolves.toMatchObject(
+		{
+			recreated: true,
+			bootstrapAccess: {
+				defaultBranch: 'main',
+				remote:
+					'https://acct.artifacts.cloudflare.net/git/default/repo-new.git',
+				token: 'art_v1_create?expires=1760000000',
+			},
+			repo: expect.any(Object),
+		},
+	)
+	expect(fetchMock).toHaveBeenCalledTimes(2)
+	fetchMock.mockRestore()
+})
+
+test('getArtifactsBinding prefers the native ARTIFACTS binding for the env namespace', async () => {
+	const created = {
+		id: 'repo_native',
+		name: 'repo-native',
+		description: null,
+		defaultBranch: 'main',
+		remote:
+			'https://acct.artifacts.cloudflare.net/git/production/repo-native.git',
+		token: 'art_v2_native',
+		tokenExpiresAt: '2026-10-09T08:53:20.000Z',
+	}
+	const nativeGet = vi.fn(async () => {
+		const error = new Error('not found') as Error & {
+			name: string
+			code: string
+		}
+		error.name = 'ArtifactsError'
+		error.code = 'NOT_FOUND'
+		throw error
+	})
+	const nativeCreate = vi.fn(async () => created)
+	const env = {
+		ARTIFACTS_NAMESPACE: 'production',
+		ARTIFACTS: {
+			create: nativeCreate,
+			get: nativeGet,
+			delete: vi.fn(async () => true),
+			list: vi.fn(async () => ({ repos: [], total: 0 })),
+		},
+	} as unknown as Env
+
+	const binding = getArtifactsBinding(env)
+	await expect(binding.get('repo-native')).resolves.toEqual({
+		status: 'not_found',
+	})
+	await expect(
+		ensureArtifactRepoReady(env, 'repo-native', binding),
+	).resolves.toMatchObject({
+		recreated: true,
+		bootstrapAccess: {
+			defaultBranch: 'main',
+			remote: created.remote,
+			token: created.token,
+			expiresAt: created.tokenExpiresAt,
+		},
+	})
+	expect(nativeCreate).toHaveBeenCalledWith('repo-native', { readOnly: false })
+	expect(nativeGet).toHaveBeenCalledTimes(2)
+
+	nativeGet.mockClear()
+	nativeCreate.mockImplementation(async () => ({
+		id: 'repo_native_no_exp',
+		name: 'repo-native-no-exp',
+		description: null,
+		defaultBranch: 'main',
+		remote:
+			'https://acct.artifacts.cloudflare.net/git/production/repo-native-no-exp.git',
+		token: 'art_v2_native?expires=1760000000',
+	}))
+	await expect(
+		ensureArtifactRepoReady(env, 'repo-native-no-exp', binding),
+	).resolves.toMatchObject({
+		recreated: true,
+		bootstrapAccess: {
+			token: 'art_v2_native?expires=1760000000',
+			expiresAt: '2025-10-09T08:53:20.000Z',
+		},
+	})
+})
+
+test('artifacts REST logs redact plaintext tokens on revoke', async () => {
+	const plaintext = 'art_v1_secret?expires=1760000100'
+	const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+	const fetchMock = vi
+		.spyOn(globalThis, 'fetch')
+		.mockImplementation(async (input, init) => {
+			const url = new URL(String(input))
+			const method = init?.method ?? 'GET'
+			expect(method).toBe('DELETE')
+			expect(url.pathname).toContain(`/tokens/${encodeURIComponent(plaintext)}`)
+			return new Response(
+				JSON.stringify({
+					success: true,
+					result: null,
+					errors: [],
+					messages: [],
+				}),
+				{
+					status: 200,
+					headers: {
+						'content-type': 'application/json',
+						'cf-ray': 'revoke-ray-1',
+					},
+				},
+			)
+		})
+
+	const env = {
+		CLOUDFLARE_ACCOUNT_ID: 'acct',
+		CLOUDFLARE_API_TOKEN: 'token-123',
+		CLOUDFLARE_API_BASE_URL: 'https://api.example.com',
+	} as Env
+	await getArtifactsBinding(env).repo('repo-1').revokeToken?.(plaintext)
+
+	const logged = info.mock.calls.filter((call) => call[0] === 'artifacts-rest')
+	expect(logged).toHaveLength(1)
+	expect(logged[0]?.[1]).toEqual({
+		method: 'DELETE',
+		path: '/client/v4/accounts/acct/artifacts/namespaces/default/tokens/:token',
+		status: 200,
+		cfRay: 'revoke-ray-1',
+	})
+	expect(JSON.stringify(logged)).not.toContain(plaintext)
+	expect(JSON.stringify(logged)).not.toContain(encodeURIComponent(plaintext))
+	info.mockRestore()
+	fetchMock.mockRestore()
+})

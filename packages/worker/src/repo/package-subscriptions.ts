@@ -20,7 +20,6 @@ import {
 	repoPushedTopic,
 	topicForArtifactsRepoEvent,
 } from './artifacts-events.ts'
-import { ensureArtifactsRepoPushSubscription } from './artifacts-push-subscriptions.ts'
 import { getEntitySourceByRepoId } from './entity-sources.ts'
 import { type EntitySourceRow } from './types.ts'
 import { getUserRepoById } from './user-repos.ts'
@@ -186,6 +185,8 @@ function buildSubscriptionIdempotencyKey(input: {
 			if (input.event.type !== 'cf.artifacts.repo.pushed') {
 				throw new Error('repo.pushed idempotency requires a pushed event')
 			}
+			// Omit source.type so account-level and leftover repo-scoped
+			// publications of the same push collapse to one invocation.
 			return `repo-push:${input.repoId}:${input.event.payload.after}:${input.event.payload.ref}:${input.packageId}`
 		}
 		case repoCreatedTopic:
@@ -408,15 +409,6 @@ export async function processCloudflareArtifactsRepoEvent(input: {
 	)
 	if (!source) {
 		return { outcome: 'unmatched', providerEvent }
-	}
-
-	if (providerEvent.type === 'cf.artifacts.repo.created') {
-		await ensureArtifactsRepoPushSubscription({
-			env: input.env,
-			userId: source.user_id,
-			sourceId: source.id,
-			repoName: source.repo_id,
-		})
 	}
 
 	await dispatchRepoSubscriptionEvents({
