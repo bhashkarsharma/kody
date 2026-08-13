@@ -1,6 +1,7 @@
 import { type Handle, css } from 'remix/ui'
-import { planLimits, type PlanLimits } from '#universal/plans.ts'
+import { readAppSession } from '#client/app-session-context.tsx'
 import { reveal } from '#client/reveal.ts'
+import { planLimits, type PlanLimits } from '#universal/plans.ts'
 import { colors, radius, typography } from '#universal/styles/tokens.ts'
 import {
 	getGhostButtonCss,
@@ -95,137 +96,154 @@ const limitGroups: ReadonlyArray<LimitGroup> = [
 	},
 ]
 
-export function PricingRoute(_handle: Handle) {
-	return () => (
-		<section mix={css(pricingCss)}>
-			<header mix={css(pageHeadCss)}>
-				<h1 data-rise style={{ '--rise': '0' }}>
-					Start free.
-					<br />
-					Pay when it <em>earns it</em>.
-				</h1>
-				<p data-rise style={{ '--rise': '1' }}>
-					Standard is $12 a month when you need more room to run; Pro is $29 for
-					heavy daily automation. Pay annually and it&rsquo;s $10/mo or $24/mo
-					(two months free). No metered surprises — every limit is finite and
-					published below.
-				</p>
-			</header>
+export function PricingRoute(handle: Handle) {
+	return () => {
+		const isSignedIn = readAppSession(handle).session !== null
+		return (
+			<section mix={css(pricingCss)}>
+				<header mix={css(pageHeadCss)}>
+					<h1 data-rise style={{ '--rise': '0' }}>
+						Start free.
+						<br />
+						Pay when Kody <em>earns it</em>.
+					</h1>
+				</header>
 
-			<div mix={css(plansCss)}>
-				<section
-					aria-labelledby="plan-free"
-					mix={[css(planPanelCss), reveal()]}
-				>
-					<h2 id="plan-free" mix={css(planTitleCss)}>
-						Free
-					</h2>
-					<p mix={css(planPriceCss)}>$0</p>
-					<p mix={css(planCopyCss)}>
-						Enough to build useful automations and find out whether Kody earns a
-						place in your setup.
-					</p>
-					<a href="/signup" mix={css(planPillButtonCss)}>
-						Create a free account
-					</a>
-				</section>
+				<div mix={css(plansCss)}>
+					<section
+						aria-labelledby="plan-free"
+						mix={[css(planPanelCss), reveal()]}
+					>
+						<h2 id="plan-free" mix={css(planTitleCss)}>
+							Free
+						</h2>
+						<p mix={css(planPriceCss)}>$0</p>
+						<p mix={css(planCopyCss)}>
+							Enough to build useful automations and find out whether Kody earns
+							a place in your setup.
+						</p>
+						<a href="/signup" mix={css(planPillButtonCss)}>
+							Create a free account
+						</a>
+					</section>
 
-				{/*
-				 * Standard carries the accent. The prototype accented the one
-				 * paid plan, and Standard is that plan — Pro is the newer
-				 * tier above it. Accenting both would make the border stop
-				 * meaning anything.
-				 */}
-				<section
-					aria-labelledby="plan-standard"
-					mix={[css(featuredPlanPanelCss), reveal(90)]}
-				>
-					<h2 id="plan-standard" mix={css(planTitleCss)}>
-						Standard
-					</h2>
-					<p mix={css(featuredPlanPriceCss)}>
-						$12<small mix={css(planPriceUnitCss)}>/month</small>
-					</p>
-					<p mix={css(planPriceNoteCss)}>$10/mo billed annually</p>
-					<p mix={css(planCopyCss)}>
-						Higher daily volume, more running services, and persistent package
-						services.
-					</p>
-					<a href="/account/billing" mix={css(planGhostButtonCss)}>
-						Upgrade in Account settings
-					</a>
-				</section>
+					{/*
+					 * Standard carries the accent. The prototype accented the one
+					 * paid plan, and Standard is that plan — Pro is the newer
+					 * tier above it. Accenting both would make the border stop
+					 * meaning anything.
+					 */}
+					<section
+						aria-labelledby="plan-standard"
+						mix={[css(featuredPlanPanelCss), reveal(90)]}
+					>
+						<h2 id="plan-standard" mix={css(planTitleCss)}>
+							Standard
+						</h2>
+						<p mix={css(featuredPlanPriceCss)}>
+							$12<small mix={css(planPriceUnitCss)}>/month</small>
+						</p>
+						<p mix={css(planPriceNoteCss)}>$10/mo billed annually</p>
+						<p mix={css(planCopyCss)}>
+							Higher daily volume, more running services, and persistent package
+							services.
+						</p>
+						{renderPaidPlanCta(isSignedIn)}
+					</section>
 
-				<section
-					aria-labelledby="plan-pro"
-					mix={[css(planPanelCss), reveal(180)]}
-				>
-					<h2 id="plan-pro" mix={css(planTitleCss)}>
-						Pro
-					</h2>
-					<p mix={css(planPriceCss)}>
-						$29<small mix={css(planPriceUnitCss)}>/month</small>
-					</p>
-					<p mix={css(planPriceNoteCss)}>$24/mo billed annually</p>
-					<p mix={css(planCopyCss)}>
-						For heavy daily automation — roughly double Standard on every axis.
-					</p>
-					<a href="/account/billing" mix={css(planGhostButtonCss)}>
-						Upgrade in Account settings
-					</a>
-				</section>
-			</div>
-
-			<section aria-labelledby="limits-title" mix={css(limitsCss)}>
-				<h2 id="limits-title" mix={css(limitsTitleCss)}>
-					Every limit is finite
-				</h2>
-				<p mix={css(limitsLeadCss)}>
-					No &ldquo;unlimited&rdquo; asterisks. These values come directly from
-					the limits Kody enforces.
-				</p>
-				<div mix={css(limitsScrollCss)}>
-					<table mix={css(limitsTableCss)}>
-						<thead>
-							<tr>
-								<th scope="col">
-									<span mix={css(visuallyHiddenCss)}>Resource</span>
-								</th>
-								<th scope="col">
-									<span data-limits-plan>Free</span>
-									<span data-limits-price>$0</span>
-								</th>
-								<th scope="col">
-									<span data-limits-plan>Standard</span>
-									<span data-limits-price>$12/mo</span>
-									<span data-limits-annual>$10/mo billed annually</span>
-								</th>
-								<th scope="col">
-									<span data-limits-plan>Pro</span>
-									<span data-limits-price>$29/mo</span>
-									<span data-limits-annual>$24/mo billed annually</span>
-								</th>
-							</tr>
-						</thead>
-						<tbody>
-							{limitGroups.flatMap((group) => [
-								<tr key={group.title} data-group>
-									<th colspan={4}>{group.title}</th>
-								</tr>,
-								...group.rows.map((row) => (
-									<tr key={row.key}>
-										<th scope="row">{row.label}</th>
-										{renderLimitCell(row, planLimits.free)}
-										{renderLimitCell(row, planLimits.standard)}
-										{renderLimitCell(row, planLimits.pro)}
-									</tr>
-								)),
-							])}
-						</tbody>
-					</table>
+					<section
+						aria-labelledby="plan-pro"
+						mix={[css(planPanelCss), reveal(180)]}
+					>
+						<h2 id="plan-pro" mix={css(planTitleCss)}>
+							Pro
+						</h2>
+						<p mix={css(planPriceCss)}>
+							$29<small mix={css(planPriceUnitCss)}>/month</small>
+						</p>
+						<p mix={css(planPriceNoteCss)}>$24/mo billed annually</p>
+						<p mix={css(planCopyCss)}>
+							For heavy daily automation — roughly double Standard on every
+							axis.
+						</p>
+						{renderPaidPlanCta(isSignedIn)}
+					</section>
 				</div>
+
+				<section aria-labelledby="limits-title" mix={css(limitsCss)}>
+					<h2 id="limits-title" mix={css(limitsTitleCss)}>
+						Here&rsquo;s what you get
+					</h2>
+					<div mix={css(limitsScrollCss)}>
+						<table mix={css(limitsTableCss)}>
+							<thead>
+								<tr>
+									<th scope="col">
+										<span mix={css(visuallyHiddenCss)}>Resource</span>
+									</th>
+									<th scope="col">
+										<span data-limits-plan>Free</span>
+										<span data-limits-price>$0</span>
+									</th>
+									<th scope="col">
+										<span data-limits-plan>Standard</span>
+										<span data-limits-price>$12/mo</span>
+										<span data-limits-annual>$10/mo billed annually</span>
+									</th>
+									<th scope="col">
+										<span data-limits-plan>Pro</span>
+										<span data-limits-price>$29/mo</span>
+										<span data-limits-annual>$24/mo billed annually</span>
+									</th>
+								</tr>
+							</thead>
+							<tbody>
+								{limitGroups.flatMap((group) => [
+									<tr key={group.title} data-group>
+										<th colspan={4}>{group.title}</th>
+									</tr>,
+									...group.rows.map((row) => (
+										<tr key={row.key}>
+											<th scope="row">{row.label}</th>
+											{renderLimitCell(row, planLimits.free)}
+											{renderLimitCell(row, planLimits.standard)}
+											{renderLimitCell(row, planLimits.pro)}
+										</tr>
+									)),
+								])}
+							</tbody>
+						</table>
+					</div>
+				</section>
+
+				<p mix={css(limitsCtaCss)}>
+					{isSignedIn ? (
+						<a href="/account" mix={css(limitsCtaButtonCss)}>
+							Open your account
+						</a>
+					) : (
+						<a href="/#invite" mix={css(limitsCtaButtonCss)}>
+							Join the waiting list
+						</a>
+					)}
+				</p>
 			</section>
-		</section>
+		)
+	}
+}
+
+function renderPaidPlanCta(isSignedIn: boolean) {
+	if (isSignedIn) {
+		return (
+			<a href="/account/billing" mix={css(planGhostButtonCss)}>
+				Upgrade in settings
+			</a>
+		)
+	}
+	return (
+		<button type="button" disabled mix={css(planGhostButtonCss)}>
+			Launch coming soon
+		</button>
 	)
 }
 
@@ -358,6 +376,8 @@ const planButtonSizeCss = {
 	marginTop: 'auto',
 	fontSize: '0.95rem',
 	padding: '0.8rem 1.35rem',
+	maxWidth: '100%',
+	boxSizing: 'border-box' as const,
 	'@media (max-width: 680px)': {
 		marginTop: '0.4rem',
 	},
@@ -390,19 +410,17 @@ const limitsTitleCss = {
 	textAlign: 'center' as const,
 }
 
-const limitsLeadCss = {
-	margin: '0.7rem auto 0',
-	color: colors.textMuted,
-	fontSize: '0.98rem',
-	textAlign: 'center' as const,
-	maxWidth: '52ch',
-	textWrap: 'balance' as const,
-}
-
 const limitsScrollCss = {
 	marginTop: '1.8rem',
 	overflowX: 'auto' as const,
 }
+
+const limitsCtaCss = {
+	margin: '2.4rem 0 0',
+	textAlign: 'center' as const,
+}
+
+const limitsCtaButtonCss = getPillButtonCss()
 
 const limitsTableCss = {
 	width: '100%',

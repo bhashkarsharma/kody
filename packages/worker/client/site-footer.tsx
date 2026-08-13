@@ -108,6 +108,8 @@ const footerNavCss = {
 	'& a': {
 		color: colors.textMuted,
 		textDecoration: 'none',
+		whiteSpace: 'nowrap' as const,
+		flexShrink: 0,
 		// Same fast color ease as the header nav — one voice for nav links.
 		transition: `color ${transitions.fast}`,
 	},

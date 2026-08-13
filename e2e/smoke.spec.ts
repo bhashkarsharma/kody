@@ -18,7 +18,7 @@ test('smoke test covers shell, auth redirect, and login', async ({ page }) => {
 	).toBeVisible()
 	await expect(
 		page.getByRole('heading', {
-			name: /When your agent figures it out,\s*Kody makes it permanent\./i,
+			name: /Kody makes your agent\s*safer, cheaper, and more reliable\./i,
 		}),
 	).toBeVisible()
 

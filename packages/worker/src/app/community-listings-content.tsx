@@ -4,6 +4,7 @@ import { type Handle, css } from 'remix/ui'
 import { renderToString } from 'remix/ui/server'
 import { type PublicCommunityListing } from '#app/community-public.ts'
 import { formatCommunityAdaptationEffort } from '#universal/community-display.ts'
+import { renderCommunityEmptyState } from '#universal/community-empty-state.tsx'
 import { CommunityListingIcon } from '#universal/community-listing-icon.tsx'
 import { renderCommunityListingName } from '#universal/community-listing-name.tsx'
 import { getCommunityListingHref } from '#universal/community-links.ts'
@@ -40,11 +41,7 @@ export function CommunityListingsContent(
 	return () => (
 		<div data-testid="community-listings-frame">
 			{listings.length === 0 ? (
-				<p mix={css(emptyStateCss)}>
-					{query
-						? 'No community packages matched your search.'
-						: 'No community packages have been published yet.'}
-				</p>
+				renderCommunityEmptyState(query)
 			) : (
 				<ul mix={css(listingGridCss)}>
 					{listings.map((listing, index) => (
@@ -172,12 +169,6 @@ export async function renderCommunityListingsContentHtml(
 }
 
 /* ---------- styles ---------- */
-
-const emptyStateCss = {
-	margin: 'clamp(2.2rem, 5vw, 3.5rem) 0 0',
-	color: colors.textMuted,
-	fontSize: '0.98rem',
-}
 
 const listingGridCss = {
 	listStyle: 'none',

@@ -65,19 +65,15 @@ const factoryBeats = [
 	},
 ] as const
 
-const permanenceClaims = [
-	{
-		title: 'No model in the loop',
-		copy: 'Saved packages run on cron, webhook, or invoke. No tokens, no prompt drift, nothing waiting on a model.',
-	},
-	{
-		title: 'Keys the agent never sees',
-		copy: "Secrets stay server-side and never enter the prompt or your agent's context.",
-	},
-	{
-		title: 'Every install is a fork you own',
-		copy: 'Community packages land in your git, on your credentials, that you can open, change, and republish.',
-	},
+const hostAgents = [
+	{ label: 'Cursor', icon: 'cursor' },
+	{ label: 'Claude Code', icon: 'claudecode' },
+	{ label: 'ChatGPT', icon: 'chatgpt' },
+	{ label: 'Copilot', icon: 'githubcopilot' },
+	{ label: 'Claude', icon: 'claude' },
+	{ label: 'Grok', icon: 'grok' },
+	{ label: 'Grok Bot', icon: 'grokbot' },
+	{ label: 'OpenCode', icon: 'opencode' },
 ] as const
 
 const worldBrands = [
@@ -176,14 +172,17 @@ export function HomeRoute(handle: Handle) {
 				{/* ============ hero ============ */}
 				<section data-parallax-scope mix={css(heroCss)}>
 					<h1 data-rise style={{ '--rise': '0' }} mix={css(heroTitleCss)}>
-						When your agent figures it out,
+						Kody makes your agent
 						<br />
-						Kody makes it <em>permanent</em>.
+						<em>safer, cheaper,</em>{' '}
+						<span mix={css(heroBenefitsRestCss)}>
+							and more <em>reliable</em>.
+						</span>
 					</h1>
 					<p data-rise style={{ '--rise': '1' }} mix={css(heroSubCss)}>
-						A personal <strong>software factory</strong> for the agent you
-						already use. Packages you own, run with no model in the loop, from
-						Cursor, Claude, ChatGPT, or your phone.
+						A personal <strong>software factory</strong>. Turn the ad hoc agent
+						work into deterministic code you can run on a trigger or save tokens
+						with your agent.
 					</p>
 					<div data-rise style={{ '--rise': '2' }} mix={css(heroActionsCss)}>
 						{isSignedIn ? (
@@ -212,9 +211,9 @@ export function HomeRoute(handle: Handle) {
 							</>
 						)}
 					</div>
-					<p data-rise style={{ '--rise': '3' }} mix={css(heroHintCss)}>
+					<p data-rise style={{ '--rise': '3' }} mix={css(heroHintLeadCss)}>
 						Not sure yet? Ask the agent you already use whether Kody would help.
-						No account.
+						No account necessary.
 					</p>
 					{discoveryPrompt ? (
 						<div data-rise style={{ '--rise': '3.2' }} mix={css(heroHintCss)}>
@@ -226,6 +225,9 @@ export function HomeRoute(handle: Handle) {
 							/>
 						</div>
 					) : null}
+					<h2 data-rise style={{ '--rise': '3.4' }} mix={css(heroMeetCss)}>
+						Meet Kody
+					</h2>
 					<div data-rise style={{ '--rise': '1.5' }} mix={css(heroArtCss)}>
 						<HeroStage
 							size="landing"
@@ -247,27 +249,24 @@ export function HomeRoute(handle: Handle) {
 							today can now reach your real accounts.
 						</p>
 						<p mix={css(pitchBodyCss)}>
-							Because your agent does the thinking, Kody gets better every time
-							the models do.
+							Because your agent does the thinking,{' '}
+							<strong>Kody gets better every time your agent does.</strong>
 						</p>
 						<ul aria-label="Agents Kody plugs into" mix={css(pitchHostsCss)}>
+							{hostAgents.map((agent, index) => (
+								<li
+									key={agent.label}
+									mix={[
+										css(getHostChipCss(`/images/icons/${agent.icon}.svg`)),
+										revealPop(index * 35),
+									]}
+								>
+									{agent.label}
+								</li>
+							))}
 							<li
-								mix={[
-									css(getHostChipCss('/images/icons/cursor.svg')),
-									revealPop(0),
-								]}
+								mix={[css(hostsMoreChipCss), revealPop(hostAgents.length * 35)]}
 							>
-								Cursor
-							</li>
-							<li
-								mix={[
-									css(getHostChipCss('/images/icons/claudecode.svg')),
-									revealPop(35),
-								]}
-							>
-								Claude Code
-							</li>
-							<li mix={[css(hostsMoreChipCss), revealPop(70)]}>
 								anything that speaks MCP
 							</li>
 						</ul>
@@ -277,11 +276,12 @@ export function HomeRoute(handle: Handle) {
 				{/* ============ factory loop ============ */}
 				<section aria-labelledby="factory-title" mix={css(factoryCss)}>
 					<h2 id="factory-title" mix={css(sectionHeadingCss)}>
-						Three jobs. Same loop.
+						From ad hoc prompts to durable software
 					</h2>
 					<p mix={css(factoryLeadCss)}>
-						Ask once, save a package, then a cron, webhook, or invoke runs it
-						with no model in the loop.
+						Stop burning your tokens on the same thing over and over again. Turn
+						any process into durable software you can trigger on a schedule,
+						notification, or anything else without expensive inference.
 					</p>
 					<img
 						src="/images/kody-compounding-capabilities.webp"
@@ -291,6 +291,7 @@ export function HomeRoute(handle: Handle) {
 						alt="Kody tending glowing package pods on a small plant"
 						mix={[css(factoryArtCss), reveal()]}
 					/>
+					<p mix={css(factoryExamplesKickerCss)}>For example</p>
 					<div mix={css(factoryBeatsCss)}>
 						{factoryBeats.map((beat, index) => (
 							<article
@@ -305,33 +306,6 @@ export function HomeRoute(handle: Handle) {
 					</div>
 				</section>
 
-				{/* ============ ask once / run forever ============ */}
-				<section aria-labelledby="reliable-title" mix={css(reliableCss)}>
-					<h2 id="reliable-title" mix={css(sectionHeadingCss)}>
-						Ask once.
-						<br />
-						Run it forever.
-					</h2>
-					<p mix={css(reliableLeadCss)}>
-						Ask a typical agent for a weekly report and it re-does every step
-						from scratch, with more chances to go wrong each time. With Kody,
-						your agent writes the code once, tests it, and saves it as a
-						package. Every run after is the same: fast, cheap, predictable. No
-						model in the loop.
-					</p>
-					<ul aria-label="What you cannot get elsewhere" mix={css(claimsCss)}>
-						{permanenceClaims.map((claim, index) => (
-							<li
-								key={claim.title}
-								mix={[css(claimItemCss), reveal(index * 90)]}
-							>
-								<h3>{claim.title}</h3>
-								<p>{claim.copy}</p>
-							</li>
-						))}
-					</ul>
-				</section>
-
 				{/* ============ git + npm ecosystem ============ */}
 				<section aria-labelledby="ecosystem-title" mix={css(ecosystemCss)}>
 					<div>
@@ -339,10 +313,16 @@ export function HomeRoute(handle: Handle) {
 							Your own git and npm.
 						</h2>
 						<p mix={css(splitCopyCss)}>
-							Fork community packages, version them, hang a webhook, a tiny app,
-							or a cron on them. Every install is a fork you own — code in your
-							account, on your credentials, that you can open, change, and
-							republish.
+							Kody gives you a <strong>personal software ecosystem</strong>.
+							Your agent creates repositories and publishes packages, all in
+							your own isolated environment. You can also publish your package
+							to the community to allow others to fork and you can even use
+							public packages on npm as well!
+						</p>
+						<p mix={css(splitCopyCss)}>
+							Then your agents can use your packages to streamline ad hoc work
+							or you can trigger a package to execute in response to a webhook,
+							cron, authenticated HTTP call, or even a Kody-hosted application.
 						</p>
 					</div>
 					<img
@@ -370,15 +350,16 @@ export function HomeRoute(handle: Handle) {
 							Bring your own keys
 						</h2>
 						<p mix={css(splitCopyCss)}>
-							Keys the agent never sees. You create the connection yourself,
-							with your agent walking you through it: your app, your scopes,
-							revocable anytime. Secrets never enter the prompt. No shared app
-							sits between you and your accounts.
+							<strong>Keys the agent never sees.</strong> You create the
+							connection yourself, with your agent walking you through it: your
+							app, your scopes, revocable anytime. Secrets never enter the
+							prompt.
 						</p>
 						<p mix={css(splitCopyCss)}>
-							And there&apos;s no fixed list. If the integration doesn&apos;t
-							exist, your agent builds it on the spot and just asks you to sign
-							in.
+							A few built-in integrations are one-click for simple cases. Need
+							your own scopes, or a provider we don&apos;t host? Your agent
+							registers the app with you. No shared app sits between you and
+							your accounts.
 						</p>
 					</div>
 				</section>
@@ -438,8 +419,7 @@ export function HomeRoute(handle: Handle) {
 						>
 							source is open
 						</a>{' '}
-						— read it, fork it, self-host it. Every claim above links to the
-						code that proves it.
+						— read it, fork it, self-host it.
 					</p>
 				</section>
 
@@ -749,6 +729,10 @@ const heroTitleCss = {
 	},
 }
 
+const heroBenefitsRestCss = {
+	whiteSpace: 'nowrap' as const,
+}
+
 const heroSubCss = {
 	margin: '1.5rem auto 0',
 	fontSize: 'clamp(1.05rem, 1.6vw, 1.2rem)',
@@ -778,8 +762,21 @@ const heroHintCss = {
 	textWrap: 'pretty' as const,
 }
 
+const heroHintLeadCss = {
+	...heroHintCss,
+	marginTop: '2rem',
+}
+
+const heroMeetCss = {
+	margin: 'clamp(2.5rem, 5vw, 4rem) 0 0',
+	fontSize: 'clamp(2.2rem, 5vw, 4rem)',
+	fontWeight: 740,
+	letterSpacing: '-0.03em',
+	lineHeight: 1.04,
+}
+
 const heroArtCss = {
-	marginTop: 'clamp(2.5rem, 5vw, 4rem)',
+	marginTop: '0.85rem',
 	position: 'relative' as const,
 	/* See `pageHeadCss`: the fabric is a backdrop, so it paints under the art. */
 	isolation: 'isolate' as const,
@@ -853,6 +850,10 @@ const pitchBodyCss = {
 	fontSize: '1.05rem',
 	maxWidth: '48ch',
 	textWrap: 'pretty' as const,
+	'& strong': {
+		fontWeight: 700,
+		color: colors.text,
+	},
 	'@media (max-width: 800px)': {
 		fontSize: '1rem',
 		marginInline: 'auto',
@@ -922,7 +923,7 @@ const factoryBeatsCss = {
 	display: 'grid',
 	gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
 	gap: 'clamp(1.75rem, 4vw, 2.5rem) clamp(1.5rem, 3vw, 2.5rem)',
-	marginTop: 'clamp(2rem, 4vw, 3rem)',
+	marginTop: '1.15rem',
 	textAlign: 'left' as const,
 	'@media (max-width: 800px)': {
 		textAlign: 'center' as const,
@@ -936,6 +937,12 @@ const factoryBeatTriggerCss = {
 	letterSpacing: '0.12em',
 	textTransform: 'uppercase' as const,
 	color: colors.primaryText,
+}
+
+const factoryExamplesKickerCss = {
+	...factoryBeatTriggerCss,
+	margin: 'clamp(2rem, 4vw, 3rem) 0 0',
+	fontSize: '1.15rem',
 }
 
 const factoryBeatCss = {
@@ -954,65 +961,6 @@ const factoryBeatCss = {
 	},
 	'@media (max-width: 800px)': {
 		'& p:last-child': {
-			fontSize: '1rem',
-			maxWidth: '46ch',
-			marginInline: 'auto',
-		},
-	},
-}
-
-/* ---------- ask once + claims ---------- */
-
-const reliableCss = {
-	maxWidth: layoutMaxWidths.extended,
-	marginInline: 'auto',
-	padding: `clamp(3.5rem, 8vw, 6.5rem) ${sectionGutter} clamp(2rem, 5vw, 4rem)`,
-	textAlign: 'center' as const,
-	'@media (max-width: 800px)': {
-		padding: '3.25rem 1.25rem 1.75rem',
-	},
-}
-
-const reliableLeadCss = {
-	margin: '1.1rem auto 0',
-	color: colors.textMuted,
-	maxWidth: '54ch',
-	textWrap: 'pretty' as const,
-	'@media (max-width: 800px)': {
-		fontSize: '1rem',
-		maxWidth: '46ch',
-	},
-}
-
-const claimsCss = {
-	listStyle: 'none',
-	margin: 'clamp(2rem, 4vw, 3rem) 0 0',
-	padding: 0,
-	display: 'grid',
-	gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-	gap: 'clamp(1.5rem, 3vw, 2.25rem)',
-	textAlign: 'left' as const,
-	'@media (max-width: 800px)': {
-		textAlign: 'center' as const,
-	},
-}
-
-const claimItemCss = {
-	'& h3': {
-		margin: 0,
-		fontSize: '1.12rem',
-		fontWeight: 700,
-		letterSpacing: '-0.015em',
-	},
-	'& p': {
-		margin: '0.65rem 0 0',
-		color: colors.textMuted,
-		fontSize: '0.98rem',
-		maxWidth: '36ch',
-		textWrap: 'pretty' as const,
-	},
-	'@media (max-width: 800px)': {
-		'& p': {
 			fontSize: '1rem',
 			maxWidth: '46ch',
 			marginInline: 'auto',
@@ -1080,6 +1028,10 @@ const splitCopyCss = {
 	color: colors.textMuted,
 	maxWidth: '48ch',
 	textWrap: 'pretty' as const,
+	'& strong': {
+		fontWeight: 700,
+		color: colors.text,
+	},
 	'@media (max-width: 800px)': {
 		fontSize: '1rem',
 		marginInline: 'auto',

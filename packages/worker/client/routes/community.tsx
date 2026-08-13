@@ -1,6 +1,7 @@
 import { Frame, type Handle, css } from 'remix/ui'
 import { routes } from '#universal/routes.ts'
 import { COMMUNITY_LISTINGS_TARGET } from '#universal/community-frame-constants.ts'
+import { renderCommunityEmptyState } from '#universal/community-empty-state.tsx'
 import { type RouteLoaderResult } from '#client/route-loader.ts'
 import {
 	listenToRouterNavigation,
@@ -124,9 +125,7 @@ export function CommunityRoute(handle: Handle) {
 					name={COMMUNITY_LISTINGS_TARGET}
 					src={frameSrc}
 					fallback={
-						<p role="status" mix={css(communityFrameFallbackCss)}>
-							Loading community packages…
-						</p>
+						<div role="status">{renderCommunityEmptyState(searchQuery)}</div>
 					}
 				/>
 
@@ -273,14 +272,6 @@ const communityCloseCss = {
 		color: colors.textMuted,
 		fontSize: '0.98rem',
 	},
-}
-
-const communityFrameFallbackCss = {
-	minHeight: '16rem',
-	display: 'grid',
-	placeItems: 'center',
-	margin: 0,
-	color: colors.textMuted,
 }
 
 const closeButtonCss = mergeCss(getGhostButtonCss(), {

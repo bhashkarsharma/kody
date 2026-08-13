@@ -21,14 +21,14 @@ export type PublicOgPage = {
 
 export const publicOgPages = {
 	home: {
-		imageTitle: 'Make it permanent',
+		imageTitle: 'Safer, cheaper, more reliable.',
 		// Complements the title rather than restating it: the card shows both at
 		// once, so repeating the headline wastes the only supporting line.
 		imageSubtitle:
-			'A personal software factory for the agent you already use. Packages you own, no model in the loop.',
-		ogTitle: 'Kody — make it permanent',
+			'A personal software factory for the agent you already use. Turn ad hoc work into code that keeps running.',
+		ogTitle: 'Kody makes your agent safer, cheaper, and more reliable',
 		ogDescription:
-			'A personal software factory for the agent you already use. Packages you own, run with no model in the loop, from Cursor, Claude, ChatGPT, or your phone.',
+			'A personal software factory. Turn the ad hoc agent work into deterministic code you can run on a trigger, or save tokens with your agent.',
 		path: '/',
 	},
 	community: {
