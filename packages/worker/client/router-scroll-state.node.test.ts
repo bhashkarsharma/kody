@@ -11,7 +11,7 @@ test('scroll restoration history state and navigation targets follow push, pop, 
 		'scroll-key-1',
 	)
 	expect(state).toEqual({
-		kodyScrollRestorationKey: 'scroll-key-1',
+		key: 'scroll-key-1',
 		userState: 'kept',
 	})
 	expect(getScrollRestorationKey(state)).toBe('scroll-key-1')

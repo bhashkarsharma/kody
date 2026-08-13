@@ -24,8 +24,10 @@ import {
 	toBlogPostSummary,
 } from '#worker/blog/catalog.ts'
 import { resetDataCacheForTests } from '#app/data-cache.ts'
+import { firstPartySecurityHeaders } from '#app/security-headers.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { planLimits } from '#universal/plans.ts'
+import { getScrollRestorationInlineScript } from '#universal/router-scroll-restoration.ts'
 
 const testCookieSecret = 'test-cookie-secret-0123456789abcdef0123456789'
 
@@ -486,11 +488,36 @@ test('renderAppPage embeds the Fathom tracker only when FATHOM_SITE_ID is set', 
 	expect(withFathomHtml).toContain('data-site="WKKSDJGN"')
 	expect(withFathomHtml).toContain('data-spa="auto"')
 	const csp = withFathom.headers.get('Content-Security-Policy')
+	expect(csp).toContain("script-src 'self' 'sha256-")
 	expect(csp).toContain(
-		"script-src 'self' https://cdn.usefathom.com https://static.cloudflareinsights.com",
+		'https://cdn.usefathom.com https://static.cloudflareinsights.com',
 	)
 	expect(csp).toContain("img-src 'self' data: blob: https://cdn.usefathom.com")
 	expect(csp).toContain("connect-src 'self' https://cloudflareinsights.com")
+})
+
+test('renderAppPage emits a pre-hydration scroll restoration script in the document body', async () => {
+	resetDataCacheForTests()
+	setAuthSessionSecret(testCookieSecret)
+	const env = createTestEnv(createUserTestDb([]))
+	const restoreScript = getScrollRestorationInlineScript()
+
+	const response = await renderAppPage({
+		request: new Request('https://example.com/'),
+		env,
+	})
+	expect(response.status).toBe(200)
+	const html = await readResponseText(response)
+	const restoreScriptIndex = html.indexOf(restoreScript)
+	const clientEntryIndex = html.indexOf('type="module" src="')
+	expect(restoreScriptIndex).toBeGreaterThan(html.indexOf('<div id="root">'))
+	expect(restoreScriptIndex).toBeGreaterThan(0)
+	expect(clientEntryIndex).toBeGreaterThan(restoreScriptIndex)
+	expect(html).toContain(`<script>${restoreScript}</script>`)
+	expect(response.headers.get('Content-Security-Policy')).toBe(
+		firstPartySecurityHeaders['Content-Security-Policy'],
+	)
+	expect(response.headers.get('Content-Security-Policy')).toContain("'sha256-")
 })
 
 test('renderAppPage emits a doctype, meta description, and inlines the stylesheet when assets provide it', async () => {

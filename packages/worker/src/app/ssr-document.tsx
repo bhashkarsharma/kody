@@ -11,6 +11,7 @@ import {
 	DOCUMENT_HEAD_ATTR,
 	type ResolvedDocumentHead,
 } from '#universal/document-head.ts'
+import { getScrollRestorationInlineScript } from '#universal/router-scroll-restoration.ts'
 import {
 	SENTRY_CONFIG_META_NAME,
 	type SentryClientConfig,
@@ -155,6 +156,7 @@ export function SsrDocument(handle: Handle<SsrDocumentProps>) {
 		handle.props.clientEntryHref ?? buildClientEntryHref('dev')
 	const stylesheetHref =
 		handle.props.stylesheetHref ?? buildStylesheetHref('dev')
+	const scrollRestorationInlineScript = getScrollRestorationInlineScript()
 
 	return () => (
 		<html lang="en">
@@ -262,6 +264,11 @@ export function SsrDocument(handle: Handle<SsrDocumentProps>) {
 						notFound={handle.props.notFound}
 					/>
 				</div>
+				{/* Blocking classic script (not type=module): restores the
+				    saved window.scrollY from sessionStorage before first paint
+				    and before hydration. CSP allows this exact script via its
+				    sha256 hash — do not add `'unsafe-inline'`. */}
+				<script innerHTML={scrollRestorationInlineScript}></script>
 				<script type="module" src={clientEntryHref}></script>
 			</body>
 		</html>

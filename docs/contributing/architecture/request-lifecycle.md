@@ -200,15 +200,18 @@ A thin top-of-viewport **navigation progress bar** listens for `navigationstart`
 / `navigationend` on `routerEvents` and appears only when a navigation is still
 pending after a short delay.
 
-The app shell also mounts **scroll restoration** for SPA navigations. The router
-saves each history entry's window scroll position, restores it on back/forward,
-scrolls to hash targets when present, and otherwise scrolls new navigations to
-the top after the destination route commits. Same-document hash links (for
+The app shell also mounts **scroll restoration**. Each history entry's
+`window.scrollY` is stored in `sessionStorage` keyed by `history.state.key` (the
+same `{ [key]: y }` map React Router uses). A blocking inline script in the SSR
+document body restores that Y before first paint on a full document load, so a
+refresh does not flash the top of the page. `history.scrollRestoration` is
+`manual` so the browser does not fight the restorer. SPA back/forward still
+restores the saved position, hash targets scroll into view, and new navigations
+go to the top after the destination route commits. Same-document hash links (for
 example the landing page's `#invite` waitlist CTA) are intercepted like other
-same-origin links so restoration can scroll to the target — native fragment
-scrolling is disabled while history scroll restoration is `manual`. Preserve the
-current scroll for a specific intercepted link or form with
-`data-prevent-scroll-reset`, or for programmatic navigation with
+same-origin links so restoration can scroll to the target. Preserve the current
+scroll for a specific intercepted link or form with `data-prevent-scroll-reset`,
+or for programmatic navigation with
 `navigate(to, { preventScrollReset: true })`.
 
 Full page navigations occur for:

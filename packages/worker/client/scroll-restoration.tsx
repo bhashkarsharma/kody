@@ -1,4 +1,9 @@
 import { addEventListeners, type Handle } from 'remix/ui'
+import {
+	parseSavedScrollPositions,
+	scrollRestorationStorageKey,
+	serializeSavedScrollPositions,
+} from '#universal/router-scroll-restoration.ts'
 import { routerEvents } from './client-router.tsx'
 import {
 	ensureCurrentScrollRestorationKey,
@@ -9,36 +14,19 @@ import {
 	type ScrollRestorationTarget,
 } from './router-scroll-state.ts'
 
-const scrollPositionsSessionKey = 'kody:router-scroll-positions'
 const savedScrollPositions = new Map<string, ScrollPosition>()
 let positionsLoaded = false
 let restoreScrollRequestId = 0
-
-function isScrollPosition(value: unknown): value is ScrollPosition {
-	return (
-		typeof value === 'object' &&
-		value !== null &&
-		'x' in value &&
-		'y' in value &&
-		typeof value.x === 'number' &&
-		typeof value.y === 'number'
-	)
-}
 
 function loadSavedScrollPositions() {
 	if (positionsLoaded || typeof sessionStorage === 'undefined') return
 	positionsLoaded = true
 	try {
-		const rawPositions = sessionStorage.getItem(scrollPositionsSessionKey)
-		if (!rawPositions) return
-		const entries = JSON.parse(rawPositions) as unknown
-		if (!Array.isArray(entries)) return
-		for (const entry of entries) {
-			if (!Array.isArray(entry) || entry.length !== 2) continue
-			const [key, position] = entry
-			if (typeof key === 'string' && isScrollPosition(position)) {
-				savedScrollPositions.set(key, position)
-			}
+		const positions = parseSavedScrollPositions(
+			sessionStorage.getItem(scrollRestorationStorageKey),
+		)
+		for (const [key, y] of Object.entries(positions)) {
+			savedScrollPositions.set(key, { x: 0, y })
 		}
 	} catch {
 		// Session storage may be unavailable in private modes; scroll still works
@@ -49,9 +37,13 @@ function loadSavedScrollPositions() {
 function persistSavedScrollPositions() {
 	if (typeof sessionStorage === 'undefined') return
 	try {
+		const positions: Record<string, number> = {}
+		for (const [key, position] of savedScrollPositions) {
+			positions[key] = position.y
+		}
 		sessionStorage.setItem(
-			scrollPositionsSessionKey,
-			JSON.stringify(Array.from(savedScrollPositions.entries())),
+			scrollRestorationStorageKey,
+			serializeSavedScrollPositions(positions),
 		)
 	} catch {
 		// Ignore quota and privacy-mode storage failures.
@@ -65,6 +57,11 @@ function saveWindowScrollPosition() {
 		x: window.scrollX,
 		y: window.scrollY,
 	})
+}
+
+function persistWindowScrollPosition() {
+	saveWindowScrollPosition()
+	persistSavedScrollPositions()
 }
 
 function getHashTarget(id: string) {
@@ -231,11 +228,9 @@ export function ScrollRestoration(handle: Handle) {
 			},
 		})
 		addEventListeners(window, handle.signal, {
-			scroll: saveWindowScrollPosition,
-			pagehide() {
-				saveWindowScrollPosition()
-				persistSavedScrollPositions()
-			},
+			scroll: persistWindowScrollPosition,
+			pagehide: persistWindowScrollPosition,
+			beforeunload: persistWindowScrollPosition,
 		})
 		handle.signal.addEventListener('abort', () => {
 			persistSavedScrollPositions()
