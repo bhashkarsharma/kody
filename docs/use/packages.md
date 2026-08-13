@@ -647,9 +647,12 @@ publish checks run.
 
    Call `package_get_git_remote` with either `package_id` or `kody_id`. The
    result includes the plain remote URL, an authenticated one-line clone URL, an
-   `Authorization: Bearer ...` extra header, and setup commands that use
+   `Authorization: Bearer ...` extra header, `git_author` (the signed-in Kody
+   account email and display name), and setup commands that use
    `git -c http.extraHeader=...` so the token does not need to be saved in shell
-   history or `.git/config`.
+   history or `.git/config`. Those commands also set local `user.email` /
+   `user.name` from `git_author`. Use that identity for commits; do not invent
+   an email.
 
    To start a **new** package in this lane, pass `create: true` with the new
    `kody_id` (and an optional `description`):
@@ -669,12 +672,12 @@ publish checks run.
 
 2. Clone and edit:
 
+   Run every `setup_commands` entry from the `package_get_git_remote` result, in
+   order, before creating commits. That sequence clones the repo, `cd`s into it,
+   and sets local `user.email` / `user.name` from `git_author`. Then edit,
+   commit, and push:
+
    ```bash
-   git -c http.extraHeader='Authorization: Bearer art_v1_...' clone \
-   	https://<account>.artifacts.cloudflare.net/git/default/<repo>.git \
-   	my-package
-   cd my-package
-   # edit files
    git add .
    git commit -m "fix: update package behavior"
    git -c http.extraHeader='Authorization: Bearer art_v1_...' push origin HEAD:<defaultBranch>
