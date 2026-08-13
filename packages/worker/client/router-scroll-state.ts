@@ -1,4 +1,5 @@
 import { isRecord } from '@kody-internal/shared/is-record.ts'
+import { historyStateScrollKey } from '#universal/router-scroll-restoration.ts'
 
 export type RouterHistoryAction = 'push' | 'pop' | 'replace'
 
@@ -23,7 +24,6 @@ export type ScrollRestorationTarget =
 	| { type: 'preserve' }
 	| { type: 'top' }
 
-const historyStateScrollKey = 'kodyScrollRestorationKey'
 let scrollRestorationKeyCount = 0
 
 export function createScrollRestorationKey() {

@@ -457,7 +457,7 @@ This is an intentional design decision, not an oversight. The exfiltration
 concern (XSS or a stolen session reading the owner's secrets) is mitigated by:
 
 - the strict first-party `Content-Security-Policy` (`script-src 'self'`, no
-  inline scripts) plus `HttpOnly` + `SameSite=Lax` session cookies (see
+  `'unsafe-inline'`) plus `HttpOnly` + `SameSite=Lax` session cookies (see
   `docs/contributing/security.md`), which make script-injection theft hard
 - decryption at rest and per-user scoping on every read
 

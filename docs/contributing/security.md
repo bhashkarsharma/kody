@@ -19,7 +19,8 @@ package-app surfaces:
 1. **First-party HTML keeps its security headers.** All trusted account/auth
    pages must go through `render()` (`packages/worker/src/app/render.ts`), which
    applies `packages/worker/src/app/security-headers.ts`. Never add
-   `'unsafe-inline'` to the CSP `script-src`.
+   `'unsafe-inline'` to the CSP `script-src`. The scroll-restoration restore
+   script is allowed only by its sha256 hash, not by relaxing `script-src`.
 2. **Untrusted surfaces stay off the strict CSP.** Hosted package apps
    (`https://{username}.<package-app host>/packages/*` in production, or
    `/@username/packages/*` when served inline) execute author-supplied HTML/JS
@@ -79,14 +80,15 @@ package-app surfaces:
 (login, signup, account pages, the OAuth consent screen, and the SPA shell):
 
 - `Content-Security-Policy` with `script-src 'self' https://cdn.usefathom.com`
-  (no inline scripts; the Fathom Analytics tracker is the only allowed external
-  script and its image beacon is also allowed in `img-src`),
-  `frame-ancestors 'none'`, `base-uri 'self'`, `object-src 'none'`,
-  `form-action 'self'`, `worker-src 'self' blob:` (for Sentry Session Replay),
-  and same-origin `connect-src`. The client bundle loads as an external module,
-  so this does not require inline scripts. `style-src` allows `'unsafe-inline'`
-  because SSR-streamed styles arrive as inline `<style>` tags; style injection
-  is far lower risk than script injection.
+  (no `'unsafe-inline'`; the Fathom Analytics tracker is the only allowed
+  external script and its image beacon is also allowed in `img-src`; the
+  scroll-restoration restore script is an inline classic script allowed only by
+  its sha256 hash), `frame-ancestors 'none'`, `base-uri 'self'`,
+  `object-src 'none'`, `form-action 'self'`, `worker-src 'self' blob:` (for
+  Sentry Session Replay), and same-origin `connect-src`. The client bundle loads
+  as an external module. `style-src` allows `'unsafe-inline'` because
+  SSR-streamed styles arrive as inline `<style>` tags; style injection is far
+  lower risk than script injection.
 - `X-Frame-Options: DENY` plus `frame-ancestors 'none'` — stops clickjacking of
   the OAuth consent screen and account pages.
 - `X-Content-Type-Options: nosniff`.
