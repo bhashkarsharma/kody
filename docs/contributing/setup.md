@@ -269,6 +269,11 @@ If you ever need to do the same operations manually, use:
 - `node tools/ci/preview-resources.ts cleanup --worker-name <name>`
 - `node tools/ci/production-resources.ts ensure --out-config <path>`
 
+To **manually test** a PR preview (find the URL, sign in as the seeded user,
+create specific data with `--request`, assert the change), see
+[Manual preview testing](./preview-manual-testing.md) and run
+`npm run preview:manual-test`.
+
 ## Dependency auditing
 
 - `npm run audit:prod` checks production dependencies for known vulnerabilities

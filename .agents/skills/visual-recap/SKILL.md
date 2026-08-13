@@ -197,6 +197,12 @@ Format rules:
 
 6. Re-run steps 2-5 after pushing significant new commits to the PR.
 
+When the recap is **medium** (`extends`) or **high** (`adds`), also load
+[`.agents/skills/preview-manual-test/SKILL.md`](../preview-manual-test/SKILL.md)
+and exercise the PR preview **as the seeded logged-in user with data for this
+change** (`--request` / `--cookie-file`, then a UI pass). A health/login smoke
+alone is not enough.
+
 ### Plan mode
 
 Same steps, except: `**Mode:** plan`, no Base/Head commits required, "Primitives
