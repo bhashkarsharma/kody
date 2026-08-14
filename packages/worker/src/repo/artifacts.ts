@@ -191,12 +191,37 @@ type ArtifactRestStoredToken = {
 }
 
 function isArtifactsBindingError(error: unknown): error is ArtifactsError {
+	// Binding errors may not pass `instanceof Error` across the JSRPC
+	// boundary. Match the documented `{ name, code }` shape only.
+	if (error === null || typeof error !== 'object') return false
+	const candidate = error as { name?: unknown; code?: unknown }
 	return (
-		error instanceof Error &&
-		error.name === 'ArtifactsError' &&
-		'code' in error &&
-		typeof error.code === 'string'
+		candidate.name === 'ArtifactsError' && typeof candidate.code === 'string'
 	)
+}
+
+function artifactsBindingErrorCode(error: unknown) {
+	if (isArtifactsBindingError(error)) return error.code
+	if (error === null || typeof error !== 'object') return null
+	const candidate = error as { name?: unknown; message?: unknown }
+	// Message fallback only for ArtifactsError with known prefixes so a
+	// generic git/HTTP "not found" cannot look like a create-safe miss.
+	if (
+		candidate.name !== 'ArtifactsError' ||
+		typeof candidate.message !== 'string'
+	) {
+		return null
+	}
+	if (/^Repository not found(?::|\b)/.test(candidate.message)) {
+		return 'NOT_FOUND'
+	}
+	if (/^Repository already exists(?::|\b)/.test(candidate.message)) {
+		return 'ALREADY_EXISTS'
+	}
+	if (/^Import in progress(?::|\b)/i.test(candidate.message)) {
+		return 'IMPORT_IN_PROGRESS'
+	}
+	return null
 }
 
 function adaptNativeRepoHandle(repo: ArtifactsRepo): ArtifactRepoHandle {
@@ -288,13 +313,11 @@ function adaptNativeArtifactsBinding(
 					repo: adaptNativeRepoHandle(handle),
 				}
 			} catch (error) {
-				if (isArtifactsBindingError(error) && error.code === 'NOT_FOUND') {
+				const code = artifactsBindingErrorCode(error)
+				if (code === 'NOT_FOUND') {
 					return { status: 'not_found' as const }
 				}
-				if (
-					isArtifactsBindingError(error) &&
-					error.code === 'IMPORT_IN_PROGRESS'
-				) {
+				if (code === 'IMPORT_IN_PROGRESS') {
 					return { status: 'importing' as const, retryAfter: 5 }
 				}
 				throw error
@@ -773,6 +796,9 @@ export async function readMockArtifactSnapshot(input: {
 }
 
 function isArtifactRepoAlreadyExistsError(error: unknown) {
+	if (artifactsBindingErrorCode(error) === 'ALREADY_EXISTS') {
+		return true
+	}
 	if (!(error instanceof Error)) {
 		return false
 	}
@@ -788,7 +814,6 @@ function isArtifactRepoAlreadyExistsError(error: unknown) {
 			: null
 	return (
 		causeCode === 10201 ||
-		(isArtifactsBindingError(error) && error.code === 'ALREADY_EXISTS') ||
 		/already[\s_-]*exists|already_exists/i.test(`${text} ${causeMessage}`)
 	)
 }
