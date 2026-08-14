@@ -1,6 +1,9 @@
 import { run } from 'remix/ui'
-import { REMIX_FRAME_TARGET_HEADER } from '#universal/frame-constants.ts'
 import { consumePrefetchedFrame } from '#client/frame-prefetch.ts'
+import {
+	createFrameResolveInit,
+	prefetchedFrameResponse,
+} from '#client/frame-resolve.ts'
 import { preloadClientRouteModules } from '#client/lazy-route.tsx'
 import {
 	captureClientException,
@@ -63,22 +66,21 @@ async function boot() {
 			}
 			return component
 		},
-		async resolveFrame(src, signal, target) {
-			const cached = consumePrefetchedFrame(src, target)
+		async resolveFrame(src, options) {
+			const target = options?.target
+			const method = options?.method?.trim().toUpperCase()
+			const cached =
+				method === 'HEAD' ? undefined : consumePrefetchedFrame(src, target)
 			if (cached !== undefined) {
-				return cached
+				return prefetchedFrameResponse(cached)
 			}
-			const headers = new Headers({ Accept: 'text/html' })
-			if (target) {
-				headers.set(REMIX_FRAME_TARGET_HEADER, target)
-			}
-			const response = await fetch(src, { headers, signal })
+			const response = await fetch(src, createFrameResolveInit(options))
 			if (!response.ok) {
 				throw new Error(
 					`Frame resolve failed (${response.status}) for ${src}${target ? ` target=${target}` : ''}`,
 				)
 			}
-			return response.body ?? (await response.text())
+			return response
 		},
 	})
 

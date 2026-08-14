@@ -125,11 +125,20 @@ let app = run({
 		let mod = await import(moduleUrl)
 		return mod[exportName]
 	},
-	async resolveFrame(src, signal, target) {
+	async resolveFrame(src, options) {
 		let headers = new Headers({ accept: 'text/html' })
-		if (target) headers.set('x-remix-target', target)
-		let response = await fetch(src, { headers, signal })
-		return response.body ?? (await response.text())
+		if (options?.target) headers.set('x-remix-target', options.target)
+		let method = options?.method?.trim()
+		let isReader =
+			!method ||
+			method.toUpperCase() === 'GET' ||
+			method.toUpperCase() === 'HEAD'
+		return fetch(src, {
+			headers,
+			method,
+			body: isReader ? undefined : options?.formData,
+			signal: options?.signal,
+		})
 	},
 })
 
@@ -144,8 +153,10 @@ await app.ready()
 
 - **`loadModule(moduleUrl, exportName)`** (required) — return the component
   function for each client entry. Typically uses dynamic `import()`.
-- **`resolveFrame(src, signal, target)`** (optional) — called when a `<Frame>`
-  loads or reloads content. `target` is available when frame targeting matters.
+- **`resolveFrame(src, options?)`** (optional) — called when a `<Frame>` loads
+  or reloads content. `options` may include `target`, `formData`, `method`,
+  `encType`, and `signal`. Returning the `Response` lets Remix read redirects
+  and body encoding.
 
 ### `app` methods
 
@@ -283,7 +294,11 @@ navigate('/dashboard', { history: 'replace' })
 
 Options: `src`, `target`, `history` (`'push' | 'replace'`), `resetScroll`.
 
-Attributes understood by the runtime: `rmx-target`, `rmx-src`, `rmx-document`.
+Attributes understood by the runtime: `rmx-target`, `rmx-src`, `rmx-document`,
+`rmx-history`, `rmx-preserve-dom`. Use `rmx-target` on a form or anchor to
+reload a named frame; use `rmx-history="push|replace"` to control history.
+Kody's client router intercepts ordinary same-origin clicks and submits, so
+leave `rmx-*` off until a form is opted into Remix frame navigation.
 
 ## Head Management
 

@@ -46,8 +46,10 @@ SSR (fail loud in dev).
 
 - Constant: `REMIX_FRAME_TARGET_HEADER` (`x-remix-target`) in
   `frame-constants.ts`.
-- Client `entry.tsx` `resolveFrame` sets the header to the frame `name` when
-  fetching `src`.
+- Client `entry.tsx` `resolveFrame(src, options)` sets the header to
+  `options.target` (the frame `name`) when fetching `src`. Non-GET frame
+  navigations forward `options.method` and `options.formData`. The resolver
+  returns the `Response` so Remix can read redirects and the body.
 - Server `handleFrameRequest` reads the header and selects the registered frame.
 
 ## Auth scoping
@@ -71,3 +73,15 @@ Example (`client/routes/community.tsx`):
 
 `COMMUNITY_LISTINGS_TARGET` lives in `community-frame-constants.ts` alongside
 the server-side `registerFrame` call in `frames/community-listings.ts`.
+
+## Progressive enhancement
+
+Ordinary same-origin clicks and submits stay on Kody's client router. Forms and
+anchors that opt into Remix frame navigation use `rmx-target`, `rmx-src`, or
+`rmx-document`. The client router leaves those alone so Remix can reload a named
+frame (or force a full document submit) through `resolveFrame`.
+
+The community search form is the first opted-in surface: it is a GET form to
+`routes.community` with `rmx-target={COMMUNITY_LISTINGS_TARGET}` and
+`rmx-history="push"`. Login, billing, OAuth, and passkey forms stay on the
+client router.
