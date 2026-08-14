@@ -3,9 +3,10 @@ import {
 	createScrollRestorationHistoryState,
 	getScrollRestorationKey,
 	getScrollRestorationTarget,
+	nextSavedScrollPosition,
 } from './router-scroll-state.ts'
 
-test('scroll restoration history state and navigation targets follow push, pop, hash, and preserve rules', () => {
+test('scroll restoration history state and navigation targets follow push, pop, hash, preserve, and load rules', () => {
 	const state = createScrollRestorationHistoryState(
 		{ userState: 'kept' },
 		'scroll-key-1',
@@ -49,4 +50,50 @@ test('scroll restoration history state and navigation targets follow push, pop, 
 			location: '/community',
 		}),
 	).toEqual({ type: 'top' })
+	expect(
+		getScrollRestorationTarget({
+			historyAction: 'load',
+			location: '/',
+			savedPosition: { x: 0, y: 2000 },
+		}),
+	).toEqual({ type: 'position', position: { x: 0, y: 2000 } })
+	expect(
+		getScrollRestorationTarget({
+			historyAction: 'load',
+			location: '/',
+		}),
+	).toEqual({ type: 'preserve' })
+	expect(
+		getScrollRestorationTarget({
+			historyAction: 'load',
+			location: '/#invite',
+		}),
+	).toEqual({ type: 'hash', id: 'invite' })
+})
+
+test('a clamped scroll does not replace a saved Y the document cannot reach yet', () => {
+	const saved = { x: 0, y: 3400 }
+
+	expect(
+		nextSavedScrollPosition(saved, { x: 0, y: 1200 }, { x: 0, y: 1200 }),
+	).toEqual(saved)
+	expect(
+		nextSavedScrollPosition(saved, { x: 0, y: 0 }, { x: 0, y: 0 }),
+	).toEqual(saved)
+	expect(
+		nextSavedScrollPosition(saved, { x: 0, y: 1199.4 }, { x: 0, y: 1200 }),
+	).toEqual(saved)
+
+	expect(
+		nextSavedScrollPosition(saved, { x: 0, y: 800 }, { x: 0, y: 1200 }),
+	).toEqual({ x: 0, y: 800 })
+	expect(
+		nextSavedScrollPosition(saved, { x: 0, y: 100 }, { x: 0, y: 5000 }),
+	).toEqual({ x: 0, y: 100 })
+	expect(
+		nextSavedScrollPosition(saved, { x: 0, y: 3400 }, { x: 0, y: 5000 }),
+	).toEqual({ x: 0, y: 3400 })
+	expect(
+		nextSavedScrollPosition(undefined, { x: 0, y: 1200 }, { x: 0, y: 1200 }),
+	).toEqual({ x: 0, y: 1200 })
 })
