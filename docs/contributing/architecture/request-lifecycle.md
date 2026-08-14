@@ -204,7 +204,11 @@ The app shell also mounts **scroll restoration**. Each history entry's
 `window.scrollY` is stored in `sessionStorage` keyed by `history.state.key` (the
 same `{ [key]: y }` map React Router uses). A blocking inline script in the SSR
 document body restores that Y before first paint on a full document load, so a
-refresh does not flash the top of the page. `history.scrollRestoration` is
+refresh does not flash the top of the page. After hydration the restorer keeps
+applying the same saved Y until the document is tall enough to reach it (images,
+fonts, and async route content). A persist of the current `scrollY` does not
+replace a taller saved Y while that Y is still unreachable, so a clamped early
+`scrollTo` cannot overwrite the intended position. `history.scrollRestoration` is
 `manual` so the browser does not fight the restorer. SPA back/forward still
 restores the saved position, hash targets scroll into view, and new navigations
 go to the top after the destination route commits. Same-document hash links (for

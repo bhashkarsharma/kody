@@ -9,7 +9,9 @@ import {
 	ensureCurrentScrollRestorationKey,
 	getCurrentScrollRestorationKey,
 	getScrollRestorationTarget,
+	nextSavedScrollPosition,
 	type RouterNavigationEventDetail,
+	type ScrollHistoryAction,
 	type ScrollPosition,
 	type ScrollRestorationTarget,
 } from './router-scroll-state.ts'
@@ -17,6 +19,7 @@ import {
 const savedScrollPositions = new Map<string, ScrollPosition>()
 let positionsLoaded = false
 let restoreScrollRequestId = 0
+let restoreInProgress = false
 
 function loadSavedScrollPositions() {
 	if (positionsLoaded || typeof sessionStorage === 'undefined') return
@@ -53,14 +56,24 @@ function persistSavedScrollPositions() {
 function saveWindowScrollPosition() {
 	const key = ensureCurrentScrollRestorationKey()
 	if (!key) return
-	savedScrollPositions.set(key, {
+	const current = {
 		x: window.scrollX,
 		y: window.scrollY,
-	})
+	}
+	savedScrollPositions.set(
+		key,
+		nextSavedScrollPosition(
+			savedScrollPositions.get(key),
+			current,
+			maxWindowScrollPosition(),
+		),
+	)
 }
 
 function persistWindowScrollPosition() {
-	saveWindowScrollPosition()
+	if (!restoreInProgress) {
+		saveWindowScrollPosition()
+	}
 	persistSavedScrollPositions()
 }
 
@@ -104,8 +117,14 @@ function maxWindowScrollPosition(): ScrollPosition {
 	}
 }
 
+type ScrollRestoreRequest = {
+	location: string
+	historyAction: ScrollHistoryAction
+	preventScrollReset: boolean
+}
+
 function applyWindowScroll(
-	detail: RouterNavigationEventDetail,
+	detail: ScrollRestoreRequest,
 	target: ScrollRestorationTarget,
 	isFinalAttempt: boolean,
 ): boolean {
@@ -146,10 +165,7 @@ function applyWindowScroll(
 	}
 }
 
-function restoreWindowScroll(
-	detail: RouterNavigationEventDetail,
-	signal: AbortSignal,
-) {
+function restoreWindowScroll(detail: ScrollRestoreRequest, signal: AbortSignal) {
 	const key = getCurrentScrollRestorationKey()
 	const target = getScrollRestorationTarget({
 		historyAction: detail.historyAction,
@@ -158,7 +174,13 @@ function restoreWindowScroll(
 		savedPosition: key ? savedScrollPositions.get(key) : null,
 	})
 	const requestId = ++restoreScrollRequestId
+	restoreInProgress = true
 	const startedAt = Date.now()
+	// Document-load restore keeps applying the saved Y after it is reachable so
+	// late layout (images, fonts, scroll anchoring) cannot persist a drifted
+	// position before the page settles.
+	const pinUntilDeadline =
+		target.type === 'position' && detail.historyAction === 'load'
 	// Restoration must never fight manual scrolling, but layout-driven shifts
 	// (scroll anchoring, async content replacing nodes above the viewport) can
 	// move the position between attempts without any user involvement. Watch
@@ -170,7 +192,10 @@ function restoreWindowScroll(
 	for (const eventName of userScrollInputEvents) {
 		window.addEventListener(eventName, markUserInteraction, { passive: true })
 	}
-	const stopListening = () => {
+	const finish = () => {
+		if (requestId === restoreScrollRequestId) {
+			restoreInProgress = false
+		}
 		for (const eventName of userScrollInputEvents) {
 			window.removeEventListener(eventName, markUserInteraction)
 		}
@@ -188,12 +213,13 @@ function restoreWindowScroll(
 			requestId !== restoreScrollRequestId ||
 			userInteracted
 		) {
-			stopListening()
+			finish()
 			return
 		}
 		const isFinalAttempt = Date.now() - startedAt >= scrollRestorationDeadlineMs
-		if (applyWindowScroll(detail, target, isFinalAttempt) || isFinalAttempt) {
-			stopListening()
+		const reached = applyWindowScroll(detail, target, isFinalAttempt)
+		if (isFinalAttempt || (reached && !pinUntilDeadline)) {
+			finish()
 			return
 		}
 		schedule(attempt)
@@ -227,6 +253,14 @@ export function ScrollRestoration(handle: Handle) {
 				restoreWindowScroll(event.detail, handle.signal)
 			},
 		})
+		restoreWindowScroll(
+			{
+				location: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+				historyAction: 'load',
+				preventScrollReset: false,
+			},
+			handle.signal,
+		)
 		addEventListeners(window, handle.signal, {
 			scroll: persistWindowScrollPosition,
 			pagehide: persistWindowScrollPosition,

@@ -3,6 +3,9 @@ import { historyStateScrollKey } from '#universal/router-scroll-restoration.ts'
 
 export type RouterHistoryAction = 'push' | 'pop' | 'replace'
 
+/** Router actions plus document load. `'load'` is never emitted on `routerEvents`. */
+export type ScrollHistoryAction = RouterHistoryAction | 'load'
+
 export type RouterNavigateOptions = {
 	preventScrollReset?: boolean
 }
@@ -77,18 +80,39 @@ export function getScrollRestorationHash(location: string) {
 }
 
 export function getScrollRestorationTarget(input: {
-	historyAction: RouterHistoryAction
+	historyAction: ScrollHistoryAction
 	location: string
 	preventScrollReset?: boolean
 	savedPosition?: ScrollPosition | null
 }): ScrollRestorationTarget {
-	if (input.historyAction === 'pop' && input.savedPosition) {
+	if (
+		(input.historyAction === 'pop' || input.historyAction === 'load') &&
+		input.savedPosition
+	) {
 		return { type: 'position', position: input.savedPosition }
 	}
 
 	const hash = getScrollRestorationHash(input.location)
 	if (hash) return { type: 'hash', id: hash }
 
-	if (input.preventScrollReset) return { type: 'preserve' }
+	if (input.preventScrollReset || input.historyAction === 'load') {
+		return { type: 'preserve' }
+	}
 	return { type: 'top' }
+}
+
+/**
+ * Keep a taller saved Y while the document is still too short to reach it.
+ * A pre-paint `scrollTo` clamps to `maxScroll`; persisting that clamp is what
+ * makes refresh drift down the page.
+ */
+export function nextSavedScrollPosition(
+	saved: ScrollPosition | undefined,
+	current: ScrollPosition,
+	maxScroll: ScrollPosition,
+): ScrollPosition {
+	if (saved && saved.y > maxScroll.y && current.y >= maxScroll.y - 1) {
+		return saved
+	}
+	return current
 }
