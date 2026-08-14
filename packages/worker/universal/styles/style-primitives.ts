@@ -416,7 +416,10 @@ export function getAccentCalloutCss(options?: { accentColor?: string }) {
 		borderLeft: `3px solid ${accent}`,
 		/* Square against the accent bar, rounded away from it. */
 		borderRadius: `0 ${radius.md} ${radius.md} 0`,
-		backgroundColor: `oklch(from ${colors.primary} l c h / 0.05)`,
+		backgroundColor: `oklch(from ${colors.primary} l c h / 0.08)`,
+		'&::selection, & *::selection': {
+			backgroundColor: `oklch(from ${colors.primary} l c h / 0.32)`,
+		},
 	}
 }
 

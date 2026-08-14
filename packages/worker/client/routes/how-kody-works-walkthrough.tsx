@@ -3,11 +3,15 @@ import { CopyCodeBlock } from '#client/copy-code-block.tsx'
 import {
 	howKodyWorksPackageFiles,
 	howKodyWorksTranscriptActs,
+	type TranscriptFile,
 	type TranscriptInput,
 	type TranscriptLine,
 	type TranscriptTool,
 } from './how-kody-works-transcript.ts'
-import { getArticleBreakoutCss } from '#universal/styles/style-primitives.ts'
+import {
+	getAccentCalloutCss,
+	getArticleBreakoutCss,
+} from '#universal/styles/style-primitives.ts'
 import {
 	colors,
 	radius,
@@ -92,7 +96,7 @@ function packageFileSummary(path: keyof typeof howKodyWorksPackageFiles) {
 		case 'src/what-shipped.ts':
 			return 'Filter public events and advance the cursor'
 		case 'package.json':
-			return 'Export plus a disabled daily job'
+			return 'Export plus a daily job'
 		case 'README.md':
 			return 'Why this package exists'
 		default: {
@@ -103,37 +107,46 @@ function packageFileSummary(path: keyof typeof howKodyWorksPackageFiles) {
 }
 
 function renderLine(line: TranscriptLine) {
-	if (line.role === 'user') {
-		return (
-			<figure mix={css(youCss)}>
-				<figcaption>
-					You
-					{renderUserIcon()}
-				</figcaption>
-				<blockquote>
-					<p>{line.text}</p>
-				</blockquote>
-			</figure>
-		)
+	switch (line.role) {
+		case 'user':
+			return (
+				<figure mix={css(youCss)}>
+					<figcaption>
+						You
+						{renderUserIcon()}
+					</figcaption>
+					<blockquote>
+						<p>{line.text}</p>
+					</blockquote>
+				</figure>
+			)
+		case 'agent': {
+			const reasoning = line.tone === 'reasoning'
+			return (
+				<figure mix={css(reasoning ? agentReasoningCss : agentCss)}>
+					<figcaption>
+						{renderAgentIcon()}
+						{reasoning ? 'Reasoning' : 'Agent'}
+					</figcaption>
+					<blockquote>
+						<p>{line.text}</p>
+					</blockquote>
+				</figure>
+			)
+		}
+		case 'tools':
+			return (
+				<div mix={css(toolsCss)}>
+					{line.tools.map((tool) => renderToolCall(tool))}
+				</div>
+			)
+		case 'files':
+			return renderFiles(line)
+		default: {
+			const exhaustive: never = line
+			return exhaustive
+		}
 	}
-	if (line.role === 'agent') {
-		return (
-			<figure mix={css(agentCss)}>
-				<figcaption>
-					{renderAgentIcon()}
-					Agent
-				</figcaption>
-				<blockquote>
-					<p>{line.text}</p>
-				</blockquote>
-			</figure>
-		)
-	}
-	return (
-		<div mix={css(toolsCss)}>
-			{line.tools.map((tool) => renderToolCall(tool))}
-		</div>
-	)
 }
 
 const leadingInputNames = ['conversationId', 'memoryContext'] as const
@@ -156,6 +169,51 @@ function sortToolInputs(inputs: Array<TranscriptInput>) {
 	})
 }
 
+function renderFiles(line: Extract<TranscriptLine, { role: 'files' }>) {
+	return (
+		<div mix={css(toolsCss)}>
+			<details mix={css(toolCss)}>
+				<summary>
+					<span mix={css(toolNameCss)}>files</span>
+					<span mix={css(toolSummaryCss)}>{line.summary}</span>
+				</summary>
+				<div mix={css(toolBodyCss)}>
+					<aside mix={css(toolNoteCss)} role="note">
+						{renderInfoIcon()}
+						<p>{renderNotedText(line.note)}</p>
+					</aside>
+					{line.files.map((file) => renderCloneFile(file))}
+				</div>
+			</details>
+		</div>
+	)
+}
+
+function renderCloneFile(file: TranscriptFile) {
+	return (
+		<details key={file.path} mix={css(toolCss)}>
+			<summary>
+				<span mix={css(toolNameCss)}>{file.path}</span>
+				<span mix={css(toolSummaryCss)}>{file.summary}</span>
+			</summary>
+			<div mix={css(toolBodyCss)}>
+				<CopyCodeBlock
+					copy={false}
+					code={file.content}
+					lang={file.lang ?? fileLangFromPath(file.path)}
+				/>
+			</div>
+		</details>
+	)
+}
+
+function fileLangFromPath(path: string) {
+	if (path.endsWith('.ts')) return 'ts'
+	if (path.endsWith('.json')) return 'json'
+	if (path.endsWith('.md')) return 'md'
+	return 'txt'
+}
+
 function renderToolCall(tool: TranscriptTool) {
 	return (
 		<details key={`${tool.name}-${tool.summary}`} mix={css(toolCss)}>
@@ -167,7 +225,10 @@ function renderToolCall(tool: TranscriptTool) {
 				<span mix={css(toolSummaryCss)}>{tool.summary}</span>
 			</summary>
 			<div mix={css(toolBodyCss)}>
-				<p mix={css(toolNoteCss)}>{tool.note}</p>
+				<aside mix={css(toolNoteCss)} role="note">
+					{renderInfoIcon()}
+					<p>{renderNotedText(tool.note)}</p>
+				</aside>
 				{sortToolInputs(tool.inputs).map((input) => renderInput(input))}
 				<hr mix={css(ioRuleCss)} />
 				<div mix={css(paneCss)}>
@@ -224,6 +285,35 @@ function renderAgentIcon() {
 			<circle cx="12" cy="4.5" r="1" fill="currentColor" />
 			<circle cx="9" cy="13.5" r="1" fill="currentColor" />
 			<circle cx="15" cy="13.5" r="1" fill="currentColor" />
+		</svg>
+	)
+}
+
+function renderNotedText(note: string) {
+	return note.split(/(`[^`]+`)/).map((part, index) => {
+		if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+			return <code key={index}>{part.slice(1, -1)}</code>
+		}
+		return part
+	})
+}
+
+function renderInfoIcon() {
+	return (
+		<svg
+			viewBox="0 0 24 24"
+			width="1em"
+			height="1em"
+			aria-hidden="true"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		>
+			<circle cx="12" cy="12" r="9" />
+			<path d="M12 11v5" />
+			<circle cx="12" cy="8" r="0.75" fill="currentColor" />
 		</svg>
 	)
 }
@@ -356,6 +446,23 @@ const agentCss = {
 	},
 }
 
+const agentReasoningCss = {
+	...bubbleCss,
+	'& blockquote': {
+		margin: '0.25rem 0 0',
+		padding: 0,
+		border: 'none',
+		backgroundColor: 'transparent',
+	},
+	'& p': {
+		margin: 0,
+		fontSize: '0.92rem',
+		fontStyle: 'italic' as const,
+		color: colors.textMuted,
+		textWrap: 'pretty' as const,
+	},
+}
+
 const toolsCss = {
 	display: 'grid',
 	gap: '0.55rem',
@@ -418,10 +525,30 @@ const toolSummaryCss = {
 }
 
 const toolNoteCss = {
-	margin: 0,
-	color: colors.textMuted,
-	fontSize: '0.95rem',
-	textWrap: 'pretty' as const,
+	...getAccentCalloutCss(),
+	gridTemplateColumns: 'auto 1fr',
+	alignItems: 'start',
+	columnGap: '0.65rem',
+	padding: `${spacing.sm} ${spacing.md}`,
+	color: colors.text,
+	'& svg': {
+		width: '1.15em',
+		height: '1.15em',
+		marginTop: '0.15em',
+		color: colors.primaryText,
+	},
+	'& p': {
+		margin: 0,
+		fontSize: '0.95rem',
+		textWrap: 'pretty' as const,
+	},
+	'& code': {
+		font: '500 0.9em/1.2 ui-monospace, "SF Mono", Menlo, monospace',
+		backgroundColor: colors.primarySoftest,
+		border: `1px solid ${colors.primarySoft}`,
+		borderRadius: '5px',
+		padding: '0.1em 0.35em',
+	},
 }
 
 const toolBodyCss = {
@@ -442,7 +569,7 @@ const paneCss = {
 	display: 'grid',
 	gap: spacing.xs,
 	minWidth: 0,
-	'&[data-kind="memory"] span:first-child': {
+	'&[data-kind="memory"] > span': {
 		backgroundColor: colors.primarySoft,
 		color: colors.primaryText,
 	},
