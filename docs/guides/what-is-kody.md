@@ -57,7 +57,8 @@ supporting cast.
    real APIs, and the moment something works it saves as code that runs on a
    schedule with no model in the loop. This is not an agent re-run on a timer:
    there are no tokens spent, no prompt to drift, and nothing waiting on a model
-   to respond. See [Packages](../use/packages.md) and
+   to respond. See [How Kody works](./how-kody-works.md),
+   [Packages](../use/packages.md), and
    [Execute and workflows](../use/execute.md).
 2. **Your agent uses your keys without ever reading them.** It writes whatever
    code the job needs and still cannot see a credential — no capability returns

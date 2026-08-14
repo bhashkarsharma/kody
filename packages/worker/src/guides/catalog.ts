@@ -6,6 +6,7 @@ import {
 import accountPackageInvocationTokenSetup from '../../../../docs/guides/account-package-invocation-token-setup.md'
 import accountSecretSetup from '../../../../docs/guides/account-secret-setup.md'
 import firstWin from '../../../../docs/guides/first-win.md'
+import howKodyWorks from '../../../../docs/guides/how-kody-works.md'
 import quickExample from '../../../../docs/guides/quick-example.md'
 import integrationBackedAppHappyPath from '../../../../docs/guides/integration-backed-app-happy-path.md'
 import integrationBootstrap from '../../../../docs/guides/integration-bootstrap.md'
@@ -35,6 +36,7 @@ import whatIsKody from '../../../../docs/guides/what-is-kody.md'
  */
 const guideSources: Array<{ slug: string; raw: string }> = [
 	{ slug: 'what-is-kody', raw: whatIsKody },
+	{ slug: 'how-kody-works', raw: howKodyWorks },
 	{ slug: 'quick-example', raw: quickExample },
 	{ slug: 'first-win', raw: firstWin },
 	{ slug: 'package-authoring', raw: packageAuthoring },

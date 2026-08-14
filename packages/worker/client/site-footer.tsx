@@ -17,13 +17,7 @@ export function SiteFooter(handle: Handle<SiteFooterProps>) {
 		<footer mix={css(footerCss)}>
 			<div mix={css(footerInnerCss)}>
 				<a href="/" mix={css(brandCss)}>
-					<img
-						src="/images/kody-mark.png"
-						alt=""
-						width={28}
-						height={28}
-						mix={css({ borderRadius: '50%' })}
-					/>
+					<img src="/images/kody-mark.png" alt="" width={28} height={28} />
 					<span>Kody</span>
 				</a>
 				<p mix={css(taglineCss)}>Make it permanent.</p>

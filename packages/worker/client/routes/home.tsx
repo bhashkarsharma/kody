@@ -22,6 +22,7 @@ import {
 	resetTurnstileWidgets,
 	turnstileWidgetClassName,
 } from '#client/public-form-protection.ts'
+import { routes } from '#universal/routes.ts'
 import { colors, transitions, typography } from '#universal/styles/tokens.ts'
 import {
 	getBrandChipCss,
@@ -50,8 +51,8 @@ import {
 const factoryBeats = [
 	{
 		trigger: 'Cron',
-		title: 'Nightly release notes',
-		copy: 'The nightly-release job. The agent wrote the changelog once; a cron publishes it and skips quiet days.',
+		title: 'What did kody-bot ship?',
+		copy: 'Ask once. Save the export. A daily job emails you only when something actually shipped.',
 	},
 	{
 		trigger: 'Webhook',
@@ -304,6 +305,11 @@ export function HomeRoute(handle: Handle) {
 							</article>
 						))}
 					</div>
+					<p mix={css(factoryWalkthroughCss)}>
+						<a href={routes.guideDetail.href({ slug: 'how-kody-works' })}>
+							See the whole loop
+						</a>
+					</p>
 				</section>
 
 				{/* ============ git + npm ecosystem ============ */}
@@ -353,7 +359,7 @@ export function HomeRoute(handle: Handle) {
 							<strong>Keys the agent never sees.</strong> You create the
 							connection yourself, with your agent walking you through it: your
 							app, your scopes, revocable anytime. Secrets never enter the
-							prompt.
+							prompt (as opposed to the .env file your agent happily reads).
 						</p>
 						<p mix={css(splitCopyCss)}>
 							A few built-in integrations are one-click for simple cases. Need
@@ -404,11 +410,10 @@ export function HomeRoute(handle: Handle) {
 				</section>
 
 				{/* ============ trust ============ */}
-				<section aria-label="Security and source" mix={css(trustCss)}>
-					<p>
-						Code runs in a sandbox. Secrets stay server-side and never enter
-						prompts or your agent&apos;s context. Every user is fully isolated.
-					</p>
+				<section aria-labelledby="trust-title" mix={css(trustCss)}>
+					<h2 id="trust-title" mix={css(sectionHeadingCss)}>
+						Check out Kody&apos;s Source on GitHub
+					</h2>
 					<p>
 						Kody&apos;s{' '}
 						<a
@@ -964,6 +969,18 @@ const factoryBeatCss = {
 			fontSize: '1rem',
 			maxWidth: '46ch',
 			marginInline: 'auto',
+		},
+	},
+}
+
+const factoryWalkthroughCss = {
+	margin: 'clamp(2rem, 4vw, 2.75rem) 0 0',
+	'& a': {
+		color: colors.primaryText,
+		fontWeight: 600,
+		textDecoration: 'none',
+		'&:hover': {
+			textDecoration: 'underline',
 		},
 	},
 }

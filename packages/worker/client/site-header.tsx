@@ -98,13 +98,7 @@ export function SiteHeader(handle: Handle<SiteHeaderProps>) {
 		<header data-scrolled={scrolled ? 'true' : undefined} mix={css(headerCss)}>
 			<nav aria-label="Main" mix={css(navCss)}>
 				<a href="/" mix={css(brandCss)}>
-					<img
-						src="/images/kody-mark.png"
-						alt=""
-						width={34}
-						height={34}
-						mix={css({ borderRadius: '50%' })}
-					/>
+					<img src="/images/kody-mark.png" alt="" width={34} height={34} />
 					<span>Kody</span>
 				</a>
 				<div mix={css(navLinksCss)}>

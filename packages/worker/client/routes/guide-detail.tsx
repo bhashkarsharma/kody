@@ -13,15 +13,19 @@ import {
 import { readRouterPathname } from '#client/router-location.tsx'
 import { readJson } from '#client/routes/account-approval-shared.ts'
 import { formatLastVerified } from '#client/routes/guides.tsx'
+import { renderHowKodyWorksWalkthrough } from '#client/routes/how-kody-works-walkthrough.tsx'
 import { colors } from '#universal/styles/tokens.ts'
 import { pageHeadCss, proseCss } from '#universal/styles/style-primitives.ts'
+
+const interactiveGuideSlug = 'how-kody-works'
 
 /**
  * Guide detail: back link → guide head (title, verified month) → `.prose`
  * body rendered from the server's bundled markdown catalog with the
  * first-party link policy (guides link into `/connect/oauth` and
- * `/account/secrets/new`) and copyable code blocks. A quiet foot links the
- * raw markdown twin for agents.
+ * `/account/secrets/new`) and copyable code blocks. `/guides/how-kody-works`
+ * swaps the prose body for the interactive factory-loop transcript. A quiet
+ * foot links the raw markdown twin for agents.
  */
 
 export function getGuideSlugFromPathname(pathname: string) {
@@ -239,7 +243,11 @@ export function GuideDetailRoute(handle: Handle) {
 							</p>
 						</header>
 
-						<div mix={css(proseCss)}>{renderGuideBody(guide.body)}</div>
+						{guide.slug === interactiveGuideSlug ? (
+							renderHowKodyWorksWalkthrough()
+						) : (
+							<div mix={css(proseCss)}>{renderGuideBody(guide.body)}</div>
+						)}
 
 						<footer mix={css(guideFootCss)}>
 							<p>

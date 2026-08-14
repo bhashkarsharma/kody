@@ -1006,7 +1006,6 @@ const brandBaseCss = {
 	color: colors.text,
 	textDecoration: 'none',
 	letterSpacing: '-0.01em',
-	'& img': { borderRadius: '50%' },
 	'&:hover': { color: colors.text },
 }
 

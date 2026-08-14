@@ -19,6 +19,8 @@ Read in order for a full tour, or jump to a topic.
   markdown (MCP `coding_guide_get`, web index, and raw `.md` per page)
 - [What is Kody?](../guides/what-is-kody.md) — capability tour and discovery
   prompt for people (and agents) deciding whether Kody fits, before any setup
+- [How Kody works](../guides/how-kody-works.md) — ask once, save an export,
+  daily email only when something shipped
 - [Connect your agent](./connect-your-agent.md) — add `{origin}/mcp`, complete
   OAuth, and use the setup prompt
 - [Connect remote MCP servers](./mcp-client-servers.md) — add external MCP
