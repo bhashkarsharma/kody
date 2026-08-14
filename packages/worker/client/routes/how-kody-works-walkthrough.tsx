@@ -3,10 +3,11 @@ import { CopyCodeBlock } from '#client/copy-code-block.tsx'
 import {
 	howKodyWorksPackageFiles,
 	howKodyWorksTranscriptActs,
-	type TranscriptHint,
+	type TranscriptInput,
 	type TranscriptLine,
 	type TranscriptTool,
 } from './how-kody-works-transcript.ts'
+import { getArticleBreakoutCss } from '#universal/styles/style-primitives.ts'
 import {
 	colors,
 	radius,
@@ -35,7 +36,9 @@ export function renderHowKodyWorksWalkthrough() {
 					mix={css(actCss)}
 					aria-labelledby={`${act.id}-title`}
 				>
-					<p mix={css(kickerCss)}>{act.kicker}</p>
+					<p mix={css(act.id === 'ask' ? exampleKickerCss : kickerCss)}>
+						{act.kicker}
+					</p>
 					<h2 id={`${act.id}-title`}>{act.title}</h2>
 					<ol mix={css(threadCss)}>
 						{act.lines.map((line, index) => (
@@ -64,6 +67,7 @@ export function renderHowKodyWorksWalkthrough() {
 						</summary>
 						<div mix={css(toolBodyCss)}>
 							<CopyCodeBlock
+								copy={false}
 								code={code}
 								lang={
 									path.endsWith('.ts')
@@ -102,7 +106,10 @@ function renderLine(line: TranscriptLine) {
 	if (line.role === 'user') {
 		return (
 			<figure mix={css(youCss)}>
-				<figcaption>You</figcaption>
+				<figcaption>
+					You
+					{renderUserIcon()}
+				</figcaption>
 				<blockquote>
 					<p>{line.text}</p>
 				</blockquote>
@@ -112,7 +119,10 @@ function renderLine(line: TranscriptLine) {
 	if (line.role === 'agent') {
 		return (
 			<figure mix={css(agentCss)}>
-				<figcaption>Agent</figcaption>
+				<figcaption>
+					{renderAgentIcon()}
+					Agent
+				</figcaption>
 				<blockquote>
 					<p>{line.text}</p>
 				</blockquote>
@@ -126,36 +136,127 @@ function renderLine(line: TranscriptLine) {
 	)
 }
 
+const leadingInputNames = ['conversationId', 'memoryContext'] as const
+
+function sortToolInputs(inputs: Array<TranscriptInput>) {
+	return [...inputs].sort((left, right) => {
+		if (left.name === 'code' || right.name === 'code') {
+			if (left.name === 'code' && right.name !== 'code') return 1
+			if (right.name === 'code' && left.name !== 'code') return -1
+		}
+		const leftLead = leadingInputNames.indexOf(
+			left.name as (typeof leadingInputNames)[number],
+		)
+		const rightLead = leadingInputNames.indexOf(
+			right.name as (typeof leadingInputNames)[number],
+		)
+		const leftRank = leftLead === -1 ? leadingInputNames.length : leftLead
+		const rightRank = rightLead === -1 ? leadingInputNames.length : rightLead
+		return leftRank - rightRank
+	})
+}
+
 function renderToolCall(tool: TranscriptTool) {
 	return (
 		<details key={`${tool.name}-${tool.summary}`} mix={css(toolCss)}>
 			<summary>
-				<span mix={css(toolNameCss)}>{tool.name}</span>
+				<span mix={css(toolNameCss)}>
+					{isKodyToolName(tool.name) ? renderKodyMark() : null}
+					{tool.name}
+				</span>
 				<span mix={css(toolSummaryCss)}>{tool.summary}</span>
 			</summary>
 			<div mix={css(toolBodyCss)}>
-				<ul mix={css(hintsCss)}>
-					{tool.hints.map((hint) => (
-						<li key={hint.label}>{renderHint(hint)}</li>
-					))}
-				</ul>
-				<CopyCodeBlock code={tool.code} lang={tool.lang ?? 'ts'} />
+				<p mix={css(toolNoteCss)}>{tool.note}</p>
+				{sortToolInputs(tool.inputs).map((input) => renderInput(input))}
+				<hr mix={css(ioRuleCss)} />
+				<div mix={css(paneCss)}>
+					<span mix={css(paneLabelCss)}>Returns</span>
+					<CopyCodeBlock
+						copy={false}
+						code={tool.result}
+						lang={tool.resultLang ?? 'json'}
+					/>
+				</div>
 			</div>
 		</details>
 	)
 }
 
-function renderHint(hint: TranscriptHint) {
+function isKodyToolName(name: string) {
+	return name === 'search' || name === 'execute'
+}
+
+function renderUserIcon() {
 	return (
-		<div mix={css(hintCss)} data-kind={hint.kind}>
-			<span mix={css(hintLabelCss)}>{hint.label}</span>
-			<span>{hint.detail}</span>
+		<svg
+			viewBox="0 0 24 24"
+			width="1em"
+			height="1em"
+			aria-hidden="true"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		>
+			<circle cx="12" cy="8" r="3.5" />
+			<path d="M5 19.5c.7-3.2 3.4-5 7-5s6.3 1.8 7 5" />
+		</svg>
+	)
+}
+
+function renderAgentIcon() {
+	return (
+		<svg
+			viewBox="0 0 24 24"
+			width="1em"
+			height="1em"
+			aria-hidden="true"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		>
+			<rect x="5" y="8" width="14" height="11" rx="2.5" />
+			<path d="M12 8V5" />
+			<circle cx="12" cy="4.5" r="1" fill="currentColor" />
+			<circle cx="9" cy="13.5" r="1" fill="currentColor" />
+			<circle cx="15" cy="13.5" r="1" fill="currentColor" />
+		</svg>
+	)
+}
+
+function renderKodyMark() {
+	return (
+		<img
+			src="/images/kody-mark.png"
+			alt=""
+			width={12}
+			height={12}
+			mix={css(inlineMarkCss)}
+		/>
+	)
+}
+
+function renderInput(input: TranscriptInput) {
+	return (
+		<div mix={css(paneCss)} data-kind={input.kind}>
+			<span mix={css(paneLabelCss)}>{input.name}</span>
+			<CopyCodeBlock
+				copy={false}
+				code={input.value}
+				lang={input.lang ?? 'json'}
+			/>
 		</div>
 	)
 }
 
 const walkthroughCss = {
 	marginTop: 'clamp(1.8rem, 4vw, 2.5rem)',
+	minWidth: 0,
+	maxWidth: '100%',
 }
 
 const leadCss = {
@@ -166,7 +267,9 @@ const leadCss = {
 }
 
 const actCss = {
+	...getArticleBreakoutCss(),
 	marginTop: 'clamp(2.4rem, 6vw, 3.4rem)',
+	minWidth: 0,
 	'& h2': {
 		margin: '0.2rem 0 0',
 		fontSize: '1.55rem',
@@ -184,17 +287,32 @@ const kickerCss = {
 	color: colors.primaryText,
 }
 
+const exampleKickerCss = {
+	margin: 0,
+	fontSize: '0.95rem',
+	fontWeight: 600,
+	color: colors.primaryText,
+	textWrap: 'pretty' as const,
+}
+
 const threadCss = {
 	listStyle: 'none',
 	margin: '1.25rem 0 0',
 	padding: 0,
 	display: 'grid',
 	gap: '0.9rem',
+	minWidth: 0,
+	'& > *': { minWidth: 0 },
 }
+
+const captionIconGap = '0.35em'
 
 const bubbleCss = {
 	margin: 0,
 	'& figcaption': {
+		display: 'flex',
+		alignItems: 'center',
+		gap: captionIconGap,
 		margin: 0,
 		fontSize: '0.75rem',
 		fontWeight: 650,
@@ -216,8 +334,15 @@ const bubbleCss = {
 
 const youCss = {
 	...bubbleCss,
+	'& figcaption': {
+		...bubbleCss['& figcaption'],
+		justifyContent: 'flex-end',
+		textAlign: 'right' as const,
+	},
 	'& blockquote': {
 		...bubbleCss['& blockquote'],
+		marginInlineStart: 'auto',
+		maxWidth: 'min(36rem, 100%)',
 		backgroundColor: colors.primarySoftest,
 		borderColor: colors.primarySoft,
 	},
@@ -234,33 +359,57 @@ const agentCss = {
 const toolsCss = {
 	display: 'grid',
 	gap: '0.55rem',
+	minWidth: 0,
 }
 
 const toolCss = {
+	minWidth: 0,
 	border: `1px solid ${colors.border}`,
 	borderRadius: radius.lg,
 	backgroundColor: colors.surface,
 	'& summary': {
 		display: 'grid',
-		gridTemplateColumns: 'auto 1fr',
+		gridTemplateColumns: 'auto auto 1fr',
 		columnGap: spacing.sm,
 		rowGap: '0.15rem',
-		alignItems: 'baseline',
+		alignItems: 'center',
 		padding: `${spacing.sm} ${spacing.md}`,
 		cursor: 'pointer',
 		listStyle: 'none',
 		'&::-webkit-details-marker': { display: 'none' },
+		'&::before': {
+			content: '""',
+			width: '0.38em',
+			height: '0.38em',
+			marginInlineEnd: `calc(${spacing.sm} * 0.5)`,
+			borderRight: `2px solid ${colors.textMuted}`,
+			borderBottom: `2px solid ${colors.textMuted}`,
+			transform: 'rotate(-45deg)',
+			transition: 'transform 140ms ease',
+		},
 	},
 	'&[open] summary': {
 		borderBottom: `1px solid ${colors.border}`,
+		'&::before': {
+			transform: 'rotate(45deg)',
+		},
 	},
 }
 
 const toolNameCss = {
+	display: 'inline-flex',
+	alignItems: 'center',
+	gap: captionIconGap,
 	fontFamily: typography.fontFamily,
 	fontSize: '0.82rem',
 	fontWeight: 700,
 	color: colors.primaryText,
+}
+
+const inlineMarkCss = {
+	width: '1em',
+	height: '1em',
+	display: 'block',
 }
 
 const toolSummaryCss = {
@@ -268,35 +417,40 @@ const toolSummaryCss = {
 	color: colors.textMuted,
 }
 
+const toolNoteCss = {
+	margin: 0,
+	color: colors.textMuted,
+	fontSize: '0.95rem',
+	textWrap: 'pretty' as const,
+}
+
 const toolBodyCss = {
 	padding: spacing.md,
 	display: 'grid',
 	gap: spacing.sm,
+	minWidth: 0,
+	'& > *': { minWidth: 0 },
 }
 
-const hintsCss = {
-	listStyle: 'none',
-	margin: 0,
-	padding: 0,
-	display: 'grid',
-	gap: '0.45rem',
+const ioRuleCss = {
+	margin: `${spacing.xs} 0`,
+	border: 'none',
+	borderTop: `1px solid ${colors.border}`,
 }
 
-const hintCss = {
+const paneCss = {
 	display: 'grid',
-	gridTemplateColumns: 'auto 1fr',
-	gap: `${spacing.xs} ${spacing.sm}`,
-	alignItems: 'baseline',
-	fontSize: '0.88rem',
-	color: colors.text,
+	gap: spacing.xs,
+	minWidth: 0,
 	'&[data-kind="memory"] span:first-child': {
 		backgroundColor: colors.primarySoft,
 		color: colors.primaryText,
 	},
 }
 
-const hintLabelCss = {
+const paneLabelCss = {
 	padding: '0.1rem 0.45rem',
+	justifySelf: 'start' as const,
 	borderRadius: radius.full,
 	backgroundColor: colors.primarySoftest,
 	color: colors.textMuted,

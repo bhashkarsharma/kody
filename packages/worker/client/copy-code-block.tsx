@@ -9,12 +9,17 @@ import {
 } from '#universal/styles/tokens.ts'
 import { renderHighlightedCode } from '#client/syntax-highlight.tsx'
 
-export type CopyCodeBlockProps = { code: string; lang?: string | null }
+export type CopyCodeBlockProps = {
+	code: string
+	lang?: string | null
+	copy?: boolean
+}
 
 /**
- * A highlighted `<pre>` code block with a copy button, for first-party
- * markdown surfaces (guides) whose snippets exist to be pasted into an
- * agent or terminal. Only the button is interactive.
+ * A highlighted `<pre>` code block with an optional copy button, for
+ * first-party markdown surfaces (guides) whose snippets exist to be pasted
+ * into an agent or terminal. Only the button is interactive. Pass
+ * `copy={false}` on transcript-style pages that should not invite a paste.
  */
 export function CopyCodeBlock(handle: Handle<CopyCodeBlockProps>) {
 	let copyState: 'idle' | 'copied' | 'error' = 'idle'
@@ -40,25 +45,32 @@ export function CopyCodeBlock(handle: Handle<CopyCodeBlockProps>) {
 	return () => (
 		<div mix={css(wrapperCss)}>
 			{renderHighlightedCode(handle.props.code, handle.props.lang)}
-			<button
-				type="button"
-				aria-label="Copy code to clipboard"
-				mix={[css(copyButtonCss), on('click', () => void copy())]}
-			>
-				{copyState === 'copied'
-					? 'Copied'
-					: copyState === 'error'
-						? 'Copy failed'
-						: 'Copy'}
-			</button>
+			{handle.props.copy === false ? null : (
+				<button
+					type="button"
+					aria-label="Copy code to clipboard"
+					mix={[css(copyButtonCss), on('click', () => void copy())]}
+				>
+					{copyState === 'copied'
+						? 'Copied'
+						: copyState === 'error'
+							? 'Copy failed'
+							: 'Copy'}
+				</button>
+			)}
 		</div>
 	)
 }
 
 const wrapperCss = {
 	position: 'relative' as const,
+	minWidth: 0,
+	maxWidth: '100%',
 	'& pre': {
 		margin: 0,
+		padding: `${spacing.sm} ${spacing.md}`,
+		overflowX: 'auto' as const,
+		maxWidth: '100%',
 	},
 }
 

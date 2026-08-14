@@ -642,11 +642,36 @@ export const layoutMaxWidths = {
 } as const
 
 /**
+ * Reading-column width for articles and guides. Page chrome (header, footer,
+ * marketing sections) uses `layoutMaxWidths.extended` instead.
+ */
+export const articleMeasure = '43rem'
+
+/**
  * Horizontal inset every page container carries inside its max-width box.
  * The site header, the footer, and the redesigned sections all use it, so a
  * container that skips it renders wider than the nav above it.
  */
 export const pageGutter = 'clamp(1.25rem, 4vw, 2.5rem)'
+
+/**
+ * Widen a block past `articleMeasure` when the viewport has room, staying
+ * centered on the article and inside the same gutters as the site header.
+ *
+ * Spread into the css object of a child of a `maxWidth: articleMeasure`
+ * article that uses `pageGutter` for horizontal padding. On a phone it is a
+ * no-op; on a wide screen it grows up to `maxWidth` (default
+ * `layoutMaxWidths.extended`).
+ */
+export function getArticleBreakoutCss(options?: { maxWidth?: string }) {
+	const maxWidth = options?.maxWidth ?? layoutMaxWidths.extended
+	return {
+		boxSizing: 'border-box' as const,
+		width: `min(${maxWidth}, calc(100vw - 2 * ${pageGutter}))`,
+		maxWidth: 'none' as const,
+		marginInline: `calc(50% - min(${maxWidth} / 2, 50vw - ${pageGutter}))`,
+	}
+}
 
 export const pageHeaderCss = {
 	display: 'grid',

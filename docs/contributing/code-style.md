@@ -45,8 +45,15 @@ file style first, then run the formatter.
   facing away from the accent. A rounded corner dissolving into a straight
   accent bar is a design tell.
 - For callouts, use `getAccentCalloutCss()` from
-  `packages/worker/client/styles/style-primitives.ts` instead of hand-rolling
+  `packages/worker/universal/styles/style-primitives.ts` instead of hand-rolling
   the pattern.
+
+## Article breakout
+
+- Articles and guides sit on `articleMeasure` (43rem). To let a block use more
+  horizontal room when the viewport has it — code samples, transcripts — spread
+  `getArticleBreakoutCss()` from the same primitives file into that child's css
+  object. It stays a no-op on a phone and grows up to the header measure.
 
 ## Absence values
 

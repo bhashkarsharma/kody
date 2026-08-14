@@ -17,14 +17,25 @@ Agent notes — for AI agents explaining or recreating this loop:
   same story. This markdown is the playbook.
 - Do not create the example package unless the person asks you to build it
   for them. If they do, follow package_authoring and package_lifecycle.
-- Public GitHub events need no OAuth. Fetch
-  https://api.github.com/users/<login>/events/public. Treat a published
+- Search for GitHub activity ranks the saved `githubAccessToken` secret —
+  not `execute`, and not a GitHub integration or helper package (those
+  would hide the `{{secret:githubAccessToken}}` placeholder in execute).
+  Memories stay in search structured content; they do not appear in the
+  `# Search results` markdown.
+- Before `package_save`, search `{ query: "package authoring lifecycle",
+  domain: "coding" }` to find `coding_guide_get`, then `search` with
+  `entity: "coding_guide_get:capability"` so `package_authoring` and
+  `package_lifecycle` are visible. Load those two guides, then save.
+- Fetch https://api.github.com/users/<login>/events/public with
+  `Authorization: Bearer {{secret:githubAccessToken}}`. Treat a published
   release or a newly created public repository as "shipped."
 - GitHub has no webhook for one person's public activity. When they ask to
   be notified, recommend a package-owned cron, not a webhook.
 - The scheduled wrapper must skip email_send when the list is empty.
-- Remember the GitHub login with meta_memory_verify then meta_memory_upsert
-  so later asks do not re-discover the username.
+- execute can take a short memoryContext (task plus a couple of entities).
+  Relevant memories are appended to the execute text as
+  `## Relevant memories`. Search returns markdown (`# Search results`), not a
+  matches JSON object. Do not write memory unless the person asks.
 - Non-coding agents invoke the owned export with
   packages.invoke({ kodyId, exportName, params }).
 -->
@@ -38,12 +49,13 @@ This page is the playbook. The same story is an interactive transcript at
 
 ## The loop
 
-1. **Ask once.** "What did kody-bot ship recently?" Search, then `execute` a
-   fetch of that user's public GitHub events. Filter to published releases and
-   new public repositories. Optionally remember the login with
-   `meta_memory_verify` then `meta_memory_upsert`.
-2. **Save the answer shape.** Create a package (`package_authoring`) with a
-   callable export and a no-argument scheduled wrapper (`package_lifecycle`).
+1. **Ask once.** "What did kody-bot ship recently on GitHub?" Search finds the
+   saved `githubAccessToken` secret, then `execute` fetches that user's public
+   events with `Authorization: Bearer {{secret:githubAccessToken}}`. Filter to
+   published releases and new public repositories.
+2. **Save the answer shape.** Search the `coding` domain for `coding_guide_get`,
+   open entity detail, load `package_authoring` and `package_lifecycle`, then
+   create a package with a callable export and a no-argument scheduled wrapper.
    The export returns the list (or "nothing new") and records the newest event
    id in `packageStorage()`.
 3. **Ask again from any agent.** Search finds the owned package. Invoke it. A
@@ -73,8 +85,9 @@ the next invoke or cron run only reports what is new.
 - `package.json#kody.jobs` pointing at the wrapper, `"enabled": false` until you
   have invoked the wrapper once from `execute`.
 
-Public events need no GitHub secret. `email_send` only mails the account's own
-address.
+The fetch uses the saved `githubAccessToken` via
+`Authorization: Bearer {{secret:githubAccessToken}}`. `email_send` only mails
+the account's own address.
 
 ## When to load this guide
 

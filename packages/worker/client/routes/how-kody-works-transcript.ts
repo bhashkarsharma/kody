@@ -1,15 +1,17 @@
-export type TranscriptHint = {
-	label: string
-	kind: 'memory' | 'query' | 'code' | 'schedule' | 'result'
-	detail: string
+export type TranscriptInput = {
+	name: string
+	kind: 'query' | 'code' | 'memory'
+	lang?: string
+	value: string
 }
 
 export type TranscriptTool = {
 	name: string
 	summary: string
-	hints: Array<TranscriptHint>
-	lang?: string
-	code: string
+	note: string
+	inputs: Array<TranscriptInput>
+	resultLang?: string
+	result: string
 }
 
 export type TranscriptLine =
@@ -23,341 +25,6 @@ export type TranscriptAct = {
 	title: string
 	lines: Array<TranscriptLine>
 }
-
-export const howKodyWorksTranscriptActs: Array<TranscriptAct> = [
-	{
-		id: 'ask',
-		kicker: 'In Cursor',
-		title: 'Ask once',
-		lines: [
-			{
-				role: 'user',
-				text: 'What did kody-bot ship recently?',
-			},
-			{
-				role: 'agent',
-				text: 'I will check kody-bot’s public GitHub activity and remember that login so we do not have to rediscover it.',
-			},
-			{
-				role: 'tools',
-				tools: [
-					{
-						name: 'search',
-						summary: 'Find how to read one GitHub user’s public activity',
-						hints: [
-							{
-								label: 'query',
-								kind: 'query',
-								detail: 'github public events for a user',
-							},
-							{
-								label: 'domain',
-								kind: 'query',
-								detail: 'integrations',
-							},
-						],
-						lang: 'json',
-						code: `{
-  "query": "github public events user activity",
-  "domain": "integrations"
-}`,
-					},
-					{
-						name: 'execute',
-						summary: 'Fetch public events and keep only real ships',
-						hints: [
-							{
-								label: 'username',
-								kind: 'memory',
-								detail: 'kody-bot — the GitHub login this question is about',
-							},
-							{
-								label: 'filter',
-								kind: 'code',
-								detail: 'published releases and new public repositories only',
-							},
-						],
-						lang: 'ts',
-						code: `export default async function main() {
-	const response = await fetch(
-		'https://api.github.com/users/kody-bot/events/public',
-		{
-			headers: {
-				Accept: 'application/vnd.github+json',
-				'User-Agent': 'kody',
-			},
-		},
-	)
-	if (!response.ok) throw new Error(\`GitHub \${response.status}\`)
-	const events = await response.json()
-	return events.flatMap((event) => {
-		if (
-			event.type === 'ReleaseEvent' &&
-			event.payload.action === 'published'
-		) {
-			return [{
-				id: event.id,
-				kind: 'release',
-				title: \`\${event.repo.name} \${event.payload.release.tag_name}\`,
-			}]
-		}
-		if (
-			event.type === 'CreateEvent' &&
-			event.payload.ref_type === 'repository'
-		) {
-			return [{
-				id: event.id,
-				kind: 'repository',
-				title: \`New repo \${event.repo.name}\`,
-			}]
-		}
-		return []
-	})
-}`,
-					},
-					{
-						name: 'meta_memory_verify',
-						summary: 'Check before writing a durable fact',
-						hints: [
-							{
-								label: 'memory',
-								kind: 'memory',
-								detail: 'Who “kody-bot” is, so the next ask skips rediscovery',
-							},
-						],
-						lang: 'json',
-						code: `{
-  "subject": "GitHub login to watch for shipping",
-  "summary": "kody-bot is the GitHub user whose public releases and new repos I care about."
-}`,
-					},
-					{
-						name: 'meta_memory_upsert',
-						summary: 'Keep the login after verify says it is new',
-						hints: [
-							{
-								label: 'memory',
-								kind: 'memory',
-								detail: 'verified_by_agent must be true after review',
-							},
-						],
-						lang: 'json',
-						code: `{
-  "category": "identifier",
-  "subject": "GitHub login to watch for shipping",
-  "summary": "kody-bot is the GitHub user whose public releases and new repos I care about.",
-  "verified_by_agent": true
-}`,
-					},
-				],
-			},
-			{
-				role: 'agent',
-				text: 'Two things since the last look: kody-bot/lantern v1.4.0, and a new public repo kody-bot/quiet-days.',
-			},
-			{
-				role: 'user',
-				text: 'Make this a package I can ask again.',
-			},
-			{
-				role: 'agent',
-				text: 'I will save the filter as an export you own, with a daily wrapper left off until we test it.',
-			},
-			{
-				role: 'tools',
-				tools: [
-					{
-						name: 'coding_guide_get',
-						summary: 'Load the package authoring and lifecycle guides',
-						hints: [
-							{
-								label: 'guide',
-								kind: 'query',
-								detail: 'package_authoring, then package_lifecycle',
-							},
-						],
-						lang: 'json',
-						code: `{ "guide": "package_authoring" }`,
-					},
-					{
-						name: 'package_save',
-						summary: 'Write the owned package: export, cursor, quiet job',
-						hints: [
-							{
-								label: 'kody_id',
-								kind: 'code',
-								detail: 'kody-bot-shipped',
-							},
-							{
-								label: 'cursor',
-								kind: 'memory',
-								detail:
-									'newest event id in packageStorage(), shared by ask and cron',
-							},
-							{
-								label: 'job',
-								kind: 'schedule',
-								detail: 'daily wrapper, enabled: false until invoked once',
-							},
-						],
-						lang: 'json',
-						code: `{
-  "kody_id": "kody-bot-shipped",
-  "files": {
-    "package.json": "{ exports, kody.id, kody.jobs.daily-digest enabled:false }",
-    "README.md": "## Intent — email only when kody-bot actually shipped",
-    "src/what-shipped.ts": "list + advance cursor",
-    "src/daily-digest.ts": "same list; email_send only if shipped.length > 0"
-  }
-}`,
-					},
-				],
-			},
-			{
-				role: 'agent',
-				text: 'You now have `kody-bot-shipped`. Ask again from any agent and I will invoke the export instead of walking GitHub by hand.',
-			},
-		],
-	},
-	{
-		id: 'invoke',
-		kicker: 'Later, on your phone',
-		title: 'Ask again, cheaper',
-		lines: [
-			{
-				role: 'user',
-				text: 'What did kody-bot ship recently?',
-			},
-			{
-				role: 'agent',
-				text: 'I already have a package for that.',
-			},
-			{
-				role: 'tools',
-				tools: [
-					{
-						name: 'search',
-						summary: 'Find the owned package, not a new GitHub walk',
-						hints: [
-							{
-								label: 'query',
-								kind: 'query',
-								detail: 'kody-bot shipped',
-							},
-							{
-								label: 'memory',
-								kind: 'memory',
-								detail: 'the saved login points search at the right package',
-							},
-						],
-						lang: 'json',
-						code: `{ "query": "kody-bot shipped" }`,
-					},
-					{
-						name: 'execute',
-						summary: 'Invoke the export — no model rewriting the filter',
-						hints: [
-							{
-								label: 'kodyId',
-								kind: 'code',
-								detail: 'kody-bot-shipped',
-							},
-							{
-								label: 'export',
-								kind: 'code',
-								detail: './whatShipped',
-							},
-						],
-						lang: 'ts',
-						code: `import { packages } from 'kody:runtime'
-
-export default async function main() {
-	return await packages.invoke({
-		kodyId: 'kody-bot-shipped',
-		exportName: './whatShipped',
-	})
-}`,
-					},
-				],
-			},
-			{
-				role: 'agent',
-				text: 'Nothing new since v1.4.0 and quiet-days.',
-			},
-			{
-				role: 'user',
-				text: 'Update me when kody-bot does something.',
-			},
-			{
-				role: 'agent',
-				text: 'GitHub has no webhook for one person’s public activity, so a daily cron is the fit. I will turn on the wrapper we already wrote — it emails you only when the list is not empty.',
-			},
-			{
-				role: 'tools',
-				tools: [
-					{
-						name: 'execute',
-						summary: 'Test the no-argument wrapper the scheduler will call',
-						hints: [
-							{
-								label: 'export',
-								kind: 'schedule',
-								detail: './daily-digest — same contract as the cron',
-							},
-							{
-								label: 'quiet day',
-								kind: 'result',
-								detail: '{ emailed: false } — no mail',
-							},
-						],
-						lang: 'ts',
-						code: `import { packages } from 'kody:runtime'
-
-export default async function main() {
-	return await packages.invoke({
-		kodyId: 'kody-bot-shipped',
-		exportName: './daily-digest',
-	})
-}`,
-					},
-					{
-						name: 'package_save',
-						summary: 'Enable the daily job after the wrapper succeeds',
-						hints: [
-							{
-								label: 'schedule',
-								kind: 'schedule',
-								detail: '0 8 * * * in America/Denver',
-							},
-							{
-								label: 'email',
-								kind: 'result',
-								detail: 'email_send only when shipped.length > 0',
-							},
-						],
-						lang: 'json',
-						code: `{
-  "kody": {
-    "jobs": {
-      "daily-digest": {
-        "entry": "./src/daily-digest.ts",
-        "schedule": { "type": "cron", "expression": "0 8 * * *" },
-        "timezone": "America/Denver",
-        "enabled": true
-      }
-    }
-  }
-}`,
-					},
-				],
-			},
-			{
-				role: 'agent',
-				text: 'It will check every morning. If kody-bot shipped something, you get mail. If not, nothing hits your inbox.',
-			},
-		],
-	},
-]
 
 export const howKodyWorksPackageFiles = {
 	'package.json': `{
@@ -408,7 +75,8 @@ async function listShipped(sinceId: string | null) {
 		{
 			headers: {
 				Accept: 'application/vnd.github+json',
-				'User-Agent': 'kody',
+				Authorization: 'Bearer {{secret:githubAccessToken}}',
+				'X-GitHub-Api-Version': '2022-11-28',
 			},
 		},
 	)
@@ -467,3 +135,560 @@ export default async function dailyDigest() {
 }
 `,
 } as const
+
+const fetchShipsCode = `export default async function main() {
+	const response = await fetch(
+		'https://api.github.com/users/kody-bot/events/public',
+		{
+			headers: {
+				Accept: 'application/vnd.github+json',
+				Authorization: 'Bearer {{secret:githubAccessToken}}',
+				'X-GitHub-Api-Version': '2022-11-28',
+			},
+		},
+	)
+	if (!response.ok) throw new Error(\`GitHub \${response.status}\`)
+	const events = await response.json()
+	return events.flatMap((event) => {
+		if (
+			event.type === 'ReleaseEvent' &&
+			event.payload.action === 'published'
+		) {
+			return [{
+				id: event.id,
+				kind: 'release',
+				title: \`\${event.repo.name} \${event.payload.release.tag_name}\`,
+			}]
+		}
+		if (
+			event.type === 'CreateEvent' &&
+			event.payload.ref_type === 'repository'
+		) {
+			return [{
+				id: event.id,
+				kind: 'repository',
+				title: \`New repo \${event.repo.name}\`,
+			}]
+		}
+		return []
+	})
+}`
+
+const invokeWhatShippedCode = `import { packages } from 'kody:runtime'
+
+export default async function main() {
+	return await packages.invoke({
+		kodyId: 'kody-bot-shipped',
+		exportName: './whatShipped',
+	})
+}`
+
+const invokeDailyDigestCode = `import { packages } from 'kody:runtime'
+
+export default async function main() {
+	return await packages.invoke({
+		kodyId: 'kody-bot-shipped',
+		exportName: './daily-digest',
+	})
+}`
+
+const loadGuidesCode = `import { kody } from 'kody:runtime'
+
+export default async function main() {
+	const authoring = await kody.coding_guide_get({
+		guide: 'package_authoring',
+	})
+	const lifecycle = await kody.coding_guide_get({
+		guide: 'package_lifecycle',
+	})
+	return { authoring, lifecycle }
+}`
+
+const savePackageCode = `import { kody } from 'kody:runtime'
+
+export default async function main(input = {}) {
+	return await kody.package_save(input)
+}`
+
+function packageSaveFiles(jobEnabled: boolean) {
+	const packageJson = jobEnabled
+		? howKodyWorksPackageFiles['package.json'].replace(
+				'"enabled": false',
+				'"enabled": true',
+			)
+		: howKodyWorksPackageFiles['package.json']
+	return [
+		{ path: 'package.json', content: packageJson },
+		{ path: 'README.md', content: howKodyWorksPackageFiles['README.md'] },
+		{
+			path: 'src/what-shipped.ts',
+			content: howKodyWorksPackageFiles['src/what-shipped.ts'],
+		},
+		{
+			path: 'src/daily-digest.ts',
+			content: howKodyWorksPackageFiles['src/daily-digest.ts'],
+		},
+	]
+}
+
+function jsonInput(value: unknown) {
+	return JSON.stringify(value, null, 2)
+}
+
+const askMemoryContext = {
+	task: 'What did kody-bot ship recently on GitHub?',
+	entities: ['kody-bot'],
+}
+
+const watchLoginMemory = {
+	subject: 'GitHub login I watch',
+	summary: 'kody-bot is the GitHub user whose public shipping I ask about.',
+}
+
+function memoryContextInput() {
+	return {
+		name: 'memoryContext',
+		kind: 'memory' as const,
+		lang: 'json',
+		value: jsonInput(askMemoryContext),
+	}
+}
+
+const askConversationId = '3k7n2p9q4r8w'
+const phoneConversationId = '5h8m2q7t1v4x'
+
+function conversationIdInput(conversationId: string) {
+	return {
+		name: 'conversationId',
+		kind: 'query' as const,
+		lang: 'json',
+		value: jsonInput(conversationId),
+	}
+}
+
+const conversationIdReturnNote =
+	'Tool conversation id; pass it back on subsequent search/execute calls.'
+
+function conversationIdReturn(conversationId: string) {
+	return `conversationId: ${conversationId}\n${conversationIdReturnNote}`
+}
+
+function searchTextReturn(input: { conversationId: string; body: string }) {
+	return `${conversationIdReturn(input.conversationId)}\n\n${input.body}`
+}
+
+function executeTextReturn(input: {
+	conversationId: string
+	value: unknown
+	memories?: Array<{ subject: string; summary: string }>
+}) {
+	const parts = [
+		conversationIdReturn(input.conversationId),
+		'',
+		jsonInput(input.value),
+	]
+	if (input.memories && input.memories.length > 0) {
+		parts.push('', '## Relevant memories', '')
+		for (const memory of input.memories) {
+			parts.push(`- **${memory.subject}** — ${memory.summary}`)
+		}
+	}
+	return parts.join('\n')
+}
+
+const githubSearchMarkdown = `# Search results
+
+For full detail on entity-backed hits, call \`search\` with \`entity: "{id}:{type}"\`.
+
+1. **secret** \`githubAccessToken\` — github OAuth access token. Entity: \`githubAccessToken:secret\``
+
+const codingGuideSearchMarkdown = `# Search results
+
+For full detail on entity-backed hits, call \`search\` with \`entity: "{id}:{type}"\`.
+
+1. **capability** \`coding_guide_get\` (\`coding\`) — Load an official Kody guide (markdown, bundled from the kody repository). Prefer this capability plus \`search\` results over local repo spelunking when Kody auth or integration behavior is already documented. Entity: \`coding_guide_get:capability\`
+   \`kody.coding_guide_get(args)\` — \`type CodingGuideGetInput = { guide: "what_is_kody" | "quick_example" | "first_win" | "package_authoring" | "package_lifecycle" | ... }\`; use entity detail for the full definition`
+
+const codingGuideDetailMarkdown = `# Capability — \`coding_guide_get\`
+
+Load an official Kody guide (markdown, bundled from the kody repository).
+Use \`guide: "package_authoring"\` for package creation or material package updates.
+Use \`guide: "package_lifecycle"\` to choose reuse vs a new durable package, and before enabling package-owned schedules.
+
+## Summary
+
+- Entity: \`coding_guide_get:capability\`
+- Domain: \`coding\`
+- Required input fields: \`guide\`
+
+## Execute from \`execute\`
+
+\`\`\`ts
+import { kody } from 'kody:runtime'
+
+export default async function main(input = {}) {
+	return await kody.coding_guide_get(input)
+}
+\`\`\`
+`
+
+const packageSearchMarkdown = `# Search results
+
+For full detail on entity-backed hits, call \`search\` with \`entity: "{id}:{type}"\`.
+
+1. **package** @you/kody-bot-shipped (\`kody-bot-shipped\`) — What kody-bot shipped since you last asked. Entity: \`kody-bot-shipped:package\``
+
+export const howKodyWorksTranscriptActs: Array<TranscriptAct> = [
+	{
+		id: 'ask',
+		kicker: 'Example of a conversation you might have with your agent.',
+		title: 'Ask once',
+		lines: [
+			{
+				role: 'user',
+				text: 'What did kody-bot ship recently on GitHub?',
+			},
+			{
+				role: 'agent',
+				text: 'I will use your GitHub token to read kody-bot’s public activity.',
+			},
+			{
+				role: 'tools',
+				tools: [
+					{
+						name: 'search',
+						summary: 'Find a saved GitHub token for user activity',
+						note: 'Search returns secret metadata, never the token. The conversationId is minted here so later calls in this chat stay cheap.',
+						inputs: [
+							{
+								name: 'query',
+								kind: 'query',
+								lang: 'json',
+								value: jsonInput('github user activity'),
+							},
+						],
+						resultLang: 'md',
+						result: searchTextReturn({
+							conversationId: askConversationId,
+							body: githubSearchMarkdown,
+						}),
+					},
+					{
+						name: 'execute',
+						summary:
+							'Fetch public events with the saved token and keep only real ships',
+						note: 'The module never sees the token. Authorization gets a secret placeholder, filled in only for approved hosts. memoryContext is why kody-bot shows up under Relevant memories.',
+						inputs: [
+							{
+								name: 'code',
+								kind: 'code',
+								lang: 'ts',
+								value: fetchShipsCode,
+							},
+							conversationIdInput(askConversationId),
+							memoryContextInput(),
+						],
+						resultLang: 'md',
+						result: executeTextReturn({
+							conversationId: askConversationId,
+							value: [
+								{
+									id: '51284920123',
+									kind: 'release',
+									title: 'kody-bot/lantern v1.4.0',
+								},
+								{
+									id: '51279004401',
+									kind: 'repository',
+									title: 'New repo kody-bot/quiet-days',
+								},
+							],
+							memories: [watchLoginMemory],
+						}),
+					},
+				],
+			},
+			{
+				role: 'agent',
+				text: 'Two things since the last look: kody-bot/lantern v1.4.0, and a new public repo kody-bot/quiet-days.',
+			},
+			{
+				role: 'user',
+				text: 'Make this a package I can ask again.',
+			},
+			{
+				role: 'agent',
+				text: 'I will load the package authoring guides, then save the filter as an export you own, with a daily wrapper left off until we test it.',
+			},
+			{
+				role: 'tools',
+				tools: [
+					{
+						name: 'search',
+						summary: 'Find the official package authoring guides',
+						note: 'domain: coding ranks official guides. That is how the agent finds coding_guide_get instead of inventing a package shape.',
+						inputs: [
+							{
+								name: 'query',
+								kind: 'query',
+								lang: 'json',
+								value: jsonInput('package authoring lifecycle'),
+							},
+							{
+								name: 'domain',
+								kind: 'query',
+								lang: 'json',
+								value: jsonInput('coding'),
+							},
+							conversationIdInput(askConversationId),
+						],
+						resultLang: 'md',
+						result: searchTextReturn({
+							conversationId: askConversationId,
+							body: codingGuideSearchMarkdown,
+						}),
+					},
+					{
+						name: 'search',
+						summary: 'Open coding_guide_get for the guide ids',
+						note: 'Entity detail is the full card. It names package_authoring and package_lifecycle — the two guides this save needs.',
+						inputs: [
+							{
+								name: 'entity',
+								kind: 'query',
+								lang: 'json',
+								value: jsonInput('coding_guide_get:capability'),
+							},
+							conversationIdInput(askConversationId),
+						],
+						resultLang: 'md',
+						result: searchTextReturn({
+							conversationId: askConversationId,
+							body: codingGuideDetailMarkdown,
+						}),
+					},
+					{
+						name: 'execute',
+						summary: 'Load the package authoring and lifecycle guides',
+						note: 'Guides are bundled markdown from the Kody repo. The agent reads them in execute, then follows them.',
+						inputs: [
+							{
+								name: 'code',
+								kind: 'code',
+								lang: 'ts',
+								value: loadGuidesCode,
+							},
+							conversationIdInput(askConversationId),
+							memoryContextInput(),
+						],
+						resultLang: 'md',
+						result: executeTextReturn({
+							conversationId: askConversationId,
+							value: {
+								authoring: {
+									title: 'Package authoring',
+									body: '# Package authoring\n\nCreate a complete UTF-8 package with a README Intent section.',
+								},
+								lifecycle: {
+									title: 'Package lifecycle',
+									body: '# Package lifecycle\n\nLoad this before enabling a package-owned schedule.',
+								},
+							},
+						}),
+					},
+					{
+						name: 'execute',
+						summary: 'Write the owned package: export, cursor, quiet job',
+						note: 'The ad hoc filter becomes a package you own: a callable export, a cursor in packageStorage, and a daily job left off until it is tested.',
+						inputs: [
+							{
+								name: 'code',
+								kind: 'code',
+								lang: 'ts',
+								value: savePackageCode,
+							},
+							{
+								name: 'params',
+								kind: 'code',
+								lang: 'json',
+								value: jsonInput({ files: packageSaveFiles(false) }),
+							},
+							conversationIdInput(askConversationId),
+							memoryContextInput(),
+						],
+						resultLang: 'md',
+						result: executeTextReturn({
+							conversationId: askConversationId,
+							value: {
+								package_id: 'pkg_kody_bot_shipped',
+								kody_id: 'kody-bot-shipped',
+								name: '@you/kody-bot-shipped',
+								description: 'What kody-bot shipped since you last asked.',
+								tags: [],
+								has_app: false,
+								hidden: false,
+								source_id: 'src_kody_bot_shipped',
+								created_at: '2026-08-13T14:52:00.000Z',
+								updated_at: '2026-08-13T14:52:00.000Z',
+								pending_secret_package_approvals: null,
+								next_steps:
+									'Coding agents with local filesystem/git access should use the git lane for further edits instead of re-sending full file sets: call package_get_git_remote({ kody_id: "kody-bot-shipped" }), run the returned setup_commands to clone into a temporary directory, edit and push normally, then publish with package_publish_external_push. Binary assets and multi-file refactors are only supported through that git lane. Tool-only agents without local git can continue with package_save or repo sessions.',
+							},
+						}),
+					},
+				],
+			},
+			{
+				role: 'agent',
+				text: 'You now have `kody-bot-shipped`. Ask again from any agent and I will invoke the export instead of walking GitHub by hand.',
+			},
+		],
+	},
+	{
+		id: 'invoke',
+		kicker: 'Later, on your phone',
+		title: 'Ask again, cheaper',
+		lines: [
+			{
+				role: 'user',
+				text: 'What did kody-bot ship recently on GitHub?',
+			},
+			{
+				role: 'agent',
+				text: 'I already have a package for that.',
+			},
+			{
+				role: 'tools',
+				tools: [
+					{
+						name: 'search',
+						summary: 'Find the owned package, not a new GitHub walk',
+						note: 'A new conversation on the phone. Search finds the owned package instead of walking GitHub again.',
+						inputs: [
+							{
+								name: 'query',
+								kind: 'query',
+								lang: 'json',
+								value: jsonInput('kody-bot shipped'),
+							},
+						],
+						resultLang: 'md',
+						result: searchTextReturn({
+							conversationId: phoneConversationId,
+							body: packageSearchMarkdown,
+						}),
+					},
+					{
+						name: 'execute',
+						summary: 'Invoke the export — no model rewriting the filter',
+						note: 'packages.invoke runs the export as written. No model rewrites the filter. The memory comes back because this conversation is new.',
+						inputs: [
+							{
+								name: 'code',
+								kind: 'code',
+								lang: 'ts',
+								value: invokeWhatShippedCode,
+							},
+							conversationIdInput(phoneConversationId),
+							memoryContextInput(),
+						],
+						resultLang: 'md',
+						result: executeTextReturn({
+							conversationId: phoneConversationId,
+							value: {
+								shipped: [],
+								message: 'Nothing new.',
+							},
+							memories: [watchLoginMemory],
+						}),
+					},
+				],
+			},
+			{
+				role: 'agent',
+				text: 'Nothing new since v1.4.0 and quiet-days.',
+			},
+			{
+				role: 'user',
+				text: 'Update me when kody-bot does something.',
+			},
+			{
+				role: 'agent',
+				text: 'GitHub has no webhook for one person’s public activity, so a daily cron is the fit. I will turn on the wrapper we already wrote — it emails you only when the list is not empty.',
+			},
+			{
+				role: 'tools',
+				tools: [
+					{
+						name: 'execute',
+						summary: 'Test the no-argument wrapper the scheduler will call',
+						note: 'The wrapper takes no arguments so a cron can call it. shipped is empty, so emailed is false — quiet on purpose.',
+						inputs: [
+							{
+								name: 'code',
+								kind: 'code',
+								lang: 'ts',
+								value: invokeDailyDigestCode,
+							},
+							conversationIdInput(phoneConversationId),
+							memoryContextInput(),
+						],
+						resultLang: 'md',
+						result: executeTextReturn({
+							conversationId: phoneConversationId,
+							value: { emailed: false },
+						}),
+					},
+					{
+						name: 'execute',
+						summary: 'Enable the daily job after the wrapper succeeds',
+						note: 'Enable the schedule only after the wrapper has been invoked once. After this, mornings are a job, not a prompt.',
+						inputs: [
+							{
+								name: 'code',
+								kind: 'code',
+								lang: 'ts',
+								value: savePackageCode,
+							},
+							{
+								name: 'params',
+								kind: 'code',
+								lang: 'json',
+								value: jsonInput({
+									package_id: 'pkg_kody_bot_shipped',
+									files: packageSaveFiles(true),
+									confirm_destructive_overwrite: true,
+								}),
+							},
+							conversationIdInput(phoneConversationId),
+							memoryContextInput(),
+						],
+						resultLang: 'md',
+						result: executeTextReturn({
+							conversationId: phoneConversationId,
+							value: {
+								package_id: 'pkg_kody_bot_shipped',
+								kody_id: 'kody-bot-shipped',
+								name: '@you/kody-bot-shipped',
+								description: 'What kody-bot shipped since you last asked.',
+								tags: [],
+								has_app: false,
+								hidden: false,
+								source_id: 'src_kody_bot_shipped',
+								created_at: '2026-08-13T14:52:00.000Z',
+								updated_at: '2026-08-13T15:08:00.000Z',
+								pending_secret_package_approvals: null,
+								next_steps:
+									'Coding agents with local filesystem/git access should use the git lane for further edits instead of re-sending full file sets: call package_get_git_remote({ kody_id: "kody-bot-shipped" }), run the returned setup_commands to clone into a temporary directory, edit and push normally, then publish with package_publish_external_push. Binary assets and multi-file refactors are only supported through that git lane. Tool-only agents without local git can continue with package_save or repo sessions.',
+							},
+						}),
+					},
+				],
+			},
+			{
+				role: 'agent',
+				text: 'It will check every morning. If kody-bot shipped something, you get mail. If not, nothing hits your inbox.',
+			},
+		],
+	},
+]

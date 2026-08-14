@@ -15,7 +15,12 @@ import { readJson } from '#client/routes/account-approval-shared.ts'
 import { formatLastVerified } from '#client/routes/guides.tsx'
 import { renderHowKodyWorksWalkthrough } from '#client/routes/how-kody-works-walkthrough.tsx'
 import { colors } from '#universal/styles/tokens.ts'
-import { pageHeadCss, proseCss } from '#universal/styles/style-primitives.ts'
+import {
+	articleMeasure,
+	pageGutter,
+	pageHeadCss,
+	proseCss,
+} from '#universal/styles/style-primitives.ts'
 
 const interactiveGuideSlug = 'how-kody-works'
 
@@ -269,10 +274,10 @@ export function GuideDetailRoute(handle: Handle) {
 /* ---------- styles (blog post rhythm on the 43rem measure) ---------- */
 
 const guidePageCss = {
-	maxWidth: '43rem',
+	maxWidth: articleMeasure,
+	minWidth: 0,
 	marginInline: 'auto',
-	padding:
-		'clamp(2.5rem, 6vw, 4rem) clamp(1.25rem, 4vw, 2.5rem) clamp(4rem, 8vw, 6.5rem)',
+	padding: `clamp(2.5rem, 6vw, 4rem) ${pageGutter} clamp(4rem, 8vw, 6.5rem)`,
 }
 
 const guideBackCss = {

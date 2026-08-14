@@ -51,18 +51,18 @@ import {
 const factoryBeats = [
 	{
 		trigger: 'Cron',
-		title: 'What did kody-bot ship?',
-		copy: 'Ask once. Save the export. A daily job emails you only when something actually shipped.',
+		title: 'Shipping digest',
+		copy: 'Yesterday’s releases and new public repos, mailed only when the list is not empty.',
 	},
 	{
 		trigger: 'Webhook',
-		title: 'A Sentry issue lands',
-		copy: 'sentry-triage starts a cloud agent. Nobody opened chat.',
+		title: 'Issue triage',
+		copy: 'A new issue hits the webhook and your triage package kicks off a cloud agent. No manual trigger.',
 	},
 	{
-		trigger: 'Cron',
-		title: 'Morning briefing',
-		copy: '7am Denver. It runs every morning.',
+		trigger: 'Invoke',
+		title: 'Livestream archive',
+		copy: 'A Worker posts to the invoke URL. The export locks the VOD and files it. No model in the loop.',
 	},
 ] as const
 
@@ -305,6 +305,11 @@ export function HomeRoute(handle: Handle) {
 							</article>
 						))}
 					</div>
+					<p mix={css(factoryCloseCss)}>
+						Kody has the primitives for your agent to build you{' '}
+						<strong>pretty much anything</strong>. What will{' '}
+						<strong>you</strong> build?
+					</p>
 					<p mix={css(factoryWalkthroughCss)}>
 						<a href={routes.guideDetail.href({ slug: 'how-kody-works' })}>
 							See the whole loop
@@ -973,8 +978,20 @@ const factoryBeatCss = {
 	},
 }
 
+const factoryCloseCss = {
+	margin: 'clamp(2rem, 4vw, 2.75rem) auto 0',
+	color: colors.textMuted,
+	fontSize: '1.02rem',
+	maxWidth: '42ch',
+	textWrap: 'balance' as const,
+	'& strong': {
+		color: colors.text,
+		fontWeight: 650,
+	},
+}
+
 const factoryWalkthroughCss = {
-	margin: 'clamp(2rem, 4vw, 2.75rem) 0 0',
+	margin: '0.85rem 0 0',
 	'& a': {
 		color: colors.primaryText,
 		fontWeight: 600,
