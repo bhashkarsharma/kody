@@ -171,17 +171,24 @@ export function BlogPostRoute(handle: Handle) {
 		})
 		if (needsLoad && typeof document !== 'undefined') {
 			status = 'loading'
+			const loadAttempt = loadLatch.getPendingAttempt()
 			handle.queueTask(async (signal) => {
 				try {
 					await loadPost(slug, signal)
-					if (signal.aborted) return
+					if (signal.aborted) {
+						loadLatch.clearPending(currentHref, loadAttempt)
+						return
+					}
 					if (status === 'ready' || status === 'not-found') {
 						loadLatch.markLoaded(currentHref)
 					} else {
 						loadLatch.markFailed(currentHref)
 					}
 				} catch {
-					if (signal.aborted) return
+					if (signal.aborted) {
+						loadLatch.clearPending(currentHref, loadAttempt)
+						return
+					}
 					loadLatch.markFailed(currentHref)
 				}
 			})
