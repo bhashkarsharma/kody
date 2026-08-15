@@ -40,7 +40,7 @@ test('source deletion removes only its repo-session storage inventory', async ()
 	const db = createD1FromSqlite(sqlite)
 
 	await expect(
-		deleteEntitySource(db, { id: 'source-a', userId: 'user-a' }),
+		deleteEntitySource({ APP_DB: db }, { id: 'source-a', userId: 'user-a' }),
 	).resolves.toBe(true)
 	expect(
 		sqlite
@@ -60,7 +60,7 @@ test('source deletion removes only its repo-session storage inventory', async ()
 	])
 	expect(
 		sqlite.prepare(`SELECT id FROM repo_sessions ORDER BY id`).all(),
-	).toEqual([{ id: 'session-a' }, { id: 'session-b' }])
+	).toEqual([{ id: 'session-b' }])
 })
 
 test('external reconcile selects token-pending packages and the daily backstop covers the fleet', async () => {

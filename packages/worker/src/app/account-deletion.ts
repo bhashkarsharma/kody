@@ -23,6 +23,12 @@ import {
 	userMeterRpc,
 } from '#worker/entitlements/user-meter-client.ts'
 import { mailboxRpc } from '#worker/email/mailbox-client.ts'
+import { repoSessionIndexRpc } from '#worker/repo/repo-session-index-client.ts'
+import { listRepoSessionsByUser } from '#worker/repo/repo-sessions.ts'
+import {
+	deleteLeftoverD1RepoSessionsByUser,
+	listLeftoverD1RepoSessionIdsByUser,
+} from '#worker/repo/repo-session-leftover-d1.ts'
 import {
 	listAccountUserPackageServices,
 	listAccountUserStorageIds,
@@ -269,12 +275,21 @@ async function listUserSavedPackages(env: Env, userId: string) {
 }
 
 async function listUserRepoSessions(env: Env, userId: string) {
-	const rows = await env.APP_DB.prepare(
-		`SELECT id FROM repo_sessions WHERE user_id = ?`,
-	)
-		.bind(userId)
-		.all<{ id: string }>()
-	return (rows.results ?? []).map((row) => ({ id: row.id }))
+	const fromIndex = env.REPO_SESSION_INDEX
+		? await listRepoSessionsByUser(env, userId)
+		: []
+	const leftoverIds = await listLeftoverD1RepoSessionIdsByUser({
+		db: env.APP_DB,
+		userId,
+	})
+	const byId = new Map<string, { id: string }>()
+	for (const row of fromIndex) {
+		byId.set(row.id, { id: row.id })
+	}
+	for (const sessionId of leftoverIds) {
+		byId.set(sessionId, { id: sessionId })
+	}
+	return [...byId.values()]
 }
 
 async function listUserRemoteConnectors(env: Env, userId: string) {
@@ -708,6 +723,28 @@ async function purgeRepoSessions(input: {
 		}
 	}
 	return purged
+}
+
+async function purgeRepoSessionIndex(input: {
+	env: Env
+	userId: string
+	warnings: Array<string>
+}): Promise<number> {
+	try {
+		await deleteLeftoverD1RepoSessionsByUser({
+			db: input.env.APP_DB,
+			userId: input.userId,
+		})
+		await repoSessionIndexRpc({
+			env: input.env,
+			userId: input.userId,
+		}).purge({ ownerId: input.userId })
+		return 1
+	} catch (error) {
+		const message = getErrorMessage(error)
+		input.warnings.push(`Repo session index purge failed: ${message}`)
+		return 0
+	}
 }
 
 async function purgeRemoteConnectorSessions(input: {
@@ -1164,6 +1201,13 @@ export async function deleteUserAccount(input: {
 		sessions: inventory.repoSessions,
 		warnings,
 	})
+	result.clearedDurableObjects.repoSessionIndexes = await purgeRepoSessionIndex(
+		{
+			env: input.env,
+			userId: input.mcpUserId,
+			warnings,
+		},
+	)
 	result.clearedDurableObjects.remoteConnectorSessions =
 		await purgeRemoteConnectorSessions({
 			env: input.env,
