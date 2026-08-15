@@ -84,8 +84,7 @@ export function TimelineRoute(handle: Handle) {
 	const loadLatch = createRouteLoadLatch()
 
 	async function loadTimeline() {
-		status = 'loading'
-		handle.update()
+		// Do not call handle.update() before the first await — see blog.tsx.
 		try {
 			const response = await fetch(timelineApiPath, {
 				headers: { Accept: 'application/json' },
@@ -140,6 +139,7 @@ export function TimelineRoute(handle: Handle) {
 			needsStaleRefresh,
 		})
 		if (needsLoad && typeof document !== 'undefined') {
+			status = 'loading'
 			handle.queueTask(async () => {
 				await runLoad(currentHref)
 			})
@@ -181,6 +181,11 @@ export function TimelineRoute(handle: Handle) {
 								mix={[
 									css(getPillButtonCss()),
 									on('click', () => {
+										// Click-driven retry may call handle.update() —
+										// unlike queueTask loads, this is not aborted by
+										// the same render cycle.
+										status = 'loading'
+										handle.update()
 										void runLoad(currentHref)
 									}),
 								]}
