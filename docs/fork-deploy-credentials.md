@@ -44,6 +44,21 @@ gh variable set APP_BASE_URL --repo bhashkarsharma/kody --body "https://<your-do
 gh variable set AGENTMAIL_FROM --repo bhashkarsharma/kody --body "<inbox>@agentmail.to"
 ```
 
+## Syncing from upstream
+
+The fork carries code patches (AgentMail email adapter + deploy trims) on top of
+`kentcdodds/kody`. To pull in upstream changes without losing those patches:
+
+1. **Recommended:** Actions tab → **Sync with upstream** → **Run workflow**
+   (also runs automatically every Monday). It merges `upstream/main` into the
+   fork's `main` and pushes. If upstream edited a file we patched, the merge
+   fails loudly — resolve the conflict locally and push.
+2. **Alternative:** the **Sync fork** button on the fork's Code page
+   (`https://github.com/bhashkarsharma/kody`). Prefer the workflow — it
+   reports conflicts as a failed run instead of a silent prompt.
+
+Never use "Hard reset to upstream" — it destroys the fork's patches.
+
 ## After filling in
 
 1. Open https://github.com/bhashkarsharma/kody/actions — click **"I understand my workflows, go ahead and enable them"**

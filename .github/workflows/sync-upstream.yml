@@ -1,0 +1,46 @@
+name: Sync with upstream
+
+# One-click sync: Actions tab → "Sync with upstream" → Run workflow.
+# Merges upstream (kentcdodds/kody) main into this fork's main without
+# rewriting fork history. Conflicts (upstream edits a file we patched) fail
+# the run loudly so they get resolved by hand.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1' # weekly (Monday 04:00 UTC)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream/main into fork main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/kentcdodds/kody.git
+          git fetch upstream main --prune
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "::notice::Already in sync with upstream/main ($(git rev-parse --short upstream/main))."
+            exit 0
+          fi
+          prev_head="$(git rev-parse HEAD)"
+          git merge --no-edit --no-ff upstream/main
+          git push origin main
+          echo "::notice::Merged upstream changes:"
+          git diff --stat "$prev_head" HEAD
