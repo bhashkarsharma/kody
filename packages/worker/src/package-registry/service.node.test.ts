@@ -685,7 +685,7 @@ test('deleteSavedPackageProjection resyncs the job manager after removing packag
 		userId: 'user-1',
 		sourceId: 'source-1',
 	})
-	expect(mockModule.deleteEntitySource).toHaveBeenCalledWith(env.APP_DB, {
+	expect(mockModule.deleteEntitySource).toHaveBeenCalledWith(env, {
 		id: 'source-1',
 		userId: 'user-1',
 	})
@@ -1257,7 +1257,6 @@ function createEntitlementsDatabase(input: {
 								'saved_packages',
 								'entity_sources',
 								'jobs',
-								'repo_sessions',
 								'published_bundle_artifacts',
 							]
 							if (

@@ -8,6 +8,8 @@
 export const scheduledLaneNames = [
 	'reconcile_artifacts_pushes',
 	'repo_session_cleanup',
+	// Retired after leftover D1 DROP; kept so in-flight queue messages parse.
+	'repo_session_index_backfill',
 	'reconcile_inbound_deliveries',
 	'system_email_retention',
 	'storage_bucket_estimate_backfill',

@@ -61,6 +61,10 @@ export async function runScheduledLane(input: {
 				env: input.env,
 				now: input.scheduledAt,
 			})
+		case 'repo_session_index_backfill':
+			// Retired after leftover D1 DROP. Name stays so in-flight queue
+			// messages from the previous deploy parse and no-op.
+			return
 		case 'reconcile_inbound_deliveries':
 			return sweepStaleInboundDeliveries({
 				env: input.env,

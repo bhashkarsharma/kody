@@ -78,19 +78,19 @@ Deletion must cover these user-owned surfaces:
   migrations to SQLite and fails if a user-owned schema column lacks schema
   coverage in the runtime target list or if that list references a stale column.
 - **Durable Objects:** `JobManager`, `StorageRunner`, `RepoSession`,
-  `RemoteConnectorSession`, `PackageRealtimeSession`, `PackageServiceInstance`,
-  `McpClientHub`, `RunLog`, `UserMeter`, `StripePlanRefresh`, and `Mailbox` are
-  purged through account-deletion RPCs after their D1 identifiers are collected
-  (`RunLog`, `UserMeter`, `StripePlanRefresh`, and `Mailbox` are one object per
-  user and need no D1 id scan). Account deletion first captures the
-  authoritative USER raw-MIME and attachment references through
-  `Mailbox.listBlobReferences`, deletes those owner-safe R2 keys plus defensive
-  owner-prefix sweeps, and only then calls `Mailbox.purge()`. The purge clears
-  DO SQLite only (see [Mailbox](#durable-objects-mailbox)). `MCP` objects remain
-  SDK session-keyed, while `mcp_agent_sessions` indexes each Durable Object id
-  by authenticated stable user id so account deletion can purge stored props,
-  conversation state, raw-fetch state, and transport storage before revoking
-  OAuth grants.
+  `RepoSessionIndex`, `RemoteConnectorSession`, `PackageRealtimeSession`,
+  `PackageServiceInstance`, `McpClientHub`, `RunLog`, `UserMeter`,
+  `StripePlanRefresh`, and `Mailbox` are purged through account-deletion RPCs
+  after their identifiers are collected (`RunLog`, `UserMeter`,
+  `StripePlanRefresh`, `Mailbox`, and `RepoSessionIndex` are one object per user
+  and need no D1 id scan). Account deletion first captures the authoritative
+  USER raw-MIME and attachment references through `Mailbox.listBlobReferences`,
+  deletes those owner-safe R2 keys plus defensive owner-prefix sweeps, and only
+  then calls `Mailbox.purge()`. The purge clears DO SQLite only (see
+  [Mailbox](#durable-objects-mailbox)). `MCP` objects remain SDK session-keyed,
+  while `mcp_agent_sessions` indexes each Durable Object id by authenticated
+  stable user id so account deletion can purge stored props, conversation state,
+  raw-fetch state, and transport storage before revoking OAuth grants.
 - **Vectorize:** memory, job, and saved-package vector ids are derived from D1
   rows and removed with `deleteByIds`.
 - **R2:** raw USER email MIME and attachment blobs in `EMAIL_BLOBS` are
@@ -108,8 +108,8 @@ Deletion must cover these user-owned surfaces:
   in `BUNDLE_ARTIFACTS_KV` are deleted before D1 projection rows are removed.
   OAuth token/grant KV is owned by the OAuth provider and is handled through
   provider grant revocation rather than app-level key scans.
-- **Cloudflare Artifacts:** source repos referenced by `entity_sources` and
-  `repo_sessions` are deleted through the REST client in
+- **Cloudflare Artifacts:** source repos referenced by `entity_sources` and the
+  per-user `RepoSessionIndex` catalog are deleted through the REST client in
   `packages/worker/src/repo/artifacts.ts`.
 
 ## Account export inventory
@@ -257,12 +257,12 @@ should be rebuilt by reindexing after import.
 
 Cloudflare Artifacts repo contents are not inlined in the JSON export. D1 stores
 metadata/projections, while canonical package, job, and app source lives in the
-Artifacts repos referenced by `entity_sources.repo_id` and
-`repo_sessions.source_repo_id`. For account migration to a new Cloudflare
-account, first run `account_export_manifest`, page through export sections as
-needed, then separately fetch or clone every repo listed in `artifactRepos`
-using Artifacts access and recreate those repos in the destination account
-before importing D1 projections or republishing packages.
+Artifacts repos referenced by `entity_sources.repo_id` and the
+`RepoSessionIndex` catalog `source_repo_id`. For account migration to a new
+Cloudflare account, first run `account_export_manifest`, page through export
+sections as needed, then separately fetch or clone every repo listed in
+`artifactRepos` using Artifacts access and recreate those repos in the
+destination account before importing D1 projections or republishing packages.
 
 ## D1 (`APP_DB`)
 
@@ -305,6 +305,10 @@ The schema is defined by migrations in `packages/worker/migrations/`:
   [Run records](./run-records.md)).
 - There is no `jobs` or `archived_job_artifacts` table in `APP_DB` — those live
   in the jobs worker's `JOBS_DB` (see [D1 (`JOBS_DB`)](#d1-jobs_db)).
+- There is no `repo_sessions` table in `APP_DB` (dropped in migration `0013`).
+  The catalog lives in the per-user `RepoSessionIndex` Durable Object. D1 keeps
+  only the thin `repo_session_due_owners` hint and the platform-owned
+  `repo_session_storage_bucket_cursor`.
 - `package_service_states` (`0095-package-service-states.sql`): per-service
   liveness projection (`running` / `idle` / `stopped` / `error`) for discovery,
   account export/deletion inventory, and disaster recovery. Upserted and
@@ -561,11 +565,14 @@ Storage split:
 workspaces for the check-only `storage_bytes` baseline. Rows use `kind` to
 dispatch `getEstimatedBytes` to the correct Durable Object, cache the latest
 `databaseSize` in `estimated_bytes`, and feed the same bounded
-`storage_bucket_estimate_backfill` lane. Repo sessions register on open,
-opportunistically refresh after workspace mutations, and remove the inventory
-row on discard, purge, scheduled cleanup, source deletion, or account deletion.
-This estimate component is composed with the authoritative UserMeter D1 payload
-bytes; it is not reserved into UserMeter.
+`storage_bucket_estimate_backfill` lane. Index-backed repo-session
+reconciliation pages `repo_session_due_owners` with a per-tick owner budget and
+a platform-owned `repo_session_storage_bucket_cursor` so a sweep cannot walk the
+whole fleet. Repo sessions register on open, opportunistically refresh after
+workspace mutations, and remove the inventory row on discard, purge, scheduled
+cleanup, source deletion, or account deletion. This estimate component is
+composed with the authoritative UserMeter D1 payload bytes; it is not reserved
+into UserMeter.
 
 ## Durable Objects (`UserMeter`)
 
@@ -914,11 +921,17 @@ via `durableObjectNameFromParts`); domain helpers such as
   rebuilds it from settings. The DO carries the ingress user id forward via
   headers + websocket attachment and verifies the shared secret against that
   user's row only.
-- `RepoSession` — `repoSessionDurableObjectName(sessionId)` keyed by
-  `repo_sessions.id` only (not user-prefixed). Every RPC validates the D1
-  session row's `user_id` before touching the workspace. Account deletion
-  enumerates the user's session ids before deleting D1 rows and purges each DO.
-  Documented exception to user-scoped naming.
+- `RepoSessionIndex` — `repoSessionIndexDurableObjectName(userId)` keyed by
+  untrimmed `userId` (like RunLog / UserMeter / Mailbox). Authority for the
+  per-user session catalog: rows, active counts, conversation resume, export,
+  and deletion inventory. Each index self-alarms; D1 keeps only the thin
+  `repo_session_due_owners` hint (one row per user with any session) plus the
+  platform-owned storage-bucket inventory cursor.
+- `RepoSession` — `repoSessionDurableObjectName(sessionId)` keyed by session id
+  only (not user-prefixed). Every RPC validates the catalog row's `user_id`
+  before touching the workspace. Account deletion enumerates the user's session
+  ids from `RepoSessionIndex` and purges each workspace DO. Documented exception
+  to user-scoped naming.
 - The `MCP` Durable Object is addressed by MCP session id rather than user id;
   ownership is enforced at the request boundary by validating the authenticated
   user against the `McpCallerContext` on every request.
@@ -1003,13 +1016,14 @@ dispatch queues, worker loaders (`LOADER` / `APP_LOADER`), the `AI` binding, and
 ## Repo-backed source and Artifacts
 
 Repo-backed saved packages, package apps, and jobs use Cloudflare Artifacts
-repos plus D1 `entity_sources` / `repo_sessions` rows.
+repos plus D1 `entity_sources` rows and a per-user `RepoSessionIndex` catalog.
 
 - Primary code lives under `packages/worker/src/repo/`.
 - `entity_sources` stores the durable mapping from
   `(user_id, entity_kind, entity_id)` to the repo identity and last published
   commit.
-- `repo_sessions` stores mutable editing forks for repo session Durable Objects.
+- `RepoSessionIndex` stores mutable editing-fork catalog rows for repo session
+  Durable Objects. D1 does not hold catalog rows.
 - Published source snapshots and bundle artifacts are stored in
   `BUNDLE_ARTIFACTS_KV` and keyed by `source_id` plus `published_commit`.
 
@@ -1243,10 +1257,12 @@ to `durableObjectNameFromParts`).
 - `StripePlanRefresh`: `idFromName(userId)` (no trim); one ephemeral billing
   reconciliation alarm DO per user.
 - `Mailbox`: `idFromName(userId)` (no trim); one email-metadata DO per user.
+- `RepoSessionIndex`: `idFromName(userId)` (no trim); one session-catalog DO per
+  user.
 - `McpClientHub`: `idFromName(userId.trim())`.
 - `StorageRunner`: `idFromName(JSON.stringify([userId, storageId]))`.
-- `RepoSession`: `idFromName(repo_sessions.id)`; the key is not user-prefixed,
-  so every RPC must keep validating the D1 row's `user_id`.
+- `RepoSession`: `idFromName(sessionId)`; the key is not user-prefixed, so every
+  RPC must keep validating the catalog row's `user_id`.
 - `PackageRealtimeSession`: `idFromName(JSON.stringify([userId, packageId]))`.
 - `PackageServiceInstance`:
   `idFromName(JSON.stringify([userId, packageId, serviceName]))`.

@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { silenceIncidentalRuntimeWarnings } from '#worker/test-support/incidental-runtime-warnings.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
 import {
 	createInMemoryUserMeterEnv,
 	createPermissiveAccountWriteLeaseDbHooks,
@@ -32,7 +33,14 @@ import {
 	type JobRecord,
 	type PersistedJobCallerContext,
 } from '#worker/jobs/types.ts'
-import { type EntitySourceRow } from '#worker/repo/types.ts'
+import {
+	insertRepoSession,
+	listRepoSessionsBySource,
+} from '#worker/repo/repo-sessions.ts'
+import {
+	type EntitySourceRow,
+	type RepoSessionRow,
+} from '#worker/repo/types.ts'
 import { createD1JobsStore } from '@kody-internal/shared/jobs/store.ts'
 
 /**
@@ -583,13 +591,11 @@ vi.mock('#worker/package-runtime/module-graph.ts', async () => {
 function createJobMutationDatabase(input: {
 	jobs: Array<Record<string, unknown>>
 	entitySources: Array<Record<string, unknown>>
-	repoSessions?: Array<Record<string, unknown>>
 	publishedBundleArtifacts?: Array<Record<string, unknown>>
 }) {
 	const tables = new Map<string, Array<Record<string, unknown>>>([
 		['jobs', structuredClone(input.jobs)],
 		['entity_sources', structuredClone(input.entitySources)],
-		['repo_sessions', structuredClone(input.repoSessions ?? [])],
 		['user_storage_buckets', []],
 		[
 			'published_bundle_artifacts',
@@ -673,19 +679,6 @@ function createJobMutationDatabase(input: {
 						async all<T = Record<string, unknown>>() {
 							if (
 								normalized ===
-								'SELECT * FROM repo_sessions WHERE user_id = ? AND source_id = ? ORDER BY updated_at DESC'
-							) {
-								return {
-									results: selectAll(
-										'repo_sessions',
-										(row) =>
-											row['user_id'] === params[0] &&
-											row['source_id'] === params[1],
-									) as T[],
-								}
-							}
-							if (
-								normalized ===
 								'SELECT * FROM published_bundle_artifacts WHERE user_id = ? AND source_id = ? ORDER BY updated_at DESC, created_at DESC'
 							) {
 								return {
@@ -763,15 +756,7 @@ function createJobMutationDatabase(input: {
 									'DELETE FROM user_storage_buckets WHERE user_id = ? AND kind =',
 								)
 							) {
-								const sessionIds = new Set(
-									table('repo_sessions')
-										.filter(
-											(row) =>
-												row['user_id'] === params[2] &&
-												row['source_id'] === params[3],
-										)
-										.map((row) => `${String(params[1])}${String(row['id'])}`),
-								)
+								const storageIds = new Set(params.slice(1))
 								return {
 									meta: {
 										changes: deleteWhere(
@@ -779,7 +764,7 @@ function createJobMutationDatabase(input: {
 											(row) =>
 												row['user_id'] === params[0] &&
 												row['kind'] === 'repo_session' &&
-												sessionIds.has(String(row['storage_id'])),
+												storageIds.has(row['storage_id']),
 										),
 										last_row_id: 0,
 									},
@@ -793,22 +778,6 @@ function createJobMutationDatabase(input: {
 									meta: {
 										changes: deleteWhere(
 											'published_bundle_artifacts',
-											(row) =>
-												row['user_id'] === params[0] &&
-												row['source_id'] === params[1],
-										),
-										last_row_id: 0,
-									},
-								}
-							}
-							if (
-								normalized ===
-								'DELETE FROM repo_sessions WHERE user_id = ? AND source_id = ?'
-							) {
-								return {
-									meta: {
-										changes: deleteWhere(
-											'repo_sessions',
 											(row) =>
 												row['user_id'] === params[0] &&
 												row['source_id'] === params[1],
@@ -876,9 +845,12 @@ function createRunKodyRegistryTestEnv(
 	meter?: ReturnType<typeof createInMemoryUserMeterEnv>,
 ) {
 	const userMeter = meter ?? createInMemoryUserMeterEnv()
+	const appDb = bindings.APP_DB as D1Database | undefined
+	const repoSessionIndex = createInMemoryRepoSessionIndexEnv(appDb)
 	return {
 		...bindings,
 		USER_METER: userMeter.env.USER_METER,
+		REPO_SESSION_INDEX: repoSessionIndex.REPO_SESSION_INDEX,
 	} as Env
 }
 
@@ -940,7 +912,7 @@ function createRepoSessionRow(input: {
 	userId: string
 	sourceId: string
 	sourceRepoId: string
-}) {
+}): RepoSessionRow {
 	return {
 		id: input.id,
 		user_id: input.userId,
@@ -1018,14 +990,6 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 				repoId: `job-${job.id}`,
 			}),
 		],
-		repoSessions: [
-			createRepoSessionRow({
-				id: 'session-1',
-				userId: callerContext.user.userId,
-				sourceId: job.sourceId,
-				sourceRepoId: `job-${job.id}-session`,
-			}),
-		],
 	})
 	const kv = createJobMutationKv()
 	const repoSessionAccesses: Array<string> = []
@@ -1073,6 +1037,15 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 			},
 		},
 	})
+	await insertRepoSession(
+		env,
+		createRepoSessionRow({
+			id: 'session-1',
+			userId: callerContext.user.userId,
+			sourceId: job.sourceId,
+			sourceRepoId: `job-${job.id}-session`,
+		}),
+	)
 	const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
 		new Response(
 			JSON.stringify({
@@ -1129,13 +1102,11 @@ test('buildKodyFns updates and deletes jobs through production-shaped bindings',
 				.first<Record<string, unknown>>(),
 		).resolves.toBeNull()
 		await expect(
-			db
-				.prepare(
-					'SELECT * FROM repo_sessions WHERE user_id = ? AND source_id = ? ORDER BY updated_at DESC',
-				)
-				.bind(callerContext.user.userId, job.sourceId)
-				.all<Record<string, unknown>>(),
-		).resolves.toEqual({ results: [] })
+			listRepoSessionsBySource(env, {
+				userId: callerContext.user.userId,
+				sourceId: job.sourceId,
+			}),
+		).resolves.toEqual([])
 	} finally {
 		fetchSpy.mockRestore()
 	}

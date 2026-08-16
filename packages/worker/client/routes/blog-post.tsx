@@ -115,8 +115,7 @@ export function BlogPostRoute(handle: Handle) {
 	}
 
 	async function loadPost(slug: string, signal: AbortSignal) {
-		status = 'loading'
-		handle.update()
+		// Do not call handle.update() before the first await — see blog.tsx.
 		try {
 			const response = await fetch(routes.blogPostApi.href({ slug }), {
 				headers: { Accept: 'application/json' },
@@ -171,17 +170,25 @@ export function BlogPostRoute(handle: Handle) {
 			needsStaleRefresh,
 		})
 		if (needsLoad && typeof document !== 'undefined') {
+			status = 'loading'
+			const loadAttempt = loadLatch.getPendingAttempt()
 			handle.queueTask(async (signal) => {
 				try {
 					await loadPost(slug, signal)
-					if (signal.aborted) return
+					if (signal.aborted) {
+						loadLatch.clearPending(currentHref, loadAttempt)
+						return
+					}
 					if (status === 'ready' || status === 'not-found') {
 						loadLatch.markLoaded(currentHref)
 					} else {
 						loadLatch.markFailed(currentHref)
 					}
 				} catch {
-					if (signal.aborted) return
+					if (signal.aborted) {
+						loadLatch.clearPending(currentHref, loadAttempt)
+						return
+					}
 					loadLatch.markFailed(currentHref)
 				}
 			})

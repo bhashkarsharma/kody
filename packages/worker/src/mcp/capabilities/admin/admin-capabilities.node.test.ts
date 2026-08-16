@@ -12,6 +12,7 @@ import { adminUserCreateCapability } from './admin-user-create.ts'
 import { adminUserGetCapability } from './admin-user-get.ts'
 import { adminUserListCapability } from './admin-user-list.ts'
 import { adminUserUpdateCapability } from './admin-user-update.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
 import { createInMemoryRunLogUsageEnv } from '#worker/test-support/run-log-usage.ts'
 import { testStableUserIdFromEmail } from '#worker/test-support/stable-user-id.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
@@ -527,6 +528,7 @@ function createAdminCapabilityContext(
 		env: {
 			...runLog.env,
 			...userMeter.env,
+			...createInMemoryRepoSessionIndexEnv(db),
 			APP_DB: db,
 			AUDIT_DB: db,
 			MAILBOX: {
@@ -655,7 +657,7 @@ test('admin capabilities list and get account metadata and query sanitized audit
 	])
 })
 
-test('admin_audit_log_query accepts SQLite zero rowids through output parse', async () => {
+test('admin_audit_log_query accepts legacy SQLite rowids through output parse', async () => {
 	const { db, auditEvents } = createAdminCapabilityTestDb({
 		users: [
 			adminTestUser({
@@ -668,32 +670,42 @@ test('admin_audit_log_query accepts SQLite zero rowids through output parse', as
 		],
 		userRoles: [{ user_id: 1, role_name: 'admin' }],
 	})
-	auditEvents.push({
-		id: 0,
-		category: 'admin',
-		action: 'legacy_seed',
-		result: 'success',
-		email_hash: null,
-		ip_hash: null,
-		client_id: null,
-		path: null,
-		reason: null,
-		timestamp: '2026-01-01T00:00:00.000Z',
-	})
+	for (const [id, action] of [
+		[0, 'legacy_seed_zero'],
+		[-1, 'legacy_seed_negative'],
+	] as const) {
+		auditEvents.push({
+			id,
+			category: 'admin',
+			action,
+			result: 'success',
+			email_hash: null,
+			ip_hash: null,
+			client_id: null,
+			path: null,
+			reason: null,
+			timestamp: '2026-01-01T00:00:00.000Z',
+		})
+	}
 	const ctx = createAdminCapabilityContext(db)
 
-	const audit = await adminAuditLogQueryCapability.handler(
-		{ action: 'legacy_seed', limit: 10 },
-		ctx,
+	const audit = await adminAuditLogQueryCapability.handler({ limit: 10 }, ctx)
+	expect(audit.events).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				id: 0,
+				action: 'legacy_seed_zero',
+				category: 'admin',
+				result: 'success',
+			}),
+			expect.objectContaining({
+				id: -1,
+				action: 'legacy_seed_negative',
+				category: 'admin',
+				result: 'success',
+			}),
+		]),
 	)
-	expect(audit.events).toEqual([
-		expect.objectContaining({
-			id: 0,
-			action: 'legacy_seed',
-			category: 'admin',
-			result: 'success',
-		}),
-	])
 })
 
 test('admin system email capabilities read only system-owned mail and audit reads', async () => {

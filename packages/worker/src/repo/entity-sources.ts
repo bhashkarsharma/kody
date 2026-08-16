@@ -1,5 +1,9 @@
 import { runD1WithRetry } from '#worker/d1-retry.ts'
-import { repoSessionStorageBucketId } from '#worker/storage-buckets/service.ts'
+import {
+	repoSessionIndexNamespace,
+	type RepoSessionIndexEnv,
+} from './repo-session-index-client.ts'
+import { deleteRepoSessionsBySourceForUser } from './repo-sessions.ts'
 import {
 	type EntityKind,
 	type EntitySourceRow,
@@ -299,37 +303,22 @@ export async function listEntitySourcesForExternalReconcile(
 }
 
 export async function deleteEntitySource(
-	db: D1Database,
+	env: { APP_DB: D1Database } & Partial<RepoSessionIndexEnv>,
 	input: {
 		id: string
 		userId: string
 	},
 ): Promise<boolean> {
-	const results = await db.batch([
-		db
-			.prepare(`DELETE FROM entity_sources WHERE id = ? AND user_id = ?`)
-			.bind(input.id, input.userId),
-		db
-			.prepare(
-				`DELETE FROM user_storage_buckets
-				WHERE user_id = ?
-					AND kind = 'repo_session'
-					AND storage_id IN (
-						SELECT ? || id
-						FROM repo_sessions
-						WHERE user_id = ? AND source_id = ?
-					)`,
-			)
-			.bind(
-				input.userId,
-				repoSessionStorageBucketId(''),
-				input.userId,
-				input.id,
-			),
-	])
-	const result = results[0]
-	if (!result) {
-		throw new Error('Entity source deletion returned no D1 result.')
+	if (repoSessionIndexNamespace(env as RepoSessionIndexEnv)) {
+		await deleteRepoSessionsBySourceForUser(env as RepoSessionIndexEnv, {
+			userId: input.userId,
+			sourceId: input.id,
+		})
 	}
+	const result = await env.APP_DB.prepare(
+		`DELETE FROM entity_sources WHERE id = ? AND user_id = ?`,
+	)
+		.bind(input.id, input.userId)
+		.run()
 	return (result.meta.changes ?? 0) > 0
 }

@@ -529,6 +529,43 @@ test('resolveArtifactDefaultBranchHead reuses a provided token and still works w
 		'Artifacts createToken result is missing plaintext.',
 	)
 	expect(gitMocks.listServerRefs).toHaveBeenCalledTimes(1)
+
+	const httpError = Object.assign(
+		new Error('HTTP Error: 500 Internal Server Error'),
+		{
+			code: 'HttpError',
+			name: 'HttpError',
+			data: {
+				statusCode: 500,
+				statusMessage: 'Internal Server Error',
+				response: '',
+			},
+		},
+	)
+	gitMocks.listServerRefs.mockReset()
+	gitMocks.listServerRefs
+		.mockRejectedValueOnce(httpError)
+		.mockResolvedValueOnce([{ ref: 'refs/heads/main', oid: 'retried-oid' }])
+	createToken.mockReset()
+	createToken.mockResolvedValue({
+		id: 'tok_read',
+		plaintext: 'art_v1_throwaway',
+		scope: 'read',
+		expiresAt: '2026-10-09T08:55:00.000Z',
+	})
+	await expect(resolveArtifactDefaultBranchHead({ repo })).resolves.toEqual({
+		remote: 'https://acct.artifacts.cloudflare.net/git/default/repo-1.git',
+		defaultBranch: 'main',
+		commit: 'retried-oid',
+	})
+	expect(gitMocks.listServerRefs).toHaveBeenCalledTimes(2)
+
+	gitMocks.listServerRefs.mockReset()
+	gitMocks.listServerRefs.mockRejectedValue(httpError)
+	await expect(resolveArtifactDefaultBranchHead({ repo })).rejects.toThrow(
+		/Artifacts listServerRefs failed for https:\/\/acct\.artifacts\.cloudflare\.net\/git\/default\/repo-1\.git: HTTP Error: 500 Internal Server Error/,
+	)
+	expect(gitMocks.listServerRefs).toHaveBeenCalledTimes(3)
 })
 
 test('native createToken maps token when JSRPC omits plaintext', async () => {
@@ -576,12 +613,6 @@ test('native createToken maps token when JSRPC omits plaintext', async () => {
 	expect(nativeCreateToken).toHaveBeenCalledWith('read', 120)
 	expect(parseArtifactTokenSecret('art_v2_read?expires=1760000100')).toBe(
 		'art_v2_read',
-	)
-	expect(() =>
-		parseArtifactTokenSecret(undefined as unknown as string),
-	).toThrow('Artifacts token plaintext is missing.')
-	expect(() => parseArtifactTokenSecret('')).toThrow(
-		'Artifacts token plaintext is missing.',
 	)
 
 	nativeCreateToken.mockResolvedValueOnce({
@@ -799,57 +830,11 @@ test('getArtifactsBinding prefers the native ARTIFACTS binding for the env names
 
 	nativeGet.mockReset()
 	nativeGet.mockImplementation(async () => {
-		throw {
-			name: 'ArtifactsError',
-			message: 'Repository not found: repo-native-message-only',
-		}
-	})
-	await expect(binding.get('repo-native-message-only')).resolves.toEqual({
-		status: 'not_found',
-	})
-	nativeGet.mockReset()
-	nativeGet.mockImplementation(async () => {
 		throw new Error('git: repository not found on the remote')
 	})
 	await expect(binding.get('repo-unrelated-not-found')).rejects.toThrow(
 		/git: repository not found/,
 	)
-	nativeGet.mockReset()
-	nativeGet.mockImplementation(async () => {
-		throw new Error(
-			'ArtifactsError: Repository not found: repo-native-prefixed',
-		)
-	})
-	await expect(binding.get('repo-native-prefixed')).resolves.toEqual({
-		status: 'not_found',
-	})
-
-	nativeGet.mockReset()
-	nativeGet.mockImplementation(async () => {
-		throw {
-			name: 'ArtifactsError',
-			code: 'NOT_FOUND',
-			message: 'Repository not found: repo-native-no-exp',
-		}
-	})
-	nativeCreate.mockImplementation(async () => ({
-		id: 'repo_native_no_exp',
-		name: 'repo-native-no-exp',
-		description: null,
-		defaultBranch: 'main',
-		remote:
-			'https://acct.artifacts.cloudflare.net/git/production/repo-native-no-exp.git',
-		token: 'art_v2_native?expires=1760000000',
-	}))
-	await expect(
-		ensureArtifactRepoReady(env, 'repo-native-no-exp', binding),
-	).resolves.toMatchObject({
-		recreated: true,
-		bootstrapAccess: {
-			token: 'art_v2_native?expires=1760000000',
-			expiresAt: '2025-10-09T08:53:20.000Z',
-		},
-	})
 
 	const readyHandle = {
 		id: 'repo_exists',

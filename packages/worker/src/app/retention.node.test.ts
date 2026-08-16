@@ -20,6 +20,8 @@ import {
 	stripeWebhookEventRetentionDays,
 } from './retention.ts'
 import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
+import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
+import { type RepoSessionRow } from '#worker/repo/types.ts'
 
 function applyMigrations(db: DatabaseSync) {
 	const migrationsDir = new URL('../../migrations/', import.meta.url)
@@ -83,14 +85,6 @@ function createRetentionDb() {
 	const sqlite = new DatabaseSync(':memory:')
 	sqlite.exec('PRAGMA foreign_keys = ON')
 	sqlite.exec(`
-		CREATE TABLE repo_sessions (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			status TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);
 		CREATE TABLE mcp_memory_conversation_suppressions (
 			user_id TEXT NOT NULL,
 			conversation_id TEXT NOT NULL,
@@ -483,12 +477,38 @@ test('feature flag exposure rollup retention respects the day boundary', async (
 test('published bundle artifact retention deletes stale rows, KV blobs, and source snapshots', async () => {
 	const { sqlite, db } = createRetentionDb()
 	const kvDelete = vi.fn(async () => undefined)
+	const indexEnv = createInMemoryRepoSessionIndexEnv(db)
+	await indexEnv
+		.REPO_SESSION_INDEX!.get(indexEnv.REPO_SESSION_INDEX!.idFromName('user-1'))
+		.insertSession({
+			ownerId: 'user-1',
+			row: {
+				id: 'session-1',
+				user_id: 'user-1',
+				source_id: 'source-session',
+				source_repo_id: 'repo-1',
+				session_branch: 'sessions/session-1',
+				source_branch: 'main',
+				base_commit: 'commit',
+				source_root: '/',
+				conversation_id: null,
+				status: 'active',
+				expires_at: null,
+				last_checkpoint_at: null,
+				last_checkpoint_commit: null,
+				last_check_run_id: null,
+				last_check_tree_hash: null,
+				created_at: daysAgo(1),
+				updated_at: daysAgo(1),
+			} satisfies RepoSessionRow,
+		})
 	const env = {
 		APP_DB: db,
 		BUNDLE_ARTIFACTS_KV: {
 			delete: kvDelete,
 		},
-	} as unknown as Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV'>
+		REPO_SESSION_INDEX: indexEnv.REPO_SESSION_INDEX,
+	} as unknown as Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV'> & typeof indexEnv
 	for (const [sourceId, publishedCommit] of [
 		['source-current', 'commit-current'],
 		['source-stale', 'commit-current'],
@@ -510,13 +530,6 @@ test('published bundle artifact retention deletes stale rows, KV blobs, and sour
 				daysAgo(60),
 			)
 	}
-	sqlite
-		.prepare(
-			`INSERT INTO repo_sessions (
-			id, user_id, source_id, status, created_at, updated_at
-		) VALUES ('session-1', 'user-1', 'source-session', 'active', ?, ?)`,
-		)
-		.run(daysAgo(1), daysAgo(1))
 	for (const [id, sourceId, commit, createdAt] of [
 		[
 			'artifact-delete',
@@ -621,6 +634,8 @@ test('published bundle artifact retention rechecks staleness before deleting sel
 		BUNDLE_ARTIFACTS_KV: {
 			delete: kvDelete,
 		},
+		REPO_SESSION_INDEX:
+			createInMemoryRepoSessionIndexEnv(dbWithRefreshRace).REPO_SESSION_INDEX,
 	} as unknown as Pick<Env, 'APP_DB' | 'BUNDLE_ARTIFACTS_KV'>
 	sqlite
 		.prepare(

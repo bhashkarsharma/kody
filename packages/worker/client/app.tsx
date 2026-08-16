@@ -8,6 +8,7 @@ import {
 	listenToRouterNavigation,
 	listenToRouterNavigationEnd,
 	navigate,
+	registerClientRoutes,
 	registerRouteLoaders,
 	Router,
 } from './client-router.tsx'
@@ -34,6 +35,7 @@ import { colors, mq, spacing, typography } from '#universal/styles/tokens.ts'
 import { WaitlistBanner } from './waitlist-banner.tsx'
 
 registerRouteLoaders(clientRouteLoaders)
+registerClientRoutes(clientRoutes)
 
 type AppProps = {
 	embeddedSession?: SessionInfo | null
@@ -239,15 +241,22 @@ export function App(handle: Handle<AppProps>) {
 											width: '100%',
 											boxSizing: 'border-box',
 											flex: 1,
+											viewTransitionName: 'page',
 											// The auth canvas stretches to fill the shell column.
 											display: 'grid',
 										}
 									: isRedesignedMarketingPath
-										? { width: '100%', boxSizing: 'border-box', flex: 1 }
+										? {
+												width: '100%',
+												boxSizing: 'border-box',
+												flex: 1,
+												viewTransitionName: 'page',
+											}
 										: {
 												width: '100%',
 												boxSizing: 'border-box',
 												flex: 1,
+												viewTransitionName: 'page',
 												padding: `${spacing.lg} ${spacing.xl} ${spacing.sm}`,
 												[mq.tablet]: {
 													padding: `${spacing.sm} ${spacing.sm} 0`,

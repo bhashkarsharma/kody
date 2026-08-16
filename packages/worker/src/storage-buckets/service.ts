@@ -1,3 +1,10 @@
+import { listRepoSessionDueOwnersPage } from '#worker/repo/repo-session-due-owners.ts'
+import { repoSessionIndexRpc } from '#worker/repo/repo-session-index-client.ts'
+import {
+	readRepoSessionStorageBucketCursor,
+	writeRepoSessionStorageBucketCursor,
+} from './repo-session-storage-bucket-cursor.ts'
+
 /**
  * Authoritative per-user durable storage bucket ownership.
  *
@@ -176,36 +183,84 @@ export function repoSessionIdFromStorageBucketId(storageId: string): string {
  * errors so metering never blocks the session). Estimate persistence is
  * UPDATE-only and the estimate backfill scans only existing rows, so a
  * missed registration would otherwise stay invisible for the session's
- * lifetime. The single INSERT..SELECT statement filters on
- * `repo_sessions.status = 'active'` inside the same statement, so a session
- * discarded or cleaned up concurrently can never get its inventory row
- * recreated after lifecycle cleanup deleted it.
+ * lifetime.
+ *
+ * Index-backed owners are paged from `repo_session_due_owners` with a
+ * per-tick owner budget (`limit`) and a persisted
+ * `repo_session_storage_bucket_cursor` so a steady-state tick cannot walk
+ * the whole fleet of index Durable Objects.
  */
 export async function registerMissingRepoSessionStorageBuckets(input: {
 	db: D1Database
+	env?: {
+		REPO_SESSION_INDEX?: DurableObjectNamespace
+		APP_DB: D1Database
+	}
 	limit?: number
 	now?: Date
 }): Promise<number> {
 	const limit = input.limit ?? 24
-	const seenAt = (input.now ?? new Date()).toISOString()
-	const result = await input.db
-		.prepare(
-			`INSERT INTO user_storage_buckets (
-				user_id, storage_id, kind, created_at, last_seen_at
-			)
-			SELECT rs.user_id, ?1 || rs.id, 'repo_session', ?2, ?2
-			FROM repo_sessions rs
-			WHERE rs.status = 'active'
-				AND NOT EXISTS (
-					SELECT 1 FROM user_storage_buckets b
-					WHERE b.user_id = rs.user_id
-						AND b.storage_id = ?1 || rs.id
+	const now = input.now ?? new Date()
+	const seenAt = now.toISOString()
+	let inserted = 0
+	if (!input.env?.REPO_SESSION_INDEX || inserted >= limit) return inserted
+	const ownerBudget = limit
+	const afterUserId = await readRepoSessionStorageBucketCursor(input.db)
+	const owners = await listRepoSessionDueOwnersPage({
+		db: input.db,
+		afterUserId,
+		limit: ownerBudget,
+	})
+	if (owners.length === 0) {
+		if (afterUserId !== '') {
+			await writeRepoSessionStorageBucketCursor({
+				db: input.db,
+				position: '',
+				now,
+			})
+		}
+		return inserted
+	}
+	let lastCompletedUserId = afterUserId
+	for (const owner of owners) {
+		const sessions = await repoSessionIndexRpc({
+			env: input.env,
+			userId: owner.userId,
+		}).listByUser({ ownerId: owner.userId })
+		for (const session of sessions) {
+			if (session.status !== 'active') continue
+			const result = await input.db
+				.prepare(
+					`INSERT INTO user_storage_buckets (
+						user_id, storage_id, kind, created_at, last_seen_at
+					) VALUES (?, ?, 'repo_session', ?, ?)
+					ON CONFLICT (user_id, storage_id) DO NOTHING`,
 				)
-			LIMIT ?3`,
-		)
-		.bind(repoSessionStorageBucketPrefix, seenAt, limit)
-		.run()
-	return result.meta?.changes ?? 0
+				.bind(
+					session.user_id,
+					repoSessionStorageBucketId(session.id),
+					seenAt,
+					seenAt,
+				)
+				.run()
+			inserted += result.meta?.changes ?? 0
+			if (inserted >= limit) {
+				await writeRepoSessionStorageBucketCursor({
+					db: input.db,
+					position: lastCompletedUserId,
+					now,
+				})
+				return inserted
+			}
+		}
+		lastCompletedUserId = owner.userId
+	}
+	await writeRepoSessionStorageBucketCursor({
+		db: input.db,
+		position: owners.length < ownerBudget ? '' : lastCompletedUserId,
+		now,
+	})
+	return inserted
 }
 
 /**
@@ -471,7 +526,7 @@ export function storageBucketKindFromStorageId(
  * scheduled in this isolate.
  */
 export async function flushStorageBucketRegistrationsForTests(): Promise<void> {
-	await Promise.all([...pendingRegistrations])
+	await Promise.all(pendingRegistrations)
 }
 
 /** Test helper: clear the in-isolate registration dedupe and refresh throttle. */

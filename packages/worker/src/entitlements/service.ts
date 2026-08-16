@@ -1,10 +1,5 @@
 import { utcDayKey } from '@kody-internal/shared/date-keys.ts'
-import { normalizeStableUserId } from '#worker/user-id.ts'
-import { countActiveWorkflowProjections } from '#worker/run-records/service.ts'
-import { countInternalUserEmailMessages } from '#worker/email/mailbox-internal-read.ts'
-import { jobsData } from '#worker/jobs/jobs-data.ts'
 import { type JobsStore } from '@kody-internal/shared/jobs/store.ts'
-import { EntitlementLimitError, buildEntitlementUpgradeHint } from './errors.ts'
 import {
 	parseStoredPlanName,
 	resolveEffectivePlan,
@@ -12,6 +7,13 @@ import {
 	type EntitlementResource,
 	type PlanName,
 } from '#universal/plans.ts'
+import { countInternalUserEmailMessages } from '#worker/email/mailbox-internal-read.ts'
+import { jobsData } from '#worker/jobs/jobs-data.ts'
+import { type RepoSessionIndexEnv } from '#worker/repo/repo-session-index-client.ts'
+import { countActiveRepoSessions } from '#worker/repo/repo-sessions.ts'
+import { countActiveWorkflowProjections } from '#worker/run-records/service.ts'
+import { normalizeStableUserId } from '#worker/user-id.ts'
+import { EntitlementLimitError, buildEntitlementUpgradeHint } from './errors.ts'
 import {
 	isDailyEntitlementResource,
 	type DailyEntitlementResource,
@@ -24,6 +26,7 @@ import {
 
 /** Env surface for authoritative entitlement usage readers. */
 export type EntitlementUsageEnv = UserMeterEnv &
+	RepoSessionIndexEnv &
 	Pick<Env, 'RUN_LOG' | 'MAILBOX' | 'JOBS'>
 
 const stableUserIdPattern = /^[a-f0-9]{64}$/i
@@ -474,26 +477,6 @@ export async function calculateUserD1StorageBytes(input: {
 			WHERE user_id = ?`,
 			[userId],
 		),
-		sumStorageBytes(
-			db,
-			`SELECT COALESCE(SUM(
-				${textBytesExpression([
-					'source_id',
-					'source_repo_id',
-					'session_branch',
-					'source_branch',
-					'base_commit',
-					'source_root',
-					'conversation_id',
-					'last_checkpoint_commit',
-					'last_check_run_id',
-					'last_check_tree_hash',
-				])}
-			), 0) AS count
-			FROM repo_sessions
-			WHERE user_id = ?`,
-			[userId],
-		),
 		// Run records and the keyed package-invocation idempotency ledger live
 		// in the per-user RunLog Durable Object (the D1 package_invocations
 		// table was dropped). Both are self-expiring operational state, not
@@ -745,11 +728,8 @@ export async function readEntitlementResourceUsage(input: {
 				'persistent_package_services usage must be read from UserMeter (use readCurrentEntitlementResourceUsage or pass getCurrent with countRunningPackageServices).',
 			)
 		case 'repo_sessions':
-			return await countRows(
-				db,
-				`SELECT COUNT(*) AS count FROM repo_sessions
-				WHERE user_id = ? AND status = 'active'`,
-				[userId],
+			throw new Error(
+				'repo_sessions usage must be read from RepoSessionIndex (use readCurrentEntitlementResourceUsage or pass getCurrent with countActiveRepoSessions).',
 			)
 		case 'email_sends_per_day':
 		case 'email_receives_per_day':
@@ -893,6 +873,9 @@ export async function readCurrentEntitlementResourceUsage(input: {
 			env: input.env,
 			ownerId: input.userId,
 		})
+	}
+	if (input.resource === 'repo_sessions') {
+		return await countActiveRepoSessions(input.env, input.userId)
 	}
 	if (input.resource === 'scheduled_jobs') {
 		return await jobsData({

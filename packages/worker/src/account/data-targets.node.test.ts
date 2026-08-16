@@ -209,6 +209,7 @@ test('operator-owned tables are explicit deletion/export exclusions', () => {
 	applyMigrations(db)
 	const expectedTables = [
 		'platform_oauth_apps',
+		'repo_session_storage_bucket_cursor',
 		'system_email_attachments',
 		'system_email_delivery_events',
 		'system_email_messages',
@@ -236,7 +237,9 @@ test('operator-owned tables are explicit deletion/export exclusions', () => {
 					reason: expect.stringContaining(
 						table === 'platform_oauth_apps'
 							? 'Operator-provisioned built-in OAuth app'
-							: 'operator-owned system email',
+							: table.startsWith('repo_session_')
+								? 'Platform-owned'
+								: 'operator-owned system email',
 					),
 				}),
 			),

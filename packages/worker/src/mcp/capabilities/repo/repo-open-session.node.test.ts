@@ -11,6 +11,7 @@ import { repoOpenSessionInputSchema } from './repo-shared.ts'
 
 const mockModule = vi.hoisted(() => ({
 	getActiveRepoSessionByConversation: vi.fn(),
+	countActiveRepoSessions: vi.fn(async () => 0),
 	getEntitySourceByIdForUser: vi.fn(),
 	getSavedPackageByKodyId: vi.fn(),
 	repoSessionRpc: vi.fn(),
@@ -19,6 +20,8 @@ const mockModule = vi.hoisted(() => ({
 vi.mock('#worker/repo/repo-sessions.ts', () => ({
 	getActiveRepoSessionByConversation: (...args: Array<unknown>) =>
 		mockModule.getActiveRepoSessionByConversation(...args),
+	countActiveRepoSessions: (...args: Array<unknown>) =>
+		mockModule.countActiveRepoSessions(...args),
 }))
 
 vi.mock('#worker/repo/entity-sources.ts', () => ({
@@ -40,7 +43,6 @@ const { repoOpenSessionCapability } = await import('./repo-open-session.ts')
 
 function createEntitlementsDatabase(input: {
 	users: Array<{ email: string; plan: string | null; stable_user_id: string }>
-	repoSessionCount: number
 }) {
 	return {
 		prepare(query: string) {
@@ -62,12 +64,6 @@ function createEntitlementsDatabase(input: {
 										row.email === email && row.stable_user_id === stableUserId,
 								)
 								return (user ? { plan: user.plan } : null) as T | null
-							}
-							if (
-								query.includes('FROM repo_sessions') &&
-								query.includes('status =')
-							) {
-								return { count: input.repoSessionCount } as T
 							}
 							throw new Error(`Unsupported first query: ${query}`)
 						},
@@ -143,6 +139,8 @@ function createOpenSessionResult() {
 
 function resetMocks() {
 	mockModule.getActiveRepoSessionByConversation.mockReset()
+	mockModule.countActiveRepoSessions.mockReset()
+	mockModule.countActiveRepoSessions.mockResolvedValue(0)
 	mockModule.getEntitySourceByIdForUser.mockReset()
 	mockModule.getSavedPackageByKodyId.mockReset()
 	mockModule.repoSessionRpc.mockReset()
@@ -175,7 +173,6 @@ test('repo_open_session maps published HEAD mismatch to McpCallerError', async (
 	const env = {
 		APP_DB: createEntitlementsDatabase({
 			users: [{ email, plan: 'pro', stable_user_id: userId }],
-			repoSessionCount: 0,
 		}),
 	} as Env
 	const ctx = {
@@ -237,7 +234,6 @@ test('repo_open_session enforces the repo sessions entitlement for plan users op
 	const env = {
 		APP_DB: createEntitlementsDatabase({
 			users: [{ email, plan: 'pro', stable_user_id: userId }],
-			repoSessionCount: limit,
 		}),
 	} as Env
 	const ctx = {
@@ -252,6 +248,7 @@ test('repo_open_session enforces the repo sessions entitlement for plan users op
 		}),
 	}
 	mockModule.getActiveRepoSessionByConversation.mockResolvedValueOnce(null)
+	mockModule.countActiveRepoSessions.mockResolvedValue(limit)
 	mockModule.getSavedPackageByKodyId.mockResolvedValueOnce(
 		createSavedPackageRow(userId),
 	)
@@ -298,7 +295,6 @@ test('repo_open_session resumes an existing active session without enforcing the
 	const env = {
 		APP_DB: createEntitlementsDatabase({
 			users: [{ email, plan: 'pro', stable_user_id: userId }],
-			repoSessionCount: limit,
 		}),
 	} as Env
 	const ctx = {
@@ -353,7 +349,6 @@ test('repo_open_session allows below-max usage and denies at the max plan ceilin
 	const belowMaxEnv = {
 		APP_DB: createEntitlementsDatabase({
 			users: [{ email, plan: 'max', stable_user_id: userId }],
-			repoSessionCount: planLimits.pro.maxRepoSessions + 1,
 		}),
 	} as Env
 	const belowMaxCtx = {
@@ -388,10 +383,10 @@ test('repo_open_session allows below-max usage and denies at the max plan ceilin
 	expect(belowMaxRpc.openSession).toHaveBeenCalled()
 
 	resetMocks()
+	mockModule.countActiveRepoSessions.mockResolvedValue(maxLimit)
 	const atCeilingEnv = {
 		APP_DB: createEntitlementsDatabase({
 			users: [{ email, plan: 'max', stable_user_id: userId }],
-			repoSessionCount: maxLimit,
 		}),
 	} as Env
 	const atCeilingCtx = {
@@ -450,7 +445,6 @@ test('repo_open_session retries opaque Cloudflare internal errors then rethrows 
 	const env = {
 		APP_DB: createEntitlementsDatabase({
 			users: [{ email, plan: 'pro', stable_user_id: userId }],
-			repoSessionCount: 0,
 		}),
 	} as Env
 	const ctx = {
@@ -508,7 +502,6 @@ test('repo_open_session retries opaque Cloudflare internal errors then rethrows 
 			users: [
 				{ email: exhaustedEmail, plan: 'pro', stable_user_id: exhaustedUserId },
 			],
-			repoSessionCount: 0,
 		}),
 	} as Env
 	const exhaustedCtx = {

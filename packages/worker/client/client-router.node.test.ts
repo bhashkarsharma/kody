@@ -1,16 +1,23 @@
 import { expect, test, vi } from 'vitest'
 import {
+	documentHasPersistentShell,
 	isSameShellAreaNavigation,
 	matchRoute,
 	matchRouteLoader,
 	navigate,
 	navigationTimeoutMs,
+	persistentShellNavSelector,
+	registerClientRoutes,
 	registerRouteLoaders,
 	Router,
+	shouldLeaveDocumentForPath,
 	shouldRouterHandleClick,
+	shouldUseViewTransition,
 	type RouteLoader,
 } from './client-router.tsx'
 import { communityArea } from './lazy-route.tsx'
+import { routePattern } from '#universal/route-pattern.ts'
+import { routes } from '#universal/routes.ts'
 
 test('client route and loader matching prefer specific static routes over dynamic parents', () => {
 	const tokenDetailRoute = 'token-detail-route' as unknown as JSX.Element
@@ -102,6 +109,87 @@ test('view transitions are skipped only when a navigation stays inside one shell
 	expect(isSameShellAreaNavigation('/account', '/accounts-payable')).toBe(false)
 })
 
+test('view transitions stay off for shell tab switches even when from-path was never recorded', () => {
+	const animate = (input: {
+		from: string | null
+		to: string
+		hasPersistentShell?: boolean
+	}) =>
+		shouldUseViewTransition({
+			from: input.from,
+			to: input.to,
+			canStart: true,
+			prefersReducedMotion: false,
+			hasPersistentShell: input.hasPersistentShell,
+		})
+
+	// The production bug: first click after a full load had from=null, so the
+	// path-only skip missed and the whole account shell faded + slid 8px.
+	expect(
+		animate({
+			from: null,
+			to: '/account/activity',
+			hasPersistentShell: true,
+		}),
+	).toBe(false)
+	expect(
+		animate({
+			from: '/account/usage',
+			to: '/account/activity',
+			hasPersistentShell: true,
+		}),
+	).toBe(false)
+	expect(animate({ from: '/account/usage', to: '/account/activity' })).toBe(
+		false,
+	)
+
+	// Leaving, entering, or crossing shells is still a real page change.
+	expect(
+		animate({
+			from: '/account/usage',
+			to: '/pricing',
+			hasPersistentShell: true,
+		}),
+	).toBe(true)
+	expect(
+		animate({
+			from: '/account/usage',
+			to: '/admin/users',
+			hasPersistentShell: true,
+		}),
+	).toBe(true)
+	expect(animate({ from: '/pricing', to: '/account/usage' })).toBe(true)
+	expect(animate({ from: null, to: '/account/usage' })).toBe(true)
+
+	// Same pathname+search (hash-only / same-URL refresh) never animates.
+	expect(animate({ from: '/account/usage', to: '/account/usage' })).toBe(false)
+	expect(
+		shouldUseViewTransition({
+			from: '/pricing',
+			to: '/community',
+			canStart: false,
+			prefersReducedMotion: false,
+		}),
+	).toBe(false)
+	expect(
+		shouldUseViewTransition({
+			from: '/pricing',
+			to: '/community',
+			canStart: true,
+			prefersReducedMotion: true,
+		}),
+	).toBe(false)
+
+	const withRail = {
+		querySelector: (selector: string) =>
+			selector === persistentShellNavSelector ? ({} as Element) : null,
+	}
+	const withoutRail = { querySelector: () => null }
+	expect(documentHasPersistentShell(withRail)).toBe(true)
+	expect(documentHasPersistentShell(withoutRail)).toBe(false)
+	expect(documentHasPersistentShell(null)).toBe(false)
+})
+
 test('same-origin hash links are intercepted so scroll restoration can reach them', () => {
 	const previousWindow = globalThis.window
 	globalThis.window = {
@@ -149,6 +237,84 @@ test('same-origin hash links are intercepted so scroll restoration can reach the
 		} as unknown as HTMLAnchorElement
 		expect(shouldRouterHandleClick(click, remixFrameAnchor)).toBe(false)
 	} finally {
+		globalThis.window = previousWindow
+	}
+})
+
+test('guide and blog markdown twins leave the SPA instead of rendering a 404', () => {
+	const guidePage = 'guide-page' as unknown as JSX.Element
+	const blogPage = 'blog-page' as unknown as JSX.Element
+	const pageRoutes = {
+		[routePattern(routes.guideDetail)]: guidePage,
+		[routePattern(routes.blogPost)]: blogPage,
+		[routePattern(routes.guides)]: guidePage,
+		[routePattern(routes.home)]: guidePage,
+	}
+
+	expect(matchRoute('/guides/oauth', pageRoutes)).toBe(guidePage)
+	expect(matchRoute('/guides/oauth.md', pageRoutes)).toBeNull()
+	expect(matchRoute('/guides/oauth.json', pageRoutes)).toBeNull()
+	expect(matchRoute('/blog/your-assistants-home.md', pageRoutes)).toBeNull()
+	expect(routes.guideDetailMarkdown.href({ slug: 'oauth' })).toBe(
+		'/guides/oauth.md',
+	)
+
+	registerClientRoutes(pageRoutes)
+	const previousWindow = globalThis.window
+	const assign = vi.fn<() => void>()
+	globalThis.window = {
+		location: {
+			href: 'https://kody.local/guides/oauth',
+			origin: 'https://kody.local',
+			pathname: '/guides/oauth',
+			search: '',
+			hash: '',
+			assign,
+		},
+	} as unknown as Window & typeof globalThis
+
+	try {
+		expect(shouldLeaveDocumentForPath('/guides/oauth')).toBe(false)
+		expect(shouldLeaveDocumentForPath('/guides/oauth.md')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/guides.md')).toBe(true)
+		expect(shouldLeaveDocumentForPath('/missing-page')).toBe(true)
+
+		const click = {
+			defaultPrevented: false,
+			button: 0,
+			metaKey: false,
+			altKey: false,
+			ctrlKey: false,
+			shiftKey: false,
+		} as MouseEvent
+		const markdownAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) =>
+				name === 'href' ? '/guides/oauth.md' : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, markdownAnchor)).toBe(false)
+
+		const documentAnchor = {
+			target: '',
+			hasAttribute: (name: string) => name === 'rmx-document',
+			getAttribute: (name: string) =>
+				name === 'href' ? '/guides/oauth.md' : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, documentAnchor)).toBe(false)
+
+		const pageAnchor = {
+			target: '',
+			hasAttribute: () => false,
+			getAttribute: (name: string) =>
+				name === 'href' ? '/guides/oauth' : null,
+		} as unknown as HTMLAnchorElement
+		expect(shouldRouterHandleClick(click, pageAnchor)).toBe(true)
+
+		navigate('/guides/how-kody-works.md')
+		expect(assign).toHaveBeenCalledWith('/guides/how-kody-works.md')
+	} finally {
+		registerClientRoutes({})
 		globalThis.window = previousWindow
 	}
 })

@@ -83,7 +83,7 @@
 			"tag": "v4",
 		},
 		// v6 (JobManager+JobRunner) and v9 (delete JobRunner) are omitted:
-		// JobManager moved to the jobs worker (ADR 0016) and is no longer
+		// JobManager lives on the jobs worker (ADR 0016) and is not
 		// exported here, so a fresh script replaying this chain (local dev,
 		// a new deployment) must not create it. The deployed production
 		// script is already past these tags, so wrangler's migration diff
@@ -152,6 +152,10 @@
 		{
 			"new_sqlite_classes": ["StripePlanRefresh"],
 			"tag": "v23",
+		},
+		{
+			"new_sqlite_classes": ["RepoSessionIndex"],
+			"tag": "v24",
 		},
 	],
 
@@ -274,6 +278,10 @@
 					{
 						"class_name": "Mailbox",
 						"name": "MAILBOX",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
 					},
 					{
 						"class_name": "StripePlanRefresh",
@@ -553,6 +561,10 @@
 					"new_sqlite_classes": ["StripePlanRefresh"],
 					"tag": "v23",
 				},
+				{
+					"new_sqlite_classes": ["RepoSessionIndex"],
+					"tag": "v24",
+				},
 			],
 			"ratelimits": [
 				{
@@ -637,6 +649,10 @@
 					{
 						"class_name": "Mailbox",
 						"name": "MAILBOX",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
 					},
 					{
 						"class_name": "StripePlanRefresh",
@@ -851,6 +867,10 @@
 					"new_sqlite_classes": ["StripePlanRefresh"],
 					"tag": "v23",
 				},
+				{
+					"new_sqlite_classes": ["RepoSessionIndex"],
+					"tag": "v24",
+				},
 			],
 			"worker_loaders": [
 				{
@@ -913,6 +933,10 @@
 					{
 						"class_name": "Mailbox",
 						"name": "MAILBOX",
+					},
+					{
+						"class_name": "RepoSessionIndex",
+						"name": "REPO_SESSION_INDEX",
 					},
 					{
 						"class_name": "StripePlanRefresh",

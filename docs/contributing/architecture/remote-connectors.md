@@ -92,8 +92,14 @@ that connector:
   defines the set of remote connectors for that session.
 
 Regular authenticated MCP and chat sessions load this array from the user's
-saved remote connector settings. Operators can manage those settings at
-`/account/remote-connectors`:
+saved remote connector settings. Background package runtimes do the same:
+package apps (when the runtime bridge builds caller context for capabilities or
+nested `packages.invoke`), package services, subscription handlers, jobs,
+workflows, HTTP invocation tokens, and webhook delivery. Hosted app serve
+(`servePackageAppRequest`) does not load remotes on the warm path; the runtime
+bridge loads them when user code needs capabilities.
+
+Operators can manage those settings at `/account/remote-connectors`:
 
 - **`instanceId`** is the user-chosen connector name. Names are unique per user
   and key `kody.remote[name]`.
@@ -130,8 +136,9 @@ Source: `packages/shared/src/chat.ts`,
    **`connector.jsonrpc`** envelopes.
 4. **Heartbeats** if the service stays connected for a long time.
 5. **Operator config:** save the connector and shared secret from
-   `/account/remote-connectors`; enabled + attached connectors are loaded into
-   normal Kody sessions so the registry merges your domain.
+   `/account/remote-connectors`; enabled + attached connectors load into MCP and
+   chat sessions and into package runtimes that build caller context, so the
+   registry merges your domain.
 
 ## Reference implementation
 

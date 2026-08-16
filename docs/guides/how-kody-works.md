@@ -2,9 +2,9 @@
 id: how_kody_works
 title: How Kody works
 summary:
-  The factory loop as a conversation: ask what kody-bot shipped, save the
-  answer as an export you can invoke from any agent, then a daily email that
-  stays quiet until something actually ships.
+  The factory loop as a conversation: ask what your favorite bot shipped,
+  save the answer as an export you can invoke from any agent, then a daily
+  email that stays quiet until something actually ships.
 category: platform
 ---
 
@@ -20,24 +20,33 @@ Agent notes — for AI agents explaining or recreating this loop:
 - Search for GitHub activity ranks the saved `githubAccessToken` secret —
   not `execute`, and not a GitHub integration or helper package (those
   would hide the `{{secret:githubAccessToken}}` placeholder in execute).
-  Memories stay in search structured content; they do not appear in the
-  `# Search results` markdown.
-- Before `package_save`, search `{ query: "package authoring lifecycle",
+  A matching memory can surface with that first search (here it names
+  kody-bot as the favorite bot). Later search and execute calls in the
+  same conversation do not repeat it.
+- Before creating the package, search `{ query: "package authoring lifecycle",
   domain: "coding" }` to find `coding_guide_get`, then `search` with
   `entity: "coding_guide_get:capability"` so `package_authoring` and
-  `package_lifecycle` are visible. Load those two guides, then save.
+  `package_lifecycle` are visible. Load those two guides. Coding agents
+  then use the git lane: `package_get_git_remote` with `create: true` and
+  a new `kody_id`, clone via `setup_commands`, write the export, push, and
+  `package_publish_external_push`. Tool-only agents (no local git) create
+  with `package_save` and update through a repo session (`repo_open_session`,
+  `repo_write_file` / `repo_edit_files`, `repo_commit`, `repo_run_checks`,
+  `repo_publish_session`) so they patch only the files that changed.
 - Fetch https://api.github.com/users/<login>/events/public with
   `Authorization: Bearer {{secret:githubAccessToken}}`. Treat a published
   release or a newly created public repository as "shipped."
 - GitHub has no webhook for one person's public activity. When they ask to
-  be notified, recommend a package-owned cron, not a webhook.
-- The scheduled wrapper must skip email_send when the list is empty.
-- execute can take a short memoryContext (task plus a couple of entities).
-  Relevant memories are appended to the execute text as
-  `## Relevant memories`. Search returns markdown (`# Search results`), not a
-  matches JSON object. Do not write memory unless the person asks.
-- Non-coding agents invoke the owned export with
-  packages.invoke({ kodyId, exportName, params }).
+  be notified, add a package-owned cron — do not wire a job into the first
+  save. The scheduled wrapper must skip email_send when the list is empty.
+- search and execute can take a short memoryContext (task plus a couple of
+  entities). Relevant memories surface on the first tool that retrieves
+  them in a conversation — usually search. Search returns markdown
+  (`# Search results`), not a matches JSON object. Do not write memory
+  unless the person asks.
+- Agents call the owned export from `execute` with a static
+  `kody:@scope/package/export` import. Use `packages.invoke` only when the
+  target name is data or the call must run in the package's own runtime.
 -->
 
 Kody turns a question you would ask again into code you own. The agent you
@@ -49,20 +58,25 @@ This page is the playbook. The same story is an interactive transcript at
 
 ## The loop
 
-1. **Ask once.** "What did kody-bot ship recently on GitHub?" Search finds the
-   saved `githubAccessToken` secret, then `execute` fetches that user's public
-   events with `Authorization: Bearer {{secret:githubAccessToken}}`. Filter to
-   published releases and new public repositories.
-2. **Save the answer shape.** Search the `coding` domain for `coding_guide_get`,
-   open entity detail, load `package_authoring` and `package_lifecycle`, then
-   create a package with a callable export and a no-argument scheduled wrapper.
-   The export returns the list (or "nothing new") and records the newest event
-   id in `packageStorage()`.
-3. **Ask again from any agent.** Search finds the owned package. Invoke it. A
-   phone agent does not rewrite the GitHub walk.
-4. **Get notified.** There is no GitHub webhook for one person's public
-   activity, so enable the package-owned daily cron. The wrapper calls the same
-   export and runs `email_send` only when the list is non-empty.
+1. **Ask once.** "What did my favorite bot ship recently on GitHub?" Search
+   finds the saved `githubAccessToken` secret and a memory that names kody-bot
+   as the favorite bot, then `execute` fetches that user's public events with
+   `Authorization: Bearer {{secret:githubAccessToken}}`. Filter to published
+   releases and new public repositories.
+2. **Save the answer shape.** Offer to make it a package. After they say yes,
+   search the `coding` domain for `coding_guide_get`, open entity detail, load
+   `package_authoring` and `package_lifecycle`, then create a package with a
+   callable export via the git lane (coding agents) or `package_save`
+   (tool-only). The export returns the list (or "nothing new") and records the
+   newest event id in `packageStorage()`.
+3. **Ask again from any agent.** "Anything interesting shipped by my favorite
+   bot recently?" Search finds the owned package. Invoke it. A phone agent does
+   not rewrite the GitHub walk.
+4. **Get notified.** Search first. There is no GitHub webhook for one person's
+   public activity, so add a package-owned daily cron through a repo session
+   (patch only the new wrapper and the changed manifest lines). The wrapper
+   calls the same export and runs `email_send` only when the list is non-empty.
+   Enable the job after invoking the wrapper once.
 
 ## What "shipped" means
 

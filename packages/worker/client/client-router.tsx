@@ -79,7 +79,10 @@ let activeNavigationPath: string | null = null
 // The pathname+search (no hash) the app last rendered. Popstate compares
 // against this to detect hash-only history moves, since `window.location`
 // has already changed by the time the event fires.
-let lastNotifiedDocumentPath: string | null = null
+let lastNotifiedDocumentPath: string | null =
+	typeof window === 'undefined'
+		? null
+		: `${window.location.pathname}${window.location.search}`
 
 function getCurrentDocumentPath() {
 	return `${window.location.pathname}${window.location.search}`
@@ -95,19 +98,67 @@ function getCurrentDocumentPath() {
  */
 const shellAreas = ['/account', '/admin']
 
+/** Live account/admin rail. Present only while a shell page is on screen. */
+export const persistentShellNavSelector = '[data-account-nav]'
+
 function isWithinArea(pathname: string, area: string) {
 	return pathname === area || pathname.startsWith(`${area}/`)
+}
+
+function pathnameOf(path: string) {
+	return path.split('?')[0] ?? ''
+}
+
+function isShellAreaPath(path: string) {
+	const pathname = pathnameOf(path)
+	return shellAreas.some((area) => isWithinArea(pathname, area))
 }
 
 /** Both paths may carry a search string; only the pathname decides the area. */
 export function isSameShellAreaNavigation(from: string | null, to: string) {
 	if (!from) return false
-	const fromPathname = from.split('?')[0] ?? ''
-	const toPathname = to.split('?')[0] ?? ''
 	return shellAreas.some(
 		(area) =>
-			isWithinArea(fromPathname, area) && isWithinArea(toPathname, area),
+			isWithinArea(pathnameOf(from), area) &&
+			isWithinArea(pathnameOf(to), area),
 	)
+}
+
+export function documentHasPersistentShell(
+	root: {
+		querySelector: (selector: string) => Element | null
+	} | null = typeof document === 'undefined' ? null : document,
+) {
+	return Boolean(root?.querySelector(persistentShellNavSelector))
+}
+
+/**
+ * View transitions are for real page changes. Tab switches inside a
+ * persistent shell stay instant — even when `from` was never recorded
+ * (first click after a full document load used to animate because
+ * `lastNotifiedDocumentPath` was still null).
+ */
+export function shouldUseViewTransition(input: {
+	from: string | null
+	to: string
+	canStart: boolean
+	prefersReducedMotion: boolean
+	hasPersistentShell?: boolean
+}) {
+	if (!input.canStart) return false
+	if (input.prefersReducedMotion) return false
+	if (input.from === input.to) return false
+	if (isSameShellAreaNavigation(input.from, input.to)) return false
+	// Full document load never recorded `from`. If the rail is already on
+	// screen and the destination is still a shell page, this is a tab click.
+	if (
+		input.from === null &&
+		input.hasPersistentShell &&
+		isShellAreaPath(input.to)
+	) {
+		return false
+	}
+	return true
 }
 
 function swapDom(onSwapped?: () => void) {
@@ -148,17 +199,16 @@ const viewTransitionScheduler = createViewTransitionScheduler(
 )
 
 function notify(onSwapped?: () => void) {
+	const to = getCurrentDocumentPath()
 	if (
-		!resolveViewTransitionStarter() ||
-		matchMedia('(prefers-reduced-motion: reduce)').matches ||
-		isSameShellAreaNavigation(
-			lastNotifiedDocumentPath,
-			getCurrentDocumentPath(),
-		) ||
-		// Hash-only moves stay on the same document. A view transition would
-		// snapshot the page and fight scroll restoration (the landing waitlist
-		// CTA is `#invite`).
-		getCurrentDocumentPath() === lastNotifiedDocumentPath
+		!shouldUseViewTransition({
+			from: lastNotifiedDocumentPath,
+			to,
+			canStart: Boolean(resolveViewTransitionStarter()),
+			prefersReducedMotion: matchMedia('(prefers-reduced-motion: reduce)')
+				.matches,
+			hasPersistentShell: documentHasPersistentShell(),
+		})
 	) {
 		// Instant path: drop any in-flight/queued VT so a superseded chain
 		// step cannot restart a transition after this swap.
@@ -240,6 +290,31 @@ export function registerRouteLoaders(loaders: Record<string, RouteLoader>) {
 	loaderMatchers.delete(loaders)
 }
 
+let registeredClientRoutes: Record<string, JSX.Element> = {}
+let clientRoutesRegistered = false
+
+/**
+ * Page-route registry used to decide whether a same-origin click should stay
+ * in the SPA. Companion documents (`/guides/:slug.md`, `/blog/rss.xml`) are
+ * not registered here — the worker serves those as raw responses.
+ */
+export function registerClientRoutes(routes: Record<string, JSX.Element>) {
+	registeredClientRoutes = routes
+	clientRoutesRegistered = Object.keys(routes).length > 0
+	routeMatchers.delete(routes)
+}
+
+/**
+ * True when this pathname is not a client-rendered page, so the browser
+ * should leave the SPA (markdown twins, JSON companions, RSS, 404s the
+ * worker owns). With no registry yet, assume every path is in-app so unit
+ * tests that never register routes keep the historical intercept behavior.
+ */
+export function shouldLeaveDocumentForPath(pathname: string) {
+	if (!clientRoutesRegistered) return false
+	return matchRoute(pathname, registeredClientRoutes) === null
+}
+
 export function matchRouteLoader(
 	path: string | URL,
 	loaders: Record<string, RouteLoader> = registeredRouteLoaders,
@@ -295,6 +370,7 @@ export function shouldRouterHandleClick(
 
 	const destination = new URL(href, window.location.href)
 	if (destination.origin !== window.location.origin) return false
+	if (shouldLeaveDocumentForPath(destination.pathname)) return false
 	return true
 }
 
@@ -331,6 +407,7 @@ function getPrefetchableLink(
 
 	const destination = new URL(href, window.location.href)
 	if (destination.origin !== window.location.origin) return null
+	if (shouldLeaveDocumentForPath(destination.pathname)) return null
 	if (
 		`${destination.pathname}${destination.search}` ===
 		`${window.location.pathname}${window.location.search}`
@@ -946,6 +1023,10 @@ async function navigateInternal(to: string, options?: NavigationRunOptions) {
 	const destination = new URL(to, window.location.href)
 	if (destination.origin !== window.location.origin) {
 		window.location.assign(destination.toString())
+		return
+	}
+	if (shouldLeaveDocumentForPath(destination.pathname)) {
+		window.location.assign(getPathWithSearchAndHashFromUrl(destination))
 		return
 	}
 
