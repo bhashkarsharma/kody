@@ -339,6 +339,29 @@ class McpClientHubBase extends DurableObject<Env> {
 		const serverName =
 			this.manager.listServers().find((server) => server.id === input.serverId)
 				?.name ?? null
+		const existingConnection = this.buildConnectResult(input.serverId)
+		if (existingConnection.state === 'ready') {
+			return resolveMcpOAuthCallbackOutcome({
+				sdkAuthSuccess: true,
+				sdkAuthError: null,
+				serverId: input.serverId,
+				serverName,
+				connection: existingConnection,
+			})
+		}
+		if (
+			existingConnection.state === 'connected' ||
+			existingConnection.state === 'discovering' ||
+			existingConnection.state === 'connecting'
+		) {
+			return {
+				serverId: input.serverId,
+				authSuccess: true,
+				authError: null,
+				serverName,
+				authorizationNeeded: false,
+			}
+		}
 		try {
 			const connection = await this.restartServerAuthorization(input)
 			if (connection.state === 'ready') {
