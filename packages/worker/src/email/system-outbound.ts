@@ -17,6 +17,8 @@ type SystemOutboundEnv = Pick<
 	| 'CLOUDFLARE_ACCOUNT_ID'
 	| 'CLOUDFLARE_API_BASE_URL'
 	| 'CLOUDFLARE_API_TOKEN'
+	| 'AGENTMAIL_API_KEY'
+	| 'AGENTMAIL_FROM'
 > & { SYSTEM_EMAIL_DOMAIN?: string | null }
 
 /**

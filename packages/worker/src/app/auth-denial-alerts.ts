@@ -26,6 +26,8 @@ type AuthDenialAlertEnv = {
 	CLOUDFLARE_ACCOUNT_ID?: string
 	CLOUDFLARE_API_BASE_URL?: string
 	CLOUDFLARE_API_TOKEN?: string
+	AGENTMAIL_API_KEY?: string
+	AGENTMAIL_FROM?: string
 	BUNDLE_ARTIFACTS_KV?: KVNamespace
 }
 
