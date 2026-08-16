@@ -9,6 +9,14 @@ type CloudflareEmailClientConfig = {
 	accountId?: string
 	apiBaseUrl?: string
 	apiToken?: string
+	// AgentMail transport (fork trim): when `agentmailApiKey` is configured,
+	// outbound mail is sent through the AgentMail REST API
+	// (`POST /v0/inboxes/{inbox}/messages/send`) from `agentmailFrom` instead
+	// of Cloudflare Email Sending. This lets a fork route Kody's transactional
+	// email (verification, password reset, alerts) through an agentmail.to
+	// inbox without onboarding a Cloudflare Email Sending domain.
+	agentmailApiKey?: string
+	agentmailFrom?: string
 }
 
 const defaultCloudflareApiBaseUrl = 'https://api.cloudflare.com'
@@ -131,6 +139,73 @@ async function sendViaCloudflareApi(
 	}
 }
 
+async function sendViaAgentMail(
+	config: { apiKey: string; inboxId: string },
+	message: OutboundEmail,
+): Promise<CloudflareSendResult> {
+	if (!config.inboxId) {
+		return { ok: false, error: 'AGENTMAIL_FROM is not configured.' }
+	}
+	const endpoint = new URL(
+		`v0/inboxes/${encodeURIComponent(config.inboxId)}/messages/send`,
+		'https://api.agentmail.to/',
+	)
+	let response: Response
+	try {
+		response = await fetch(endpoint.toString(), {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${config.apiKey}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				to: message.to,
+				subject: message.subject,
+				text: message.text,
+				html: message.html,
+			}),
+		})
+	} catch (error) {
+		console.warn('agentmail-send-request-failed', error)
+		return {
+			ok: false,
+			error:
+				error instanceof Error
+					? error.message
+					: 'AgentMail request failed.',
+		}
+	}
+
+	const payload = (await response.json()) as {
+		error?: { message?: string }
+		message_id?: string
+		id?: string
+	}
+	if (!response.ok) {
+		console.warn(
+			'agentmail-send-failed',
+			JSON.stringify({
+				status: response.status,
+				body: payload,
+				to: message.to,
+				from: message.from,
+				subject: message.subject,
+			}),
+		)
+		return {
+			ok: false,
+			error:
+				payload.error?.message ??
+				`AgentMail returned HTTP ${response.status}.`,
+		}
+	}
+
+	return {
+		ok: true,
+		messageId: payload.message_id ?? payload.id ?? null,
+	}
+}
+
 export async function sendCloudflareEmail(
 	config: CloudflareEmailClientConfig,
 	message: Omit<OutboundEmail, 'replyTo' | 'headers' | 'attachments'> &
@@ -146,6 +221,24 @@ export async function sendCloudflareEmail(
 		typeof config.apiBaseUrl === 'string' && config.apiBaseUrl.trim().length > 0
 			? config.apiBaseUrl.trim()
 			: defaultCloudflareApiBaseUrl
+	// Fork trim: AgentMail takes precedence when its API key is configured.
+	const agentmailApiKey =
+		typeof config.agentmailApiKey === 'string' &&
+		config.agentmailApiKey.trim().length > 0
+			? config.agentmailApiKey.trim()
+			: ''
+	if (agentmailApiKey) {
+		return sendViaAgentMail(
+			{
+				apiKey: agentmailApiKey,
+				inboxId:
+					typeof config.agentmailFrom === 'string'
+						? config.agentmailFrom.trim()
+						: '',
+			},
+			normalized,
+		)
+	}
 	const hasApiConfig =
 		typeof config.apiToken === 'string' &&
 		config.apiToken.trim().length > 0 &&

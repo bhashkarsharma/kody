@@ -147,6 +147,8 @@ export async function sendSystemEmail(input: {
 				accountId: input.env.CLOUDFLARE_ACCOUNT_ID,
 				apiBaseUrl: input.env.CLOUDFLARE_API_BASE_URL,
 				apiToken: input.env.CLOUDFLARE_API_TOKEN,
+				agentmailApiKey: input.env.AGENTMAIL_API_KEY,
+				agentmailFrom: input.env.AGENTMAIL_FROM,
 			},
 			{
 				to: to.length === 1 ? to[0]! : to,

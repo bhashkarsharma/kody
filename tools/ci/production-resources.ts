@@ -266,6 +266,41 @@ function ensureKvNamespace({
 	return { title: created.title, id: created.id }
 }
 
+/**
+ * Vectorize index for MCP capability search. Deploys fail when a Worker
+ * binds a nonexistent index, so ensure `kody-capabilities-prod` (the name
+ * committed in `env.production.vectorize`) exists before deploy. Dimensions
+ * must match the embedding model in
+ * `packages/worker/src/vectorize/embedding.ts`
+ * (`@cf/baai/bge-small-en-v1.5`, 384 dimensions, `cls` pooling).
+ */
+function ensureVectorizeIndex(indexName: string) {
+	if (options.dryRun) {
+		console.error(`[dry-run] ensure Vectorize index: ${indexName}`)
+		return
+	}
+	const create = runWrangler(
+		[
+			'vectorize',
+			'create',
+			indexName,
+			'--dimensions=384',
+			'--metric=cosine',
+		],
+		{ input: 'n\n', quiet: true },
+	)
+	const output = `${create.stdout}${create.stderr}`.toLowerCase()
+	if (create.status === 0) {
+		console.error(`Created Vectorize index: ${indexName}`)
+		return
+	}
+	if (output.includes('already exists') || output.includes('exists')) {
+		console.error(`Vectorize index exists: ${indexName}`)
+		return
+	}
+	fail(`Failed to create Vectorize index: ${indexName}`)
+}
+
 async function resolveProductionBindings({
 	wranglerConfigPath,
 	kvTitleOverride,
@@ -574,6 +609,8 @@ async function ensureProductionResources(options: CliOptions) {
 		name: bindings.communityAssetsBucketName,
 		dryRun: options.dryRun,
 	})
+	// Vectorize index for MCP capability search (see ensureVectorizeIndex).
+	ensureVectorizeIndex('kody-capabilities-prod')
 	const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim()
 	const apiToken = process.env.CLOUDFLARE_API_TOKEN?.trim()
 	const zoneId = process.env.CLOUDFLARE_ZONE_ID?.trim()
@@ -654,27 +691,44 @@ async function ensureProductionResources(options: CliOptions) {
 		dryRun: options.dryRun,
 		committedUserEmailDomain: bindings.committedUserEmailDomain,
 	})
-	const emailEventSubscription = await ensureEmailSendingEventSubscription({
-		accountId: accountId ?? 'dry-run-account',
-		apiToken: apiToken ?? 'dry-run-token',
-		name: truncateWithSuffix(bindings.workerName, '-email-delivery-events', 63),
-		queueId: emailDeliveryQueue.id,
-		domain: emailSendingDomain,
-		zoneId: zoneId ?? 'dry-run-zone',
-		dryRun: options.dryRun,
-	})
-	const artifactsEventSubscription =
-		await ensureArtifactsAccountEventSubscription({
+	const skipCloudflareEventSubscriptions =
+		process.env.SKIP_CLOUDFLARE_EVENT_SUBSCRIPTIONS === '1'
+	// This fork routes email through AgentMail, so the Cloudflare Email
+	// Sending event subscription is not applicable. Forks without the
+	// Artifacts product also cannot create the artifacts event subscription.
+	// Set SKIP_CLOUDFLARE_EVENT_SUBSCRIPTIONS=1 (the deploy workflow default)
+	// to skip both. Upstream production keeps them.
+	let emailEventSubscription = {
+		id: 'skipped',
+		name: 'skipped',
+	}
+	let artifactsEventSubscription = {
+		id: 'skipped',
+		name: 'skipped',
+	}
+	if (!skipCloudflareEventSubscriptions) {
+		emailEventSubscription = await ensureEmailSendingEventSubscription({
 			accountId: accountId ?? 'dry-run-account',
 			apiToken: apiToken ?? 'dry-run-token',
-			name: truncateWithSuffix(
-				bindings.workerName,
-				'-artifacts-lifecycle-events',
-				63,
-			),
-			queueId: artifactsRepoEventsQueue.id,
+			name: truncateWithSuffix(bindings.workerName, '-email-delivery-events', 63),
+			queueId: emailDeliveryQueue.id,
+			domain: emailSendingDomain,
+			zoneId: zoneId ?? 'dry-run-zone',
 			dryRun: options.dryRun,
 		})
+		artifactsEventSubscription =
+			await ensureArtifactsAccountEventSubscription({
+				accountId: accountId ?? 'dry-run-account',
+				apiToken: apiToken ?? 'dry-run-token',
+				name: truncateWithSuffix(
+					bindings.workerName,
+					'-artifacts-lifecycle-events',
+					63,
+				),
+				queueId: artifactsRepoEventsQueue.id,
+				dryRun: options.dryRun,
+			})
+	}
 
 	const packageAppHostnames = [
 		bindings.packageAppHostname,
@@ -713,6 +767,7 @@ async function ensureProductionResources(options: CliOptions) {
 			SYSTEM_EMAIL_DOMAIN: process.env.SYSTEM_EMAIL_DOMAIN,
 			LEGACY_USER_EMAIL_DOMAINS: process.env.LEGACY_USER_EMAIL_DOMAINS,
 			LEGACY_SYSTEM_EMAIL_DOMAINS: process.env.LEGACY_SYSTEM_EMAIL_DOMAINS,
+			AGENTMAIL_FROM: process.env.AGENTMAIL_FROM,
 		},
 	})
 

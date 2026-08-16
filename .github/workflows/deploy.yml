@@ -289,6 +289,8 @@ jobs:
           SYSTEM_EMAIL_DOMAIN: ${{ vars.SYSTEM_EMAIL_DOMAIN }}
           LEGACY_USER_EMAIL_DOMAINS: ${{ vars.LEGACY_USER_EMAIL_DOMAINS }}
           LEGACY_SYSTEM_EMAIL_DOMAINS: ${{ vars.LEGACY_SYSTEM_EMAIL_DOMAINS }}
+          SKIP_CLOUDFLARE_EVENT_SUBSCRIPTIONS: ${{ vars.SKIP_CLOUDFLARE_EVENT_SUBSCRIPTIONS || '1' }}
+          AGENTMAIL_FROM: ${{ vars.AGENTMAIL_FROM }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
         run: |
@@ -327,6 +329,7 @@ jobs:
           KIT_API_KEY: ${{ secrets.KIT_API_KEY }}
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
         run: >
           node tools/ci/sync-worker-secrets.ts --env production --config
           "$WRANGLER_CONFIG" --set-from-env COOKIE_SECRET
@@ -339,7 +342,7 @@ jobs:
           --set-from-env-optional X_CLIENT_ID --set-from-env-optional
           X_CLIENT_SECRET --set-from-env-optional KIT_API_KEY
           --set-from-env-optional STRIPE_SECRET_KEY --set-from-env-optional
-          STRIPE_WEBHOOK_SECRET
+          STRIPE_WEBHOOK_SECRET --set-from-env-optional AGENTMAIL_API_KEY
 
       # Runtime-lane secret allowlist (ADR 0016): only the secrets the
       # package runtime lane actually reads. COOKIE_SECRET/SECRET_STORE_KEY
@@ -675,15 +678,13 @@ jobs:
     runs-on: ubuntu-latest
     name: 📟 Deploy status worker
     timeout-minutes: 8
-    # Deploys after the main worker so the status prober never probes a
-    # production worker that predates the endpoints it expects (for example
-    # /health/components), which would open spurious incidents.
+    # Disabled in this fork: the status worker hardcodes Kent's zones
+    # (status.kody.codes / status.heykody.dev) which do not exist in this
+    # fork's Cloudflare account.
     needs:
       - sha-guard
       - deploy
-    if: >-
-      needs.sha-guard.outputs.should_deploy == 'true' &&
-      needs.sha-guard.outputs.deploy_status_worker == 'true'
+    if: false
     environment:
       name: production
       url: https://status.kody.codes
@@ -783,10 +784,10 @@ jobs:
     runs-on: ubuntu-latest
     name: 🛟 Deploy DR backup control plane
     timeout-minutes: 8
+    # Disabled in this fork: the DR backup control plane lives in Kent's
+    # separate Cloudflare account and is not part of a personal fork.
     needs: sha-guard
-    if: >-
-      needs.sha-guard.outputs.should_deploy == 'true' &&
-      needs.sha-guard.outputs.deploy_backup_control_plane == 'true'
+    if: false
     environment:
       name: production
       url: https://kody-dr.kentcdodds.com

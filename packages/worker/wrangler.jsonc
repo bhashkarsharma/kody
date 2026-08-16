@@ -193,7 +193,6 @@
 				"enabled": true,
 				"traces": {
 					"enabled": true,
-					"destinations": ["sentry-otlp-traces"],
 				},
 			},
 			"worker_loaders": [
@@ -445,7 +444,7 @@
 			],
 			"vars": {
 				"SENTRY_ENVIRONMENT": "production",
-				"SIGNUP_MODE": "invite",
+				"SIGNUP_MODE": "open",
 				// JSON number on purpose: buildSentryOptions reads the raw
 				// runtime env and only honors a number here (string secrets
 				// are ignored). 0 disables Sentry SDK trace sampling because
@@ -454,70 +453,18 @@
 				// capture is unaffected.
 				"SENTRY_TRACES_SAMPLE_RATE": 0,
 				"ARTIFACTS_NAMESPACE": "production",
-				// Origin hosted package apps are served from. Must stay a
-				// separate registrable domain from APP_BASE_URL — that is what
-				// makes package code cross-site from the app origin, so
-				// `kody_session` never attaches to it. Intentionally unset for
-				// preview and tests, which keep serving package apps inline on
-				// the app origin.
-				//
-				// Production deploy publishes apex and wildcard zone routes for
-				// this host on the runtime Worker (never a custom domain in the
-				// package-app zone); DNS placeholder records are ensured
-				// separately. The routes deliberately do not live here, because
-				// Wrangler resolves *local dev* request URLs against the first
-				// configured route — every `npm run dev` request would arrive
-				// as https://kody.run/... and send local logins to the real
-				// domain. See docs/contributing/setup-manifest.md.
-				"PACKAGE_APP_BASE_URL": "https://kody.run",
-				// Previous package-app apex kept attached (and dual-served)
-				// during the kodyapps.dev → kody.run window. Generated runtime
-				// zone routes replace the whole set, so omitting this host
-				// would detach `*.kodyapps.dev` and delete its DNS.
-				"PACKAGE_APP_LEGACY_HOSTS": "kodyapps.dev",
-				// Email domains are committed (not just GitHub Actions vars) so
-				// they can never silently rederive from APP_BASE_URL. Canonical
-				// email lives on kody.codes; the LEGACY_* lists also accept
-				// inbound mail for heykody.app / heykody.dev addresses on the
-				// same inboxes. Empty those lists when retiring the old
-				// domains' email DNS. Outbound always sends from the canonical
-				// domains, which requires Email Routing + Email Sending
-				// verification on the kody.codes zone.
-				"USER_EMAIL_DOMAIN": "inbox.kody.codes",
-				"SYSTEM_EMAIL_DOMAIN": "kody.codes",
-				"LEGACY_USER_EMAIL_DOMAINS": "inbox.heykody.app,inbox.heykody.dev",
-				"LEGACY_SYSTEM_EMAIL_DOMAINS": "heykody.app,heykody.dev",
-				// Fathom Analytics site id (public, non-secret). Production
-				// only so local dev, preview, and tests never send pageviews.
-				"FATHOM_SITE_ID": "WKKSDJGN",
-				// Public (non-secret) Stripe Price ids for production
-				// subscriptions. Coupled to the live Stripe account: if a
-				// price is regenerated in Stripe, update the value in the
-				// same change or subscription plan matching silently degrades
-				// to the kody_plan metadata fallback. Checkout sessions are
-				// created server-side for authenticated users (no public
-				// Payment Link). STRIPE_STANDARD_PRICE_ID is the $12/month
-				// price on the "Kody Standard" product;
-				// STRIPE_STANDARD_YEARLY_PRICE_ID is $120/year (two months
-				// free). STRIPE_PRO_PRICE_ID is the $29/month price on the
-				// "Kody Pro" product; STRIPE_PRO_YEARLY_PRICE_ID is $288/year.
-				// Retired $5/$20 monthly prices stay in Stripe and are still
-				// matched in billing-config for existing subscribers.
-				"STRIPE_STANDARD_PRICE_ID": "price_1U3sg6LAQpAnsYszGeL2nc8O",
-				"STRIPE_STANDARD_YEARLY_PRICE_ID": "price_1U3sg6LAQpAnsYszqq9abwIY",
-				"STRIPE_PRO_PRICE_ID": "price_1U3sg6LAQpAnsYszlVpEIFGx",
-				"STRIPE_PRO_YEARLY_PRICE_ID": "price_1U3sg7LAQpAnsYszpozAEFUi",
-				// Disaster-recovery exporter → locked R2 bucket in the KCD
-				// (DR) account. The companion S3 credentials are Worker
-				// secrets set out-of-band via the Cloudflare API.
-				"DR_EXPORT_ENABLED": "true",
-				"DR_BACKUP_ACCOUNT_ID": "a41d50ecaf0ae0f86dd1824ef6729cb2",
-				"DR_BACKUP_BUCKET_NAME": "kody-production-backups",
-				// Public verification material shared with the DR control plane.
-				// The matching signing private key remains control-plane-only.
-				"BACKUP_MANIFEST_SIGNING_KEY_ID": "kody-dr-2026-07",
-				"BACKUP_MANIFEST_VERIFYING_PUBLIC_KEY_SPKI_BASE64": "MCowBQYDK2VwAyEA3jqjPcGTzWefE5PGyRBdUQKAEj7FFGtFIz+223sbt9A=",
-			},
+				// Fork trim: hosted package apps are served inline on the
+				// app origin (no separate registrable domain configured).
+				// Leaving PACKAGE_APP_BASE_URL unset skips the package-app
+				// zone route/DNS publishing on the runtime worker.
+				"PACKAGE_APP_BASE_URL": "",
+				"PACKAGE_APP_LEGACY_HOSTS": "",
+				// Fork trim: email is routed through AgentMail (see
+				// src/app/email/cloudflare-email.ts) instead of Cloudflare
+				// Email Sending. AGENTMAIL_FROM is the agentmail.to inbox the
+				// Worker sends from; the deploy workflow overlays it from the
+				// AGENTMAIL_FROM repository variable.
+				"AGENTMAIL_FROM": "",
 		},
 		"preview": {
 			// Fresh preview scripts replay the whole migration chain, so it must

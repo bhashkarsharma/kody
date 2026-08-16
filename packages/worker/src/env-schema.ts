@@ -281,6 +281,11 @@ export const EnvSchema = object({
 	CLOUDFLARE_ACCOUNT_ID: optionalNonEmptyStringSchema,
 	CLOUDFLARE_API_TOKEN: optionalNonEmptyStringSchema,
 	CLOUDFLARE_API_BASE_URL: optionalUrlStringSchema,
+	// Fork trim: AgentMail transport for outbound email. When AGENTMAIL_API_KEY
+	// is set, sendCloudflareEmail routes through the AgentMail REST API from
+	// the AGENTMAIL_FROM inbox instead of Cloudflare Email Sending.
+	AGENTMAIL_API_KEY: optionalNonEmptyStringSchema,
+	AGENTMAIL_FROM: optionalNonEmptyStringSchema,
 	ARTIFACTS_NAMESPACE: optionalNonEmptyStringSchema,
 	// Worker-to-Worker Artifacts binding. Present in production/preview when
 	// wrangler `artifacts` is configured; local/tests fall back to REST.

@@ -149,6 +149,8 @@ export function createPasswordResetRequestHandler(env: Env) {
 								accountId: env.CLOUDFLARE_ACCOUNT_ID,
 								apiBaseUrl: env.CLOUDFLARE_API_BASE_URL,
 								apiToken: env.CLOUDFLARE_API_TOKEN,
+								agentmailApiKey: env.AGENTMAIL_API_KEY,
+								agentmailFrom: env.AGENTMAIL_FROM,
 							},
 							{
 								to: normalizedEmail,
