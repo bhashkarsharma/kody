@@ -20,6 +20,10 @@ import {
 	consoleWarn,
 } from '#worker/test-support/console-spies.ts'
 import { createInMemoryUserMeterEnv } from '#worker/test-support/user-meter.ts'
+import {
+	insertRepoSession,
+	listRepoSessionsByUser,
+} from '#worker/repo/repo-sessions.ts'
 import { createInMemoryRepoSessionIndexEnv } from '#worker/test-support/repo-session-index.ts'
 import { userMeterRpc } from '#worker/entitlements/user-meter-client.ts'
 import { applyAllMigrations } from '#worker/test-support/apply-all-migrations.ts'
@@ -798,7 +802,6 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			{ id: 'src-1', user_id: userAaa, published_commit: 'abc123' },
 			{ id: 'src-2', user_id: userBbb, published_commit: 'def456' },
 		],
-		repo_sessions: [{ id: 'rs-1', user_id: userAaa }],
 		password_resets: [
 			{ id: 1, user_id: 1 },
 			{ id: 2, user_id: 1 },
@@ -1215,6 +1218,25 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 			get: () => ({ fetch: doFetchMock }),
 		},
 	})
+	await insertRepoSession(env, {
+		id: 'rs-1',
+		user_id: userAaa,
+		source_id: 'src-1',
+		source_repo_id: '',
+		session_branch: 'sessions/rs-1',
+		source_branch: 'main',
+		base_commit: 'abc123',
+		source_root: '/',
+		conversation_id: null,
+		status: 'active',
+		expires_at: null,
+		last_checkpoint_at: null,
+		last_checkpoint_commit: null,
+		last_check_run_id: null,
+		last_check_tree_hash: null,
+		created_at: '2026-07-05T00:00:00.000Z',
+		updated_at: '2026-07-05T00:00:00.000Z',
+	})
 
 	// password_resets.user_id is the database integer id; the deletion
 	// service must use the dbUserId (1) to clear the deleted user's reset
@@ -1262,7 +1284,7 @@ test('deleteUserAccount cascades user-scoped rows for the requested user', async
 	expect(rows.entity_sources).toEqual([
 		{ id: 'src-2', user_id: userBbb, published_commit: 'def456' },
 	])
-	expect(rows.repo_sessions).toEqual([])
+	await expect(listRepoSessionsByUser(env, userAaa)).resolves.toEqual([])
 	expect(deletedEmailBlobKeys.sort()).toEqual([
 		'email-raw:v1:user-aaa/em-1',
 		'email-raw:v1:user-aaa/em-2',
@@ -1921,6 +1943,31 @@ test('account deletion reports missing Durable Object / blob bindings and remain
 			deleting_at: expect.any(String),
 		}),
 	])
+})
+
+test('deleteUserAccount fails closed when REPO_SESSION_INDEX is missing', async () => {
+	const { db, rows } = createTestDb({
+		users: [{ id: 1, email: 'a@example.com', stable_user_id: 'user-aaa' }],
+		mcp_memories: [{ id: 'memory-a', user_id: 'user-aaa' }],
+	})
+	const env = createSuccessfulDeletionEnv(db)
+	const envWithoutIndex = { ...env }
+	delete envWithoutIndex.REPO_SESSION_INDEX
+	await expect(
+		deleteUserAccount({
+			env: envWithoutIndex,
+			dbUserId: 1,
+			mcpUserId: 'user-aaa',
+		}),
+	).rejects.toBeInstanceOf(AccountDeletionInventoryError)
+	expect(rows.users).toEqual([
+		expect.objectContaining({
+			id: 1,
+			email: 'a@example.com',
+			deleting_at: expect.any(String),
+		}),
+	])
+	expect(rows.mcp_memories).toEqual([{ id: 'memory-a', user_id: 'user-aaa' }])
 })
 
 test('deleteUserAccount fails closed when preflight inventory cannot be read', async () => {
